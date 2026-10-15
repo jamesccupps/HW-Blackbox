@@ -1,0 +1,5 @@
+* text=auto
+# batch files need Windows line endings
+*.cmd text eol=crlf
+*.png binary
+*.dll binary

@@ -1,0 +1,225 @@
+"""What HW Blackbox asks Windows directly, through ctypes: every process in one call, the TCP listeners, the sessions
+and who is signed in, priorities, tokens. (x64 only: the structures below are laid out for 64-bit Windows.)"""
+import collections
+import ctypes
+import os
+import socket
+import struct
+from ctypes import wintypes
+
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+adv = ctypes.WinDLL("advapi32", use_last_error=True)
+ntdll = ctypes.WinDLL("ntdll")
+iphlp = ctypes.WinDLL("iphlpapi")
+wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+
+k32.GetCurrentProcess.restype = wintypes.HANDLE
+k32.GetCurrentThread.restype = wintypes.HANDLE
+k32.OpenProcess.restype = wintypes.HANDLE
+k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+k32.CloseHandle.argtypes = [wintypes.HANDLE]
+k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+k32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+k32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+k32.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+ntdll.NtQuerySystemInformation.argtypes = [ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
+                                           ctypes.POINTER(ctypes.c_ulong)]
+ntdll.NtQuerySystemInformation.restype = ctypes.c_long
+iphlp.GetExtendedTcpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+                                      wintypes.ULONG, ctypes.c_int, wintypes.ULONG]
+iphlp.GetExtendedTcpTable.restype = wintypes.DWORD
+wts.WTSEnumerateSessionsW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                                      ctypes.POINTER(wintypes.DWORD)]
+wts.WTSQuerySessionInformationW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+                                            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+
+ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
+THREAD_PRIORITY_ABOVE_NORMAL = 1
+THREAD_PRIORITY_HIGHEST = 2
+EPOCH_1601 = 11644473600
+
+# every process in one call -----------------------------------------------------------------------------------------
+
+Proc = collections.namedtuple("Proc", "name ppid session created cpu private")
+
+
+def process_snapshot():
+    """{pid: Proc(name, parent pid, session, created (epoch s), CPU time (100 ns units), private bytes)} for every
+    process, from one NtQuerySystemInformation(SystemProcessInformation) call, about 10 ms. Asking process by process
+    (psutil) takes seconds, and can't open some of them."""
+    size = 1 << 20
+    while True:
+        buf = ctypes.create_string_buffer(size)
+        need = ctypes.c_ulong(0)
+        st = ntdll.NtQuerySystemInformation(5, buf, size, ctypes.byref(need)) & 0xFFFFFFFF
+        if st == 0:
+            break
+        if st != 0xC0000004 or size > 1 << 27:                    # (STATUS_INFO_LENGTH_MISMATCH: grow and again)
+            raise OSError("NtQuerySystemInformation: 0x%08X" % st)
+        size = max(size * 2, need.value + 65536)
+    out, off = {}, 0
+    while True:
+        # SYSTEM_PROCESS_INFORMATION (x64): CreateTime @32, UserTime @40, KernelTime @48, ImageName @56 (length) and
+        # @64 (buffer), UniqueProcessId @80, InheritedFromUniqueProcessId @88, SessionId @100, PagefileUsage @184
+        nxt = struct.unpack_from("<I", buf, off)[0]
+        created, user, kernel = struct.unpack_from("<qqq", buf, off + 32)
+        nlen, nptr = struct.unpack_from("<H", buf, off + 56)[0], struct.unpack_from("<Q", buf, off + 64)[0]
+        pid, ppid = struct.unpack_from("<QQ", buf, off + 80)
+        session = struct.unpack_from("<I", buf, off + 100)[0]
+        private = struct.unpack_from("<Q", buf, off + 184)[0]
+        name = ctypes.wstring_at(nptr, nlen // 2) if nptr and nlen else ("System Idle Process" if pid == 0 else "?")
+        out[pid] = Proc(name, ppid, session, created / 1e7 - EPOCH_1601 if created else 0.0, user + kernel, private)
+        if not nxt:
+            break
+        off += nxt
+    return out
+
+
+# the TCP listeners -------------------------------------------------------------------------------------------------
+
+TCP_TABLE_OWNER_PID_LISTENER = 3
+
+
+def tcp_listeners():
+    """{(ip, port): pid} for every listening TCP socket, IPv4 and IPv6, from Windows' own listener table
+    (GetExtendedTcpTable with TCP_TABLE_OWNER_PID_LISTENER).
+    Not the full table filtered by state, as psutil, netstat and Get-NetTCPConnection do: on some Windows builds
+    (seen on Insider build 28120) that state field is garbage. Listeners come back as 0, 1, 2 or 6, and bound
+    sockets of outgoing connections as LISTEN, so those tools list the wrong ports. The listener table is right."""
+    out = {}
+    for family in (socket.AF_INET, socket.AF_INET6):
+        size = wintypes.DWORD(0)
+        iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        rc = 0
+        for _ in range(4):
+            buf = ctypes.create_string_buffer(size.value + 4096)
+            size = wintypes.DWORD(len(buf))
+            rc = iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
+            if rc != 122:                        # ERROR_INSUFFICIENT_BUFFER: the table grew meanwhile, again
+                break
+        if rc:
+            raise OSError(rc, "GetExtendedTcpTable")
+        for i in range(struct.unpack_from("<I", buf, 0)[0]):
+            if family == socket.AF_INET:         # MIB_TCPROW_OWNER_PID: state, local addr, port, remote x2, pid
+                _st, addr, port, _ra, _rp, pid = struct.unpack_from("<IIIIII", buf, 4 + i * 24)
+                ip = socket.inet_ntoa(struct.pack("<I", addr))
+            else:                                # MIB_TCP6ROW_OWNER_PID: addr[16], scope, port, remote..., state, pid
+                o = 4 + i * 56
+                ip = socket.inet_ntop(socket.AF_INET6, buf.raw[o:o + 16])
+                port = struct.unpack_from("<I", buf, o + 20)[0]
+                pid = struct.unpack_from("<I", buf, o + 52)[0]
+            if pid:
+                out[(ip, socket.ntohs(port & 0xFFFF))] = pid
+    return out
+
+
+# sessions and users ------------------------------------------------------------------------------------------------
+
+WTS_STATES = {0: "active", 1: "connected", 2: "connecting", 3: "shadowing", 4: "disconnected", 5: "idle",
+              6: "listening", 7: "reset", 8: "down", 9: "starting"}
+
+
+def _wts_text(session, info_class):
+    ptr, n = ctypes.c_void_p(), wintypes.DWORD()
+    if not wts.WTSQuerySessionInformationW(None, session, info_class, ctypes.byref(ptr), ctypes.byref(n)):
+        return None
+    try:
+        return ctypes.wstring_at(ptr.value) if ptr.value else None
+    finally:
+        wts.WTSFreeMemory(ptr)
+
+
+def sessions():
+    """[{"id", "state", "user", "station"}] for every Windows session that has a user (signed in, locked or
+    disconnected)."""
+    ptr, count = ctypes.c_void_p(), wintypes.DWORD()
+    if not wts.WTSEnumerateSessionsW(None, 0, 1, ctypes.byref(ptr), ctypes.byref(count)):
+        return []
+    out = []
+    try:
+        for i in range(count.value):                # WTS_SESSION_INFOW (x64): SessionId @0, pWinStationName @8, State @16
+            base = ptr.value + i * 24
+            sid = ctypes.c_uint32.from_address(base).value
+            station_p = ctypes.c_void_p.from_address(base + 8).value
+            state = ctypes.c_int.from_address(base + 16).value
+            user = _wts_text(sid, 5)                # WTSUserName
+            if not user:
+                continue
+            domain = _wts_text(sid, 7) or ""        # WTSDomainName
+            out.append({"id": sid, "state": WTS_STATES.get(state, str(state)), "user": user, "domain": domain,
+                        "station": ctypes.wstring_at(station_p) if station_p else ""})
+    finally:
+        wts.WTSFreeMemory(ptr)
+    return out
+
+
+def console_session():
+    """The session on the physical screen and keyboard (None if none)."""
+    sid = k32.WTSGetActiveConsoleSessionId()
+    return None if sid == 0xFFFFFFFF else sid
+
+
+def session_of(pid=None):
+    sid = wintypes.DWORD()
+    return sid.value if k32.ProcessIdToSessionId(pid or os.getpid(), ctypes.byref(sid)) else None
+
+
+def user_name():
+    """This process's user name (not the USERNAME variable, which a caller can set)."""
+    n = wintypes.DWORD(257)
+    buf = ctypes.create_unicode_buffer(257)
+    if adv.GetUserNameW(buf, ctypes.byref(n)):
+        return buf.value
+    return os.environ.get("USERNAME") or "unknown"
+
+
+def is_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def token_sid():
+    """This process's user SID, as text ("S-1-5-18" is SYSTEM)."""
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    tok = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(tok)):
+        return None
+    try:
+        buf = ctypes.create_string_buffer(256)
+        n = wintypes.DWORD()
+        if not adv.GetTokenInformation(tok, 1, buf, 256, ctypes.byref(n)):     # TokenUser
+            return None
+        sid = ctypes.c_void_p.from_buffer(buf).value
+        out = ctypes.c_void_p()
+        if not adv.ConvertSidToStringSidW(sid, ctypes.byref(out)):
+            return None
+        try:
+            return ctypes.wstring_at(out.value)
+        finally:
+            k32.LocalFree.argtypes = [ctypes.c_void_p]
+            k32.LocalFree(out)
+    finally:
+        k32.CloseHandle(tok)
+
+
+def is_system():
+    return token_sid() == "S-1-5-18"
+
+
+# priorities --------------------------------------------------------------------------------------------------------
+
+def raise_process_priority():
+    """Above normal: a busy PC is exactly when the monitors must keep up (a job holding every core can starve a
+    logger running at normal priority)."""
+    return bool(k32.SetPriorityClass(k32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
+
+
+def raise_thread_priority(highest=False):
+    return bool(k32.SetThreadPriority(k32.GetCurrentThread(),
+                                      THREAD_PRIORITY_HIGHEST if highest else THREAD_PRIORITY_ABOVE_NORMAL))

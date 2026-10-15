@@ -1,0 +1,294 @@
+"""HW Blackbox's logic, without Windows' state: run with  python -m unittest discover -s tests  (from the project)."""
+import datetime as dt
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from hwblackbox import config, paths  # noqa: E402
+
+
+class TempData(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="hwb-test-")
+        paths.init(self.dir)
+        paths.P.make("logs", "state", "incidents", "sessions")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+class Recorder:
+    """A journal that keeps records in a list."""
+    def __init__(self):
+        self.recs = []
+
+    def write(self, kind, payload=None, hard=True):
+        self.recs.append(dict({"kind": kind}, **(payload or {})))
+
+    def recent(self, seconds):
+        return []
+
+
+class ConfigTest(TempData):
+    def write(self, text, bom=False):
+        with open(paths.P.config, "wb") as f:
+            f.write((b"\xef\xbb\xbf" if bom else b"") + text.encode("utf-8"))
+
+    def test_defaults_without_a_file(self):
+        cfg = config.load()
+        self.assertEqual(cfg["dashboard"]["port"], 9070)
+        self.assertNotIn("error", cfg)
+
+    def test_byte_order_mark(self):
+        self.write('{"dashboard": {"port": 9071}}', bom=True)
+        cfg = config.load()
+        self.assertEqual(cfg["dashboard"]["port"], 9071)
+        self.assertNotIn("error", cfg)
+
+    def test_unreadable_keeps_defaults(self):
+        self.write("{not json")
+        cfg = config.load()
+        self.assertIn("error", cfg)
+        self.assertEqual(cfg["dashboard"]["port"], 9070)
+
+    def test_watch_rules_checked(self):
+        self.write(json.dumps({"watch": [{"exe": "a.exe"}, {"label": "no exe"}, "junk",
+                                         {"exe": "b.exe", "ports": [8080, "x", "9090"]}],
+                               "sensors": {"interval_s": 0.01}, "disk_warn_gb": "lots"}))
+        cfg = config.load()
+        self.assertEqual([w["exe"] for w in cfg["watch"]], ["a.exe", "b.exe"])
+        self.assertEqual(cfg["watch"][0]["label"], "a.exe")
+        self.assertEqual(cfg["watch"][1]["ports"], [8080, 9090])
+        self.assertEqual(cfg["sensors"]["interval_s"], 1.0)          # (clamped)
+        self.assertIn("disk_warn_gb", cfg.get("error", ""))
+
+    def test_public_hides_the_env_file(self):
+        self.assertNotIn("env_file", config.public(config.load())["home_assistant"])
+
+
+class PortsTest(unittest.TestCase):
+    def setUp(self):
+        from hwblackbox.ports import PortWatch
+        self.j = Recorder()
+        self.pw = PortWatch(self.j)
+        import hwblackbox.ports as ports
+        ports.describe_pid = lambda pid: ({1: "node.exe", 2: "python.exe", 3: "evil.exe"}.get(pid, "?"), None)
+        self.cfg = {"ports": {"expected": {"8765": {"label": "Server", "exe": "node.exe", "always": True},
+                                           "8788": {"label": "Cast", "exe": "pythonw.exe"}},
+                              "ignore": [], "down_after_min": 0}}
+
+    def scan(self, table):
+        self.pw.scan(self.cfg, lambda pid, port, exe: None, current=table)
+
+    def events(self):
+        return [r for r in self.j.recs if r["kind"] == "port"]
+
+    def test_open_close_needs_two_scans(self):
+        self.scan({("127.0.0.1", 8765): 1})
+        self.scan({("127.0.0.1", 8765): 1})
+        self.assertTrue(self.pw.listed)
+        self.scan({("127.0.0.1", 8765): 1, ("127.0.0.1", 5000): 2})
+        self.assertEqual(self.events(), [])                          # (one scan: not yet)
+        self.scan({("127.0.0.1", 8765): 1, ("127.0.0.1", 5000): 2})
+        self.assertEqual([e["event"] for e in self.events()], ["open"])
+        self.scan({("127.0.0.1", 8765): 1})
+        self.scan({("127.0.0.1", 8765): 1})
+        self.assertEqual([e["event"] for e in self.events()], ["open", "closed"])
+
+    def test_problems(self):
+        # python.exe counts as pythonw.exe; another program on 8788 and a second one on 8765 are problems
+        t = {("127.0.0.1", 8765): 1, ("0.0.0.0", 8765): 3, ("127.0.0.1", 8788): 2}
+        self.scan(t)
+        self.scan(t)
+        found = sorted(self.pw.problems)
+        self.assertEqual(found, ["owner:8765", "shared:8765"])
+        self.scan({("127.0.0.1", 8788): 2})
+        self.scan({("127.0.0.1", 8788): 2})
+        self.scan({("127.0.0.1", 8788): 2})
+        self.assertIn("down:8765", self.pw.problems)                 # (down_after_min 0: at once)
+        self.assertIn("problem over", [e["event"] for e in self.events()])
+
+    def test_holders(self):
+        self.scan({("127.0.0.1", 8765): 1})
+        self.scan({("127.0.0.1", 8765): 1})
+        self.assertEqual(self.pw.holders([8765], but=99), {"8765": "node.exe (pid 1)"})
+        self.assertEqual(self.pw.holders([8765], but=1), {})
+
+
+class EventsTest(unittest.TestCase):
+    def test_event_app(self):
+        from hwblackbox.events import event_app, wanted
+        self.assertEqual(event_app({"source": "Application Error", "id": 1000, "inserts": ["claude.exe", "1.0"]}),
+                         ("claude.exe", True))
+        self.assertEqual(event_app({"source": "Application Hang", "id": 1002, "inserts": ["x.exe"]}), ("x.exe", False))
+        wer = {"source": "Windows Error Reporting", "id": 1001,
+               "inserts": ["b", "4", "APPCRASH", "Not available", "0", "game.exe", "1", "2", "ntdll.dll"]}
+        self.assertEqual(event_app(wer), ("game.exe", True))
+        self.assertTrue(wanted(wer))
+        store = dict(wer, inserts=["b", "4", "StoreAgentScanForUpdatesFailure0", "", "", "x"])
+        self.assertFalse(wanted(store))
+        self.assertEqual(event_app({"source": "Winlogon", "id": 1002, "inserts": []}), ("explorer.exe", True))
+        self.assertEqual(event_app({"source": "Service Control Manager", "id": 7031, "inserts": ["HW Blackbox"]}),
+                         ("HW Blackbox", False))
+
+    def test_describe_1074(self):
+        from hwblackbox.events import describe_1074
+        self.assertEqual(describe_1074("2026-10-08 19:01:22", r"C:\Windows\system32\winlogon.exe (MY-PC)",
+                                       "restart", "No title"),
+                         "2026-10-08 19:01:22: restart by winlogon.exe (No title)")
+
+
+class ExitCodesTest(unittest.TestCase):
+    def test_meaning(self):
+        from hwblackbox.watcher import crashed, meaning
+        self.assertTrue(crashed(0xC0000005))
+        self.assertFalse(crashed(0xFFFFFFFF))            # (killed, not crashed)
+        self.assertFalse(crashed(1))
+        self.assertFalse(crashed(None))
+        self.assertTrue(crashed(0x80000003))
+        self.assertIn("NTSTATUS 0xC0001234", meaning(0xC0001234))
+        self.assertEqual(meaning(0), "clean exit")
+        self.assertIn("couldn't be read", meaning(None))
+
+
+class JournalTest(TempData):
+    def test_write_and_read_tail(self):
+        from hwblackbox.journal import Journal, read_tail
+        j = Journal(paths.P.logs, "events", 30)
+        j.write("a", {"x": 1})
+        j.write("b", {"y": 2}, hard=False)
+        j.close()
+        recs = read_tail(j.path_for(dt.date.today()), 60)
+        self.assertEqual([r["kind"] for r in recs], ["a", "b"])
+        self.assertEqual(len(j.recent(60)), 2)
+
+    def test_prune(self):
+        from hwblackbox.util import prune
+        old = os.path.join(paths.P.logs, "events_20000101.jsonl")
+        new = os.path.join(paths.P.logs, "events_%s.jsonl" % dt.date.today().strftime("%Y%m%d"))
+        for p in (old, new):
+            open(p, "w").close()
+        self.assertEqual(prune(paths.P.logs, "events_", ".jsonl", 30), 1)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(new))
+
+
+class DashboardTest(TempData):
+    def test_describe(self):
+        from hwblackbox.dashboard.server import describe
+        t = time.time()
+        d = describe({"kind": "exit", "app": "Claude", "meaning": "crash: access violation", "ran": "1h"}, t)
+        self.assertEqual(d["level"], "bad")
+        d = describe({"kind": "startup", "pid": 1, "version": 5, "session_lock": True}, t)           # AppWatch's
+        self.assertEqual(d["text"], "AppWatch started (v5)")
+        d = describe({"kind": "startup", "version": "1.0.0", "data_dir": "x",
+                      "previous_run": {"ended_cleanly": False}}, t)
+        self.assertIn("ended without stopping", d["text"])
+        self.assertEqual(d["level"], "warn")
+        d = describe({"kind": "startup", "version": "1.0.0", "user": "alice"}, t, src="alice")
+        self.assertEqual(d["text"], "The session agent (alice) started (1.0.0)")
+        d = describe({"kind": "winevent", "source": "Microsoft-Windows-Kernel-Power", "id": 41, "at": "x"}, t)
+        self.assertEqual((d["text"], d["level"], d["group"]), ("Power lost", "bad", "power"))
+        d = describe({"kind": "shutdown", "phase": "services stopping"}, t)
+        self.assertIn("shutting down", d["text"])
+
+    def test_bucketed(self):
+        from hwblackbox.dashboard.server import bucketed
+        nan = float("nan")
+        out = bucketed([0, 5, 10, 100], {"a": [1.0, 3.0, nan, 7.0]}, 0, 100, 10)
+        self.assertEqual(out["series"]["a"]["avg"][0], 2.0)
+        self.assertIsNone(out["series"]["a"]["avg"][5])                 # (a gap)
+        self.assertEqual(out["series"]["a"]["max"][-1], 7.0)
+
+    def test_incident_names_only(self):
+        from hwblackbox.dashboard.server import api_incident
+        for bad in ("..\\config.json", "incident_20261013_220452_x.txt\\..\\..\\config.json", "x.txt", ""):
+            with self.assertRaises(KeyError):
+                api_incident({"name": bad})
+        name = "incident_20261013_220452_explorer.exe.txt"
+        with open(os.path.join(paths.P.incidents, name), "w") as f:
+            f.write("Windows Explorer ended\n")
+        self.assertIn("Explorer", api_incident({"name": name})["text"])
+
+    def test_power_offs(self):
+        from hwblackbox.dashboard.server import power_offs
+        with open(os.path.join(paths.P.incidents, "incident_20261007_021512.txt"), "w") as f:
+            f.write("HW Blackbox: power-off report\n\nBooted at:    2026-10-07 02:15:12, after a shutdown that wasn't clean\n"
+                    "Went down:    2026-10-07 02:14:58.697  (...)\n\n"
+                    "rails_20261007.csv: 2026-10-07T02:14:58.697,12.168,5.04,3.346,0.9,1.1,11.2,40.5,,,\n")
+        po = power_offs()
+        self.assertEqual(len(po), 1)
+        self.assertEqual(po[0]["went_down"], "2026-10-07T02:14:58.697")
+        self.assertAlmostEqual(po[0]["gap_s"], 13.3, places=1)
+        self.assertEqual(po[0]["last_rails"]["v12_v"], 12.168)
+
+
+class SensorsTest(unittest.TestCase):
+    def test_pick_and_vcore(self):
+        from hwblackbox.sensors import _pick, _temp, _vcore
+        lhm = {("Cpu", "Voltage", "Core (SVI2 TFN)"): 1.55, ("SuperIO", "Voltage", "Vcore"): 1.2,
+               ("SuperIO", "Voltage", "+5V"): 5.04, ("SuperIO", "Voltage", "5VSB"): 5.1}
+        self.assertEqual(_vcore(lhm), 1.2)                              # (the board's, not the CPU's flat 1.55)
+        self.assertEqual(_pick(lhm, "SuperIO", "Voltage", ("+5",), ("5vsb",)), 5.04)
+        self.assertEqual(_temp(0), "")
+        self.assertEqual(_temp(150), "")
+        self.assertEqual(_temp(45.06), 45.1)
+
+    def test_flat_cpu_voltage_noted(self):
+        from hwblackbox.sensors import FLAT_AFTER, SensorStats
+        st = SensorStats("now")
+        for _ in range(FLAT_AFTER):
+            st.entry("Cpu/Voltage/Core (SVI2 TFN)", "CPU", "x", "Voltage", "Core (SVI2 TFN)", "V", 1.55, 3)
+            st.entry("SuperIO/Voltage/+3V Standby", "Motherboard", "x", "Voltage", "+3V Standby", "V", 3.312, 3)
+        self.assertIsNotNone(st.note("Cpu/Voltage/Core (SVI2 TFN)", "Cpu", "Voltage"))
+        self.assertIsNone(st.note("SuperIO/Voltage/+3V Standby", "SuperIO", "Voltage"))   # (a flat rail can be real)
+
+    def test_gpu_from_lhm(self):
+        from hwblackbox.sensors import gpu_from_lhm
+        lhm = {("GpuIntel", "Load", "D3D 3D"): 3.0, ("GpuIntel", "Temperature", "GPU Core"): 40.0,
+               ("GpuAmd", "Temperature", "GPU Core"): 61.24, ("GpuAmd", "Temperature", "GPU Hot Spot"): 75.0,
+               ("GpuAmd", "Power", "GPU Package"): 182.36, ("GpuAmd", "Load", "GPU Core"): 97.0,
+               ("GpuAmd", "Clock", "GPU Core"): 2412.4, ("GpuAmd", "SmallData", "GPU Memory Used"): 6120.6,
+               ("GpuAmd#2", "Temperature", "GPU Core"): 30.0, ("Cpu", "Temperature", "Core (Tctl/Tdie)"): 55.0}
+        self.assertEqual(gpu_from_lhm(lhm), {"gpu_temp_c": 61.2, "gpu_power_w": 182.4, "gpu_util_pct": 97.0,
+                                             "gpu_clock_mhz": 2412, "gpu_vram_mb": 6121})     # (the discrete one)
+        self.assertEqual(gpu_from_lhm({("Cpu", "Load", "CPU Total"): 5.0}), {})
+        self.assertEqual(gpu_from_lhm({("GpuIntel", "Load", "D3D 3D"): 3.0}), {"gpu_util_pct": 3.0})
+
+    def test_gpu_sensors_grouped(self):
+        from hwblackbox.sensors import SensorStats
+
+        class Fake:
+            admin = False                               # (unelevated: GPU readings still count, the CPU's don't)
+            lhm = type("L", (), {"names": {"GpuAmd": "AMD Radeon RX 7800 XT", "GpuAmd#2": "AMD Radeon(TM)"}})()
+            nvml = type("N", (), {"name": None})()
+            last_nv = {}
+            ram_total_gb = None
+        lhm = {("GpuAmd", "Temperature", "GPU Core"): 61.0, ("GpuAmd#2", "Temperature", "GPU Core"): 30.0,
+               ("Cpu", "Temperature", "Core (Tctl/Tdie)"): 55.0}
+        out = SensorStats("now").build(Fake(), lhm, {"timestamp": "x"})["sensors"]
+        self.assertEqual([(x["group"], x["device"]) for x in out],
+                         [("GPU", "AMD Radeon RX 7800 XT"), ("GPU", "AMD Radeon(TM)")])
+
+
+class PowerOffTest(TempData):
+    def test_rows_before_skips_damage(self):
+        from hwblackbox.poweroff import _event_date, _rows_before
+        p = os.path.join(paths.P.logs, "flight_20261007.csv")
+        with open(p, "wb") as f:
+            f.write(b"timestamp,a\n2026-10-07T02:14:50,1\n2026-10-07T02:14:55,2\n\x00\x00\x00\n"
+                    b"garbage line\n2026-10-07T02:16:00,3\n")
+        rows = _rows_before(p, dt.datetime(2026, 10, 7, 2, 15, 12), 5)
+        self.assertEqual([r[1].split(": ")[1] for r in rows], ["2026-10-07T02:14:50,1", "2026-10-07T02:14:55,2"])
+        self.assertEqual(_event_date("Event[0]:\n  Date: 2026-10-07T02:15:15.5000000Z\n"),
+                         dt.datetime(2026, 10, 7, 2, 15, 15, 500000))
+
+
+if __name__ == "__main__":
+    unittest.main()

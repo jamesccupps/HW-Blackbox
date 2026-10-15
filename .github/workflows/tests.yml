@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the packages the tests import
+        run: python -m pip install psutil pywin32
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Byte-compile everything
+        run: python -m compileall -q hwblackbox tools tests
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem -Recurse -Filter *.ps1) {
+            $err = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
+            if ($err) { $bad++; $err | ForEach-Object { "$($f.Name):$($_.Extent.StartLineNumber): $($_.Message)" } }
+          }
+          if ($bad) { exit 1 }
