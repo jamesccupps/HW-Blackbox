@@ -267,6 +267,8 @@ class Service:
                                         "user": user})
             if event in (5, 10):
                 self.agents.first_seen[sid] = time.time()        # (its agent starts now: the restart grace begins)
+            elif event == 6:
+                self.watcher.signed_out[sid] = time.time()       # (its apps ending now are expected)
         elif kind == "power":
             what = POWER_EVENTS.get(info)
             if what:

@@ -197,6 +197,10 @@ class DashboardTest(TempData):
         self.assertEqual((d["text"], d["level"], d["group"]), ("Power lost", "bad", "power"))
         d = describe({"kind": "shutdown", "phase": "services stopping"}, t)
         self.assertIn("shutting down", d["text"])
+        d = describe({"kind": "exit", "app": "Windows Explorer", "code": "0x40010004", "while_session_ends": True,
+                      "meaning": "ended by Windows (sign-out, or a debugger)", "ran": "1h"}, t)
+        self.assertEqual(d["level"], "info")
+        self.assertIn("session was ending", d["text"])
 
     def test_bucketed(self):
         from hwblackbox.dashboard.server import bucketed
@@ -288,6 +292,82 @@ class PowerOffTest(TempData):
         self.assertEqual([r[1].split(": ")[1] for r in rows], ["2026-10-07T02:14:50,1", "2026-10-07T02:14:55,2"])
         self.assertEqual(_event_date("Event[0]:\n  Date: 2026-10-07T02:15:15.5000000Z\n"),
                          dt.datetime(2026, 10, 7, 2, 15, 15, 500000))
+
+
+class AgentsTest(TempData):
+    def test_a_failed_read_is_not_a_missing_heartbeat(self):
+        from unittest import mock
+        from hwblackbox import agents
+        folder = paths.P.session_dir("u")
+        os.makedirs(folder)
+        hb = os.path.join(folder, "agent.json")
+        with open(hb, "w", encoding="utf-8") as f:
+            json.dump({"ts": "2026-10-16T20:10:00", "session": 1, "pid": 42, "version": "x"}, f)
+        a = agents.Agents(Recorder())
+        calls = []
+        a.maybe_restart = lambda sid, user, state, age, now: calls.append(state)
+        with mock.patch.object(agents.winapi, "sessions", return_value=[{"id": 1, "user": "u", "state": "active"}]):
+            a.refresh()
+            self.assertEqual((a.view[0]["agent"], a.view[0]["pid"], calls), ("running", 42, []))
+            with mock.patch.object(agents, "read_json", return_value=None):     # (the file mid-swap)
+                a.refresh()
+            self.assertEqual((a.view[0]["agent"], a.view[0]["pid"], calls), ("running", 42, []))
+            os.utime(hb, (time.time() - 200, time.time() - 200))              # really stuck: no new heartbeat
+            a.refresh()
+            self.assertEqual((a.view[0]["agent"], calls), ("stale", ["stale"]))
+
+    def test_never_heard_from(self):
+        from unittest import mock
+        from hwblackbox import agents
+        a = agents.Agents(Recorder())
+        calls = []
+        a.maybe_restart = lambda sid, user, state, age, now: calls.append(state)
+        with mock.patch.object(agents.winapi, "sessions", return_value=[{"id": 1, "user": "u", "state": "active"}]):
+            a.refresh()
+        self.assertEqual((a.view[0]["agent"], calls), ("none", ["none"]))
+
+
+class WatcherTest(TempData):
+    """An app Windows ends as its session ends is recorded, not an incident (2026-10-16: a restart wrote two)."""
+    SIGN_OUT = 0x40010004
+
+    def ended(self, code, agent_recs=(), signed_out=False, session=1):
+        from hwblackbox import watcher
+
+        class FakeAgents:
+            def taskbar_pids(self):
+                return set()
+
+            def recent_records(self, seconds):
+                return list(agent_recs)
+
+            def screens(self):
+                return {}
+
+            def front(self, seconds):
+                return {}
+
+        jr = Recorder()
+        w = watcher.Watcher(jr, {"watch": []}, None, FakeAgents())
+        if signed_out:
+            w.signed_out[1] = time.time()
+        t = watcher.Tracked()
+        t.pid, t.exe, t.label, t.started, t.main, t.handle, t.mem = 4242, "explorer.exe", "Explorer", time.time(), True, \
+            None, None
+        t.by_port, t.policy, t.ports, t.session = False, "nonzero", None, session
+        w.ended(t, code)
+        exit_rec = next(r for r in jr.recs if r["kind"] == "exit")
+        return w.notes["last_incident"] is not None, bool(exit_rec.get("while_session_ends"))
+
+    def test_session_ending(self):
+        asked = {"kind": "shutdown", "phase": "asked", "session": 1}
+        self.assertEqual(self.ended(self.SIGN_OUT), (True, False))                       # a debugger, say
+        self.assertEqual(self.ended(self.SIGN_OUT, [asked]), (False, True))              # Windows asked the agent
+        self.assertEqual(self.ended(self.SIGN_OUT, signed_out=True), (False, True))      # the service saw the sign-out
+        self.assertEqual(self.ended(self.SIGN_OUT, [asked, {"kind": "shutdown", "phase": "cancelled", "session": 1}]),
+                         (True, False))                                                  # ... and it was cancelled
+        self.assertEqual(self.ended(self.SIGN_OUT, [asked], session=2), (True, False))   # another session
+        self.assertEqual(self.ended(0xC0000005, [asked]), (True, False))                 # a crash still counts
 
 
 if __name__ == "__main__":

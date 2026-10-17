@@ -473,6 +473,9 @@ def describe(rec, t, src="service"):
         if rec.get("while_shutting_down"):
             text += " (Windows was shutting down)"
             level = "info"
+        elif rec.get("while_session_ends"):
+            text += " (its session was ending: a sign-out or restart)"
+            level = "info"
     elif k == "start":
         text = "%s started" % rec.get("app")
     elif k == "winevent":

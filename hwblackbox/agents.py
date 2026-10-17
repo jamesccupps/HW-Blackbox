@@ -59,6 +59,7 @@ class Agents:
         self.last_restart = {}             # session id -> time
         self.view = []                     # [{session, user, state, agent, age, ...}], refreshed every 30 s
         self.heartbeats = {}               # session id -> the agent's last heartbeat
+        self.last_beat = {}                # session id -> when that heartbeat was written (agent.json's time)
         self.task = None
 
     def refresh(self):
@@ -68,24 +69,32 @@ class Agents:
         for s in current:
             sid, user = s["id"], s["user"]
             self.first_seen.setdefault(sid, now)
-            folder = paths.P.session_dir(user)
-            hb = read_json(os.path.join(folder, "agent.json"), limit=1 << 20) or {}
-            fresh = hb.get("session") == sid and isinstance(hb.get("ts"), str)
+            path = os.path.join(paths.P.session_dir(user), "agent.json")
+            hb = read_json(path, limit=1 << 20) or {}
             try:
-                age = now - os.path.getmtime(os.path.join(folder, "agent.json")) if fresh else None
+                written = os.path.getmtime(path) if hb.get("session") == sid and isinstance(hb.get("ts"), str) else None
             except OSError:
-                age = None
-            if fresh and age is not None:
-                beats[sid] = hb
+                written = None
+            if written is not None:
+                beats[sid], self.last_beat[sid] = hb, written
+            elif sid in self.heartbeats:
+                # One failed read isn't a missing heartbeat: the file can't be opened while the agent swaps a new one
+                # in, or while a virus scanner holds it. (On 2026-10-16 that restarted a healthy agent twice.) Judge
+                # by the last heartbeat read.
+                beats[sid] = self.heartbeats[sid]
+            last = self.last_beat.get(sid)
+            age = None if last is None else now - last
             state = "running" if age is not None and age <= STALE else "stale" if age is not None else "none"
+            good = beats.get(sid) or {}
             view.append({"session": sid, "user": user, "state": s["state"], "agent": state,
-                         "age": None if age is None else round(age), "pid": hb.get("pid") if fresh else None,
-                         "version": hb.get("version") if fresh else None})
+                         "age": None if age is None else round(age), "pid": good.get("pid"),
+                         "version": good.get("version")})
             if state != "running" and s["state"] == "active" and self.restart:
                 self.maybe_restart(sid, user, state, age, now)
         for sid in list(self.first_seen):
             if sid not in {s["id"] for s in current}:
                 del self.first_seen[sid]
+                self.last_beat.pop(sid, None)
         self.view, self.heartbeats = view, beats
 
     def maybe_restart(self, sid, user, state, age, now):

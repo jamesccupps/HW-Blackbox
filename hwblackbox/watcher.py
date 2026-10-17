@@ -94,6 +94,7 @@ class Watcher:
         self.events = EventReader(paths.P.eventpos)
         self.last_incident = {}
         self.ending = False                                 # Windows is shutting down: exits are expected now
+        self.signed_out = {}                                # session -> when Windows said it signed out
         self.notes = {"last_incident": None, "last_shutdown": None, "last_power_loss": None}
         self.logs_mb = None
 
@@ -232,9 +233,26 @@ class Watcher:
             rec["ports_now"] = self.ports.holders(t.ports, but=t.pid) or None
         if self.ending:
             rec["while_shutting_down"] = True
+        report = crashed(code) or (t.main and t.policy != "crash" and code != 0)
+        if report and not crashed(code) and not self.ending and self.session_ending(t.session):
+            # Windows ending the session's apps (a sign-out, or a restart before the services stop) is expected:
+            # recorded, not an incident. A crash still is one.
+            rec["while_session_ends"] = True
+            report = False
         self.jrnl.write("exit", rec)
-        if crashed(code) or (t.main and t.policy != "crash" and code != 0):
+        if report:
             self.incident(t.exe, "%s ended: %s" % (t.label, meaning(code)), rec)
+
+    def session_ending(self, sid, window=120):
+        """Whether the session is ending: Windows told the service it signed out, or asked the session's agent to end
+        it (and didn't cancel), in the last two minutes."""
+        if time.time() - self.signed_out.get(sid, 0) < window:
+            return True
+        try:
+            asked = [r for r in self.agents.recent_records(window) if r.get("session") == sid and r.get("kind") == "shutdown"]
+        except Exception:
+            return False
+        return bool(asked) and asked[-1].get("phase") != "cancelled"
 
     def sample_memory(self):
         apps = {"%s/%d" % (t.exe, t.pid): t.mem // 2**20 for t in self.tracked.values() if t.main and t.mem}
