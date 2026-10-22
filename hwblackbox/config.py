@@ -1,7 +1,8 @@
 """The settings: config.json in the data folder, over the defaults below.
 
-The service reads it at start, and again every minute for "ports", "home_assistant", "dashboard" and "disk_warn_gb",
-so those take effect without a restart. The watch list and the sensors' timing take a restart of the service."""
+The service reads it at start, and again every minute for "ports", "home_assistant", "dashboard", "disk_warn_gb" and
+"disk_drop_gb", so those take effect without a restart. The watch list and the sensors' timing take a restart of the
+service."""
 import copy
 import os
 import re
@@ -11,7 +12,7 @@ from . import paths
 from .util import read_json, write_json
 
 HOST = socket.gethostname()
-LIVE = ("ports", "home_assistant", "dashboard", "disk_warn_gb")
+LIVE = ("ports", "home_assistant", "dashboard", "disk_warn_gb", "disk_drop_gb")
 
 
 def slug(text):
@@ -42,7 +43,10 @@ def defaults():
                            "entity": "sensor.%s_hw_blackbox" % slug(HOST), "name": "%s HW Blackbox" % HOST},
         # The page. "milestones": [{"at": "2026-10-08T19:03:00", "text": "..."}], marked on the charts.
         "dashboard": {"enabled": True, "port": 9070, "milestones": []},
+        # The Windows drive: a problem below disk_warn_gb free, or when it loses disk_drop_gb within an hour
+        # (something filling it fast). Every fixed drive's free space is logged every minute (logs\disks_*.csv).
         "disk_warn_gb": 10,
+        "disk_drop_gb": 10,
     }
 
 

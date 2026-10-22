@@ -12,7 +12,6 @@ import datetime as dt
 import json
 import os
 import re
-import shutil
 import time
 
 import psutil
@@ -364,9 +363,3 @@ class Watcher:
         except OSError:
             pass
         self.logs_mb = round(total / 2**20)
-
-    def disk_free_gb(self):
-        try:
-            return shutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\").free / 2**30
-        except OSError:
-            return None

@@ -2,7 +2,8 @@ r"""The dashboard's server: one page (index.html) and a read-only JSON API over 
 
   Overview    the service and the session agents, problems, the key readings now, power-offs, disks
   Sensors     every sensor: current / minimum / maximum / average, since the page opened or since the service started
-  Charts      the 5-second log, any range from an hour to 7 days (the line is the average, the band the min and max)
+  Charts      the 5-second log and the drives' free space (a reading a minute), any range from an hour to 7 days (the
+              line is the average, the band the min and max)
   Power       the 4-a-second rails (the last minutes) and every power-off caught
   Events      the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' own records
   Ports       who listens on which port, and port problems
@@ -313,20 +314,103 @@ def api_sensors(q):
 
 
 def api_history(q):
-    cols = [c for c in (q.get("cols") or "cpu_temp_c,gpu_temp_c").split(",") if c in FLIGHT]
+    want = (q.get("cols") or "cpu_temp_c,gpu_temp_c").split(",")
+    cols = [c for c in want if c in FLIGHT]
+    dcols = [c for c in want if c.startswith(DISK)]
     hours = min(24 * 7, max(0.25, float(q.get("hours") or 6)))
     points = min(2000, max(50, int(q.get("points") or 600)))
     end = time.time()
     start = end - hours * 3600
-    ts, series = FLIGHT_CACHE.rows_between(start, end, cols)
+    ts, series = FLIGHT_CACHE.rows_between(start, end, cols) if cols else ([], {})
     out = bucketed(ts, series, start, end, points)
-    out.update({"cols": {c: {"label": FLIGHT[c][0], "unit": FLIGHT[c][1], "group": FLIGHT[c][2]} for c in cols},
-                "start": start, "end": end, "rows": len(ts)})
+    meta = {c: {"label": FLIGHT[c][0], "unit": FLIGHT[c][1], "group": FLIGHT[c][2]} for c in cols}
+    rows = len(ts)
+    if dcols:
+        per = disk_series(start, end)
+        for c in dcols:
+            dts, vals = per.get(c[len(DISK):], ([], []))
+            b = bucketed(dts, {c: vals}, start, end, points)
+            if b["t"] and not out["t"]:             # (no 5-second rows in the range: the drives' buckets set the axis)
+                out["t"], out["step"] = b["t"], b["step"]
+                out["series"] = {k: empty_series(len(b["t"])) for k in out["series"]}
+            out["series"][c] = hold(b["series"][c], b["t"]) if b["t"] else empty_series(len(out["t"]))
+            meta[c] = disk_meta(c[len(DISK):])
+            rows += len(dts)
+    out.update({"cols": meta, "start": start, "end": end, "rows": rows})
     return out
 
 
+def hold(series, t, seconds=90):
+    """A reading a minute in buckets of a few seconds: each one carried on until the next, so the line doesn't
+    break up; a longer gap (the PC off, the service down) stays a gap."""
+    last = None
+    for i in range(len(t)):
+        if series["avg"][i] is not None:
+            last = i
+        elif last is not None and t[i] - t[last] <= seconds:
+            for k in ("avg", "min", "max"):
+                series[k][i] = series[k][last]
+    return series
+
+
 def api_flight_columns(q):
-    return {"cols": [{"id": c, "label": l, "unit": u, "group": g} for c, (l, u, g) in FLIGHT.items()]}
+    return {"cols": [{"id": c, "label": l, "unit": u, "group": g} for c, (l, u, g) in FLIGHT.items()] +
+                    [dict(disk_meta(d), id=DISK + d) for d in cached("drives", 300, logged_drives)]}
+
+
+# the drives' free space (logs\disks_YYYYMMDD.csv, a row per drive a minute) ------------------------------------------
+
+DISK = "disk:"                  # a chart column for a drive: "disk:C:"
+_disk_files = {}                # name -> (size, rows)
+_disk_lock = threading.Lock()   # (the server answers on several threads)
+
+
+def empty_series(n):
+    return {"avg": [None] * n, "min": [None] * n, "max": [None] * n}
+
+
+def disk_meta(drive):
+    return {"label": "%s free space" % drive, "unit": "GB free", "group": "Disks"}
+
+
+def disk_rows(day):
+    """A day's rows [(epoch, drive, free GB, total GB)], parsed again only when the file has grown."""
+    from ..disks import path_for, read_rows
+    path = path_for(day)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    name = os.path.basename(path)
+    with _disk_lock:
+        hit = _disk_files.get(name)
+        if not hit or hit[0] != size:
+            hit = _disk_files[name] = (size, read_rows(path))
+            while len(_disk_files) > 10:
+                _disk_files.pop(next(iter(_disk_files)))
+        return hit[1]
+
+
+def disk_series(start, end):
+    """{drive: (times, free GB)} for start <= t <= end."""
+    out = {}
+    d = dt.date.fromtimestamp(start)
+    while d <= dt.date.fromtimestamp(end):
+        for t, drive, free, _total in disk_rows(d):
+            if start <= t <= end:
+                ts, vals = out.setdefault(drive, ([], []))
+                ts.append(t)
+                vals.append(free)
+        d += dt.timedelta(days=1)
+    return out
+
+
+def logged_drives():
+    """The drives in the last week's logs, by letter."""
+    seen = set()
+    for back in range(7):
+        seen.update(r[1] for r in disk_rows(dt.date.today() - dt.timedelta(days=back)))
+    return sorted(seen)
 
 
 def api_rails(q):

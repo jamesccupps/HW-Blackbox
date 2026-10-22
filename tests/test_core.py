@@ -68,6 +68,12 @@ class ConfigTest(TempData):
         self.assertEqual(cfg["sensors"]["interval_s"], 1.0)          # (clamped)
         self.assertIn("disk_warn_gb", cfg.get("error", ""))
 
+    def test_disk_settings_are_live(self):
+        self.assertEqual((config.defaults()["disk_warn_gb"], config.defaults()["disk_drop_gb"]), (10, 10))
+        self.assertIn("disk_drop_gb", config.LIVE)
+        self.write('{"disk_drop_gb": 5}')
+        self.assertEqual(config.load()["disk_drop_gb"], 5)
+
     def test_public_hides_the_env_file(self):
         self.assertNotIn("env_file", config.public(config.load())["home_assistant"])
 
@@ -325,6 +331,57 @@ class AgentsTest(TempData):
         with mock.patch.object(agents.winapi, "sessions", return_value=[{"id": 1, "user": "u", "state": "active"}]):
             a.refresh()
         self.assertEqual((a.view[0]["agent"], calls), ("none", ["none"]))
+
+
+class DisksTest(TempData):
+    """Free space: the log, the Windows drive's problems, and the dashboard's chart of it."""
+
+    def test_problems(self):
+        from hwblackbox import disks
+        w = disks.DiskWatch(Recorder(), 183)
+        sysd, now = disks.system_drive(), time.time()
+        cfg = {"disk_warn_gb": 10, "disk_drop_gb": 10}
+        w.now = {sysd: (31.8, 465.0)}
+        w.history.extend([(now - 3000, 46.0), (now - 1800, 40.0), (now, 31.8)])
+        self.assertEqual(w.problems(cfg, now), ["%s is filling up fast: 14.2 GB gone in 50 min (31.8 GB free)" % sysd])
+        w.history.clear()
+        w.history.extend([(now - 3000, 38.0), (now, 31.8)])                      # 6.2 GB: not fast
+        self.assertEqual(w.problems(cfg, now), [])
+        w.now = {sysd: (8.5, 465.0)}
+        w.history.clear()
+        w.history.extend([(now - 3000, 9.0), (now, 8.5)])
+        self.assertEqual(w.problems(cfg, now), ["%s has only 8.5 GB free" % sysd])
+        self.assertEqual(w.problems(dict(cfg, disk_drop_gb=0), now), ["%s has only 8.5 GB free" % sysd])
+
+    def test_log_and_seed(self):
+        from hwblackbox import disks
+        w = disks.DiskWatch(Recorder(), 183)
+        w.sample()
+        sysd = disks.system_drive()
+        self.assertIn(sysd, w.now)
+        rows = disks.read_rows(disks.path_for(dt.date.today()))
+        self.assertTrue(any(r[1] == sysd for r in rows))
+        self.assertEqual(len(disks.DiskWatch(Recorder(), 183).history), 1)     # a restart remembers the last hour
+
+    def test_chart(self):
+        from hwblackbox.dashboard import server
+        now = time.time()
+        with open(os.path.join(paths.P.logs, "disks_%s.csv" % dt.date.today().strftime("%Y%m%d")), "w") as f:
+            f.write("timestamp,drive,free_gb,total_gb\n")
+            for k in range(30, 0, -1):                      # a reading a minute over the last half hour
+                t = dt.datetime.fromtimestamp(now - k * 60).isoformat(timespec="seconds")
+                f.write("%s,C:,%.1f,465.0\n%s,G:,800.0,1863.0\n" % (t, 40 - k / 10, t))
+        server._cache.clear()
+        server._disk_files.clear()
+        ids = [c["id"] for c in server.api_flight_columns({})["cols"]]
+        self.assertEqual(ids[-2:], ["disk:C:", "disk:G:"])
+        h = server.api_history({"cols": "disk:C:", "hours": "1", "points": "720"})          # 5 s buckets
+        avg = h["series"]["disk:C:"]["avg"]
+        self.assertEqual(h["cols"]["disk:C:"]["unit"], "GB free")
+        seen = [i for i, v in enumerate(avg) if v is not None]
+        self.assertEqual(sum(1 for i in range(seen[0], seen[-1]) if avg[i] is None), 0)  # held, not dots
+        self.assertLess(seen[0], len(avg) // 2 + 5)                                   # from half an hour ago
+        self.assertEqual(h["rows"], 30)
 
 
 class WatcherTest(TempData):

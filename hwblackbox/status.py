@@ -34,6 +34,24 @@ def disks():
     return _disks["list"]
 
 
+RESTART_KEYS = (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+                r"SOFTWARE\Microsoft\Windows\WindowsUpdate\Auto Update\RebootRequired")
+
+
+def restart_pending_since():
+    """When Windows Update (or servicing) started waiting for a restart, as epoch seconds (the oldest of its keys'
+    last-written times); None if it isn't waiting."""
+    import winreg
+    times = []
+    for key in RESTART_KEYS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+                times.append(winreg.QueryInfoKey(k)[2] / 1e7 - 11644473600)    # (100 ns units since 1601)
+        except OSError:
+            continue
+    return min(times) if times else None
+
+
 def host_facts():
     """This PC, as the status file records it (so a copied data folder still says which PC it came from)."""
     v = sys.getwindowsversion()
@@ -44,7 +62,7 @@ def host_facts():
 # attributes, so per-minute numbers (CPU, memory, the last sample's time) stay in status.json; HA still sees every
 # report through the sensor's last_reported, which an alert for "gone quiet" can use.
 HA_KEYS = ("sensors", "rails", "cpu_temperature", "watcher", "session_agent", "boot", "last_incident",
-           "last_shutdown", "last_power_loss", "last_power_loss_died_at")
+           "last_shutdown", "last_power_loss", "last_power_loss_died_at", "windows_update")
 
 
 def build(svc):
@@ -105,11 +123,17 @@ def build(svc):
         a["ports_listening"] = svc.ports.listening_count()
     if svc.ports.error:
         problems.append("The port check failed: %s" % svc.ports.error)
-    free = svc.watcher.disk_free_gb()
+    free = svc.disks.free_gb()
     if free is not None:
         a["disk_free_gb"] = round(free, 1)
-        if free < (cfg.get("disk_warn_gb") or 10):
-            problems.append("%s has only %.1f GB free" % (os.environ.get("SystemDrive", "C:"), free))
+    problems.extend(svc.disks.problems(cfg))
+    # (a note, not a problem: Windows decides when, and it isn't something wrong)
+    try:
+        since = restart_pending_since()
+    except Exception:
+        since = None
+    a["windows_update"] = ("waiting for a restart since %s" % dt.datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M")
+                           if since else "no restart waiting")
     stuck = [name for name, age in svc.thread_ages().items() if age is not None and age > svc.STUCK.get(name, 120)]
     if stuck:
         problems.append("Part of the service is stuck: %s" % ", ".join(stuck))

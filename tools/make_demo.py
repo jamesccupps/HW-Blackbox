@@ -19,6 +19,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hwblackbox import VERSION  # noqa: E402
+from hwblackbox.disks import COLUMNS as DISK_COLUMNS  # noqa: E402
 from hwblackbox.sensors import COLUMNS, FAST_COLUMNS  # noqa: E402
 
 HOST, USER = "DEMO-PC", "alex"
@@ -176,19 +178,35 @@ def main():
         before.append(m.rails(t, m.row(t)))
         t += dt.timedelta(milliseconds=250)
     write_csv(os.path.join(logs, "rails_%s.csv" % off_at.strftime("%Y%m%d")), FAST_COLUMNS, before)
+    # the drives' free space, a reading a minute: C: slowly (logs, caches), and a game downloaded one evening (its
+    # installer cleaned up after)
+    disk_rows, t, span = {}, start, (now - start).total_seconds()
+    dl = start + dt.timedelta(hours=34)
+    while t <= now:
+        if not (off_at < t < back_at + dt.timedelta(seconds=40) or restart_at < t < restart_back + dt.timedelta(seconds=35)):
+            frac, x = (t - start).total_seconds() / span, (t - dl).total_seconds() / 60
+            c = 434.6 - 14.0 * frac - (38 * x / 40 if 0 <= x < 40 else 38 - 30 * (x - 40) / 15 if 40 <= x < 55 else
+                                       8 if x >= 55 else 0)
+            for drive, free, total in (("C:", c, 930.6), ("D:", 1214.0 - 3.6 * frac, 1863.0)):
+                disk_rows.setdefault(t.strftime("%Y%m%d"), []).append(
+                    {"timestamp": t.isoformat(timespec="seconds"), "drive": drive, "free_gb": round(free, 2),
+                     "total_gb": total})
+        t += dt.timedelta(minutes=1)
+    for day, rows_ in disk_rows.items():
+        write_csv(os.path.join(logs, "disks_%s.csv" % day), DISK_COLUMNS, rows_)
 
     # the records
     def boot(at, clean, prev_kind):
         svc.add(at + dt.timedelta(seconds=9), "winevent", **winevent(at, "Microsoft-Windows-Kernel-General", 12,
                                                                        inserts=["10", "0", "26100"], app=None),
                 backfill=True)
-        svc.add(at + dt.timedelta(seconds=9), "startup", pid=3180, version="1.0.0", python="3.12.10", user="SYSTEM",
+        svc.add(at + dt.timedelta(seconds=9), "startup", pid=3180, version=VERSION, python="3.12.10", user="SYSTEM",
                 system=True, admin=True, session=0, data_dir="C:\\ProgramData\\HWBlackbox", test=None,
                 previous_run={"last_record": None, "kind": prev_kind, "ended_cleanly": clean})
         svc.add(at + dt.timedelta(seconds=11), "sensors", event="open", lhm="ok", nvml="ok", sensors=74,
                 devices={"Cpu": CPU, "Motherboard": BOARD, "SuperIO": CHIP}, gpu=GPU, admin=True)
         svc.add(at + dt.timedelta(seconds=38), "session", event="sign-in", session=1, user=USER)
-        agent.add(at + dt.timedelta(seconds=41), "startup", pid=7344, version="1.0.0", user=USER, session=1,
+        agent.add(at + dt.timedelta(seconds=41), "startup", pid=7344, version=VERSION, user=USER, session=1,
                   screens=["\\\\.\\DISPLAY1 0,0 2560x1440 at 125%"], dashboard=9070)
         svc.add(at + dt.timedelta(seconds=41), "start", app="HW Blackbox agent", exe="pythonw.exe", pid=7344,
                 session=1, user=USER)
@@ -408,12 +426,13 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
     now = dt.datetime.now().replace(microsecond=0)
     attrs = {"sensors": "logging", "rails": "ok", "cpu_temperature": "ok", "watcher": "running",
              "session_agent": "running", "ports_listening": 13, "disk_free_gb": 412.6, "logs_mb": 9,
-             "boot": booted.isoformat(timespec="seconds"), "version": "1.0.0",
+             "boot": booted.isoformat(timespec="seconds"), "version": VERSION,
              "last_incident": "%s: Blender ended: crash: access violation" % crash_at.isoformat(sep=" "),
              "last_shutdown": "%s: restart by explorer.exe (Other (Planned))" % (booted - dt.timedelta(seconds=77)).isoformat(sep=" "),
              "last_power_loss": (back_at + dt.timedelta(seconds=2)).isoformat(sep=" "),
-             "last_power_loss_died_at": off_at.isoformat(timespec="milliseconds")}
-    status = {"ts": now.isoformat(timespec="seconds"), "version": "1.0.0", "pid": 3180,
+             "last_power_loss_died_at": off_at.isoformat(timespec="milliseconds"),
+             "windows_update": "waiting for a restart since %s" % (now - dt.timedelta(hours=27)).strftime("%Y-%m-%d %H:%M")}
+    status = {"ts": now.isoformat(timespec="seconds"), "version": VERSION, "pid": 3180,
               "started": booted.isoformat(timespec="seconds"), "test": False, "state": "ok", "problems": [],
               "attributes": attrs,
               "sensors": {"lhm": "ok", "nvml": "ok", "admin": True, "sensors": 74, "last_sample": now.isoformat(),
@@ -421,7 +440,7 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
                           "rails_ok": True, "cpu_temp_ok": True},
               "apps": ["explorer.exe/9020", "node.exe/4120", "pythonw.exe/7344"],
               "agents": [{"session": 1, "user": USER, "state": "active", "agent": "running", "age": 12, "pid": 7344,
-                          "version": "1.0.0"}],
+                          "version": VERSION}],
               "ha": {"ok": True, "at": (now - dt.timedelta(seconds=21)).isoformat(timespec="seconds"), "error": None},
               "pc": {"host": HOST, "windows": "Windows 11, build 26100", "boot_epoch": booted.timestamp(),
                      "disks": [{"mount": "C:\\", "total_gb": 930.6, "free_gb": 412.6},
@@ -434,7 +453,7 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
     with open(os.path.join(st, "status.json"), "w", encoding="utf-8") as f:
         json.dump(status, f)
     with open(os.path.join(out, "sessions", USER, "agent.json"), "w", encoding="utf-8") as f:
-        json.dump({"ts": now.isoformat(timespec="seconds"), "pid": 7344, "version": "1.0.0", "user": USER, "session": 1,
+        json.dump({"ts": now.isoformat(timespec="seconds"), "pid": 7344, "version": VERSION, "user": USER, "session": 1,
                    "started": booted.isoformat(timespec="seconds"),
                    "screens": ["\\\\.\\DISPLAY1 0,0 2560x1440 at 125%", "\\\\.\\DISPLAY2 2560,180 1920x1080 at 100%"],
                    "taskbar_pid": 9020, "locked": False, "idle_s": 3, "in_front": "firefox.exe", "mem_mb": 21.4,

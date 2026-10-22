@@ -361,7 +361,7 @@ const TABS = {};
 let current = null, timer = null;
 function show(tab) {
   // "#incidents:<report>" opens that report; "#charts:72:cpu_temp_c,v12_v" shows those readings over 72 hours
-  const [name, arg, arg2] = String(tab || "").split(":");
+  const [name, arg, ...more] = String(tab || "").split(":"), arg2 = more.join(":");    // (a drive's id has colons)
   if (name === "charts" && arg2) cSel = new Set(arg2.split(","));
   tab = TABS[name] ? name : "overview";
   current = tab;
@@ -431,13 +431,16 @@ async function header() {
 setInterval(header, 5000);
 
 // Overview -----------------------------------------------------------------------------------------------------
-let ovSpark = null, ovSparkAt = 0;
+let ovSpark = null, ovSparkAt = 0, ovDisk = null;
+const diskId = d => "disk:" + d.mount.replace(/\\$/, "");
 TABS.overview = {every: 5000, async load() {
   if (!overview) await header();
   const o = overview;
   const s = await api("/api/sensors");
   if (Date.now() - ovSparkAt > 60000) {
     ovSpark = await api("/api/history?cols=cpu_temp_c,cpu_power_w,cpu_load_pct,gpu_temp_c,gpu_power_w,gpu_util_pct,ram_pct,v12_v&hours=1&points=120");
+    const ids = (o.disks || []).map(diskId);
+    ovDisk = ids.length ? await api(`/api/history?cols=${ids.join(",")}&hours=168&points=168`) : null;
     ovSparkAt = Date.now();
   }
   const h = healthOf(o), a = o.ages, sv = o.service || {}, sens = sv.sensors || {}, now = o.now;
@@ -516,7 +519,7 @@ TABS.overview = {every: 5000, async load() {
   const disks = (o.disks || []).map(d => {
     const used = d.total_gb ? 1 - d.free_gb / d.total_gb : 0;
     const col = d.free_gb < 10 ? "var(--bad)" : d.free_gb < 30 ? "var(--warn)" : "var(--accent)";
-    return `<div style="margin-bottom:9px"><div class="reading" style="border:0;padding:0"><span class="l">${esc(d.mount)}</span><span class="r" style="font-size:13px">${gb(d.free_gb)} free of ${gb(d.total_gb)}</span></div><div class="meter"><div style="width:${(used * 100).toFixed(1)}%;background:${col}"></div></div></div>`;
+    return `<div style="margin-bottom:9px"><div class="reading" style="border:0;padding:0"><span class="l">${esc(d.mount)}</span><span class="r" style="font-size:13px">${gb(d.free_gb)} free of ${gb(d.total_gb)}</span></div><div class="meter"><div style="width:${(used * 100).toFixed(1)}%;background:${col}"></div></div>${diskTrend(diskId(d))}</div>`;
   }).join("");
   const since0 = o.first_log ? fmtDate(isoT(o.first_log.slice(0, 4) + "-" + o.first_log.slice(4, 6) + "-" + o.first_log.slice(6, 8) + "T00:00:00")) : null;
   const attrs = sv.attributes || {};
@@ -525,9 +528,10 @@ TABS.overview = {every: 5000, async load() {
       `<div class="reading"><span class="l">Caught${since0 ? " since " + since0 : ""}</span><span class="r">${po.length}</span></div>` +
       (lastPo ? `<div class="reading"><span class="l">Last</span><span class="r">${fmtDateTime(lastT, true)}</span></div><div class="reading"><span class="l">That was</span><span class="r">${fmtAgo(now - lastT)}</span></div>` : "") +
       since + `</div>` +
-    `<div class="card"><h3>Disks</h3>${disks}</div>` +
+    `<div class="card"><h3>Disks<span class="right"><a href="#charts:168:${(o.disks || []).map(diskId).join(",")}">chart</a></span></h3>${disks}</div>` +
     `<div class="card"><h3>This PC</h3>` +
       `<div class="reading"><span class="l">Windows</span><span class="r" style="font-size:13px">${esc(o.windows)}</span></div>` +
+      (/^waiting/.test(attrs.windows_update || "") ? `<div class="reading"><span class="l">Windows Update</span><span class="r warn-t" style="font-size:13px" title="An update is installed and finishes at the next restart">waiting for a restart since ${fmtDateTime(isoT(attrs.windows_update.replace(/^.* since /, "").replace(" ", "T")))}</span></div>` : "") +
       `<div class="reading"><span class="l">Up since</span><span class="r" style="font-size:13px">${fmtDateTime(o.boot)}</span></div>` +
       `<div class="reading"><span class="l">Uptime</span><span class="r" style="font-size:13px">${fmtDur(now - o.boot)}</span></div>` +
       note("Last shutdown or restart asked for", attrs.last_shutdown) +
@@ -544,11 +548,25 @@ function note(label, text) {
 function card(st, title, big, sub) {
   return `<div class="card"><h3><span class="dot ${st}"></span>${esc(title)}</h3><div class="big">${esc(big)}</div><div class="sub">${sub}</div></div>`;
 }
-function spark(hist, col, color) {
+// a drive's free space over the last week: the lowest point of each hour (a dip that filled up and went away shows),
+// and how much it changed
+function diskTrend(id) {
+  const ser = ovDisk && ovDisk.series[id]; if (!ser) return "";
+  const idx = ser.avg.map((v, i) => v == null ? -1 : i).filter(i => i >= 0); if (idx.length < 2) return "";
+  const first = idx[0], last = idx[idx.length - 1], ch = ser.avg[last] - ser.avg[first];
+  const since = ovDisk.t[last] - ovDisk.t[first] > 6 * 86400 ? "in 7 days" : "since " + fmtDateTime(ovDisk.t[first]);
+  const low = Math.min(...ser.min.filter(x => x != null));
+  return spark(ovDisk, id, ch < -5 ? "#ffb547" : "#5cc8ff", "min", "the last 7 days", 20) +
+    `<div class="dim" style="font-size:12px">${Math.abs(ch) < 0.05 ? "No change" : (ch > 0 ? "+" : "−") + gb(Math.abs(ch))} ${since} · lowest ${gb(low)}</div>`;
+}
+// (minSpan: the smallest range the height stands for, so a small change doesn't look like a cliff)
+function spark(hist, col, color, key = "avg", period = "the last hour", minSpan = 0) {
   const ser = hist.series[col]; if (!ser) return "";
-  const v = ser.avg, W = 300, H = 38;
+  const v = ser[key] || ser.avg, W = 300, H = 38;
   const vals = v.filter(x => x != null); if (vals.length < 2) return "";
-  let lo = Math.min(...vals), hi = Math.max(...vals); if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+  const vlo = Math.min(...vals), vhi = Math.max(...vals);
+  let lo = vlo, hi = vhi; if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+  if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
   const n = v.length; let d = "", pen = false;
   v.forEach((y, i) => {
     if (y == null) { pen = false; return; }
@@ -556,7 +574,7 @@ function spark(hist, col, color) {
     d += (pen ? "L" : "M") + x.toFixed(1) + " " + yy.toFixed(1); pen = true;
   });
   const lab = hist.cols[col];
-  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="${esc(lab.label)}, last hour"><title>${esc(lab.label)}, the last hour: ${fmtVal(lo, lab.unit)} to ${fmtVal(hi, lab.unit)}</title><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>`;
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="${esc(lab.label)}, ${period}"><title>${esc(lab.label)}, ${period}: ${fmtVal(vlo, lab.unit)} to ${fmtVal(vhi, lab.unit)}</title><path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
 // Sensors ------------------------------------------------------------------------------------------------------
@@ -730,6 +748,7 @@ TABS.charts = {every: 60000, async load(force) {
       TABS.charts.load(true);
     });
   }
+  $$("#c-picker input").forEach(i => { i.checked = cSel.has(i.value); });    // (a link may have picked others)
   const cols = cCols.filter(c => cSel.has(c.id));
   if (!cols.length) { $("#c-charts").innerHTML = `<div class="banner info">Pick a reading on the left.</div>`; return; }
   const host = $("#c-charts");
@@ -750,7 +769,7 @@ TABS.charts = {every: 60000, async load(force) {
   for (const m of (overview && overview.milestones) || []) { const t = isoT(m.at); if (t) marks.push({t, color: "#a78bfa", dash: "5 4", text: m.text}); }
   host.innerHTML = [...byUnit.keys()].map((u, i) => `<div class="chart" id="cc${i}"></div>`).join("");
   [...byUnit.entries()].forEach(([u, series], i) => drawChart($("#cc" + i), {series, t0: cData.start, t1: cData.end, unit: u, marks,
-    title: `<b>${esc(u === "°C" ? "Temperatures" : u === "W" ? "Power" : u === "V" ? "Voltages" : u === "%" ? "Load" : u)}</b>`}));
+    title: `<b>${esc(u === "°C" ? "Temperatures" : u === "W" ? "Power" : u === "V" ? "Voltages" : u === "%" ? "Load" : u === "GB free" ? "Free disk space" : u)}</b>`}));
   const gaps = cData.t.filter((_, i) => Object.values(cData.series)[0].avg[i] == null).length;
   $("#c-info").textContent = `${cData.rows.toLocaleString()} samples · one point per ${fmtDur(cData.step)}` + (gaps ? ` · ${gaps} empty (the PC off or the logger down)` : "") + " · line: average, band: min to max";
 }};

@@ -2,7 +2,7 @@ r"""The service: the sensors, the watcher, the ports and the status, under one r
 
 Threads: "sensors" (every 5 s) and "rails" (4 a second) log the sensors; "watcher" ticks every second (the watched
 apps' exits every second, the process list every 2 s, Windows' records and the ports every 15 s, the session agents
-and the status every 30 s, Home Assistant every minute); "supervisor" checks every 5 s that all three are moving,
+and the status every 30 s, the drives' free space and Home Assistant every minute); "supervisor" checks every 5 s that all three are moving,
 and only then pushes back the dead man's switch (deadman.py): a part that stops moving gets the process ended within
 3 minutes, and the service manager starts it again.
 
@@ -22,6 +22,7 @@ import psutil
 from . import VERSION, config, paths, poweroff, status, winapi
 from .agents import Agents
 from .deadman import DeadMan
+from .disks import DiskWatch
 from .homeassistant import HaReporter
 from .journal import Journal
 from .ports import PortWatch
@@ -39,15 +40,7 @@ MUTEX = "Global\\HWBlackboxService"
 
 def update_restart_pending():
     """Is Windows Update (or servicing) waiting for a restart?"""
-    import winreg
-    for key in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
-                r"SOFTWARE\Microsoft\Windows\WindowsUpdate\Auto Update\RebootRequired"):
-        try:
-            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key).Close()
-            return True
-        except OSError:
-            continue
-    return False
+    return status.restart_pending_since() is not None
 
 
 class Service:
@@ -74,7 +67,8 @@ class Service:
         self.ports = PortWatch(self.jrnl, paths.P.ports)
         self.agents = Agents(self.jrnl, restart=not test)
         self.watcher = Watcher(self.jrnl, self.cfg, self.ports, self.agents, test)
-        self.lock = threading.Lock()          # the watcher's state: its thread, and the service manager's calls
+        self.disks = DiskWatch(self.jrnl, self.cfg["sensors"]["keep_days"])
+        self.lock = threading.Lock()         # the watcher's state: its thread, and the service manager's calls
         self.deadman = None
         self.host = None
         self.stuck_noted = set()
@@ -145,6 +139,7 @@ class Service:
                 w.check_events()
                 w.logs_size()
                 w.sample_memory()
+            self.disks.sample()
         except Exception as e:
             self.error("watcher start", e)
         tick = 0
@@ -168,6 +163,8 @@ class Service:
                         w.users = {s["session"]: s["user"] for s in self.agents.view}
                     if tick % 600 == 5:
                         w.logs_size()
+                if tick % 60 == 0:
+                    self.disks.sample()           # (once a minute, just before a status)
                 if tick % 30 == 7:
                     self.refresh_status(push=tick % 60 == 37 or tick == 7)
             except Exception as e:

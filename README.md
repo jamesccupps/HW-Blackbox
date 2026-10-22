@@ -47,6 +47,9 @@ HW Blackbox is for the question Windows leaves unanswered: *why did the PC switc
   wrong program, and a server that should always be listening but isn't.
 - **Sessions.** Sign-ins, locks and sign-outs; sleep and resume; screen changes (resolution, position, scaling); the
   taskbar coming back after Explorer restarts; the clock being changed.
+- **Disk space.** Every fixed drive's free space, once a minute, to chart over days. The Windows drive is a problem
+  when it gets low or fills up fast (an update unpacking, a download, a runaway log). It also notes a Windows update
+  that's waiting for a restart.
 
 Optionally, it sends a status to **Home Assistant** every minute, so you can be alerted to a problem, a power loss, or
 a PC that has gone quiet.
@@ -112,9 +115,9 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 
 | Tab | Shows |
 |---|---|
-| **Overview** | the service and the agents, any problems, the key readings now, power-offs, disks |
+| **Overview** | the service and the agents, any problems, the key readings now, power-offs, disks (with their last week) |
 | **Sensors** | every sensor: current, minimum, maximum and average, since the page opened or since the service started |
-| **Charts** | the 5-second log over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
+| **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
 | **Power** | the 4-a-second rails over the last minutes, and every power-off caught |
 | **Events** | the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' records |
 | **Ports** | who listens where, and port problems |
@@ -133,8 +136,8 @@ admin, or from an elevated prompt:
 & "C:\Program Files\HWBlackbox\python\python.exe" -m hwblackbox set dashboard.port=9071 home_assistant.enabled=true
 ```
 
-The service reads `ports`, `home_assistant`, `dashboard` and `disk_warn_gb` again every minute. The watch list and the
-sensors' timing take a restart of the service (`Restart-Service HWBlackbox`).
+The service reads `ports`, `home_assistant`, `dashboard`, `disk_warn_gb` and `disk_drop_gb` again every minute. The
+watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`).
 
 ```jsonc
 {
@@ -154,9 +157,14 @@ sensors' timing take a restart of the service (`Restart-Service HWBlackbox`).
                      "entity": "sensor.my_pc_hw_blackbox", "name": "MY-PC HW Blackbox"},
   "dashboard": {"enabled": true, "port": 9070,
                 "milestones": [{"at": "2026-10-08T19:03:00", "text": "BIOS setting changed"}]},
-  "disk_warn_gb": 10
+  "disk_warn_gb": 10,
+  "disk_drop_gb": 10
 }
 ```
+
+**`disk_warn_gb`** and **`disk_drop_gb`** are about the Windows drive. It's a problem when less than `disk_warn_gb`
+is free, or when it loses `disk_drop_gb` within an hour (`0` turns that off). Other drives are logged and charted,
+not judged: a data drive that's nearly full is often meant to be.
 
 **`watch` rules:**
 - **`match`** and **`exclude`**: a word the command line must or mustn't have.
@@ -190,6 +198,7 @@ Every minute the entity gets state `ok` or `problem`, with these attributes:
 - `problems`: a list, in words;
 - `sensors`, `rails`, `cpu_temperature`, `watcher`, `session_agent`;
 - `last_incident`, `last_shutdown`, `last_power_loss`, `last_power_loss_died_at`;
+- `windows_update`: "waiting for a restart since ..." or "no restart waiting";
 - `disk_free_gb`, `logs_gb`, `boot`, `version`.
 
 It only reports changes that matter, so the history stays small. Every report still updates `last_reported`, which a
@@ -217,6 +226,7 @@ triggers:
 | `config.json` | the settings |
 | `logs\flight_YYYYMMDD.csv` | every 5 s: the key readings (kept 183 days, about 2.5 MB a day) |
 | `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
+| `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
 | `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line |
 | `state\status.json` | the status, every 30 s |
 | `state\sensors.json` | every sensor, with its minimum, maximum and average since the service started |
@@ -235,7 +245,7 @@ $hwb = "C:\Program Files\HWBlackbox\python\python.exe"
 ```
 
 The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings, the last 72 hours),
-`#sensors:logger`, `#incidents:<report file>`.
+`#charts:168:disk:C:` (C:'s free space, the last week), `#sensors:logger`, `#incidents:<report file>`.
 
 ## Privacy and security
 
