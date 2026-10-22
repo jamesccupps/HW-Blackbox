@@ -158,6 +158,7 @@ class ExitCodesTest(unittest.TestCase):
         self.assertFalse(crashed(1))
         self.assertFalse(crashed(None))
         self.assertTrue(crashed(0x80000003))
+        self.assertFalse(crashed(0xC000013A))            # (Ctrl+C or its console closing)
         self.assertIn("NTSTATUS 0xC0001234", meaning(0xC0001234))
         self.assertEqual(meaning(0), "clean exit")
         self.assertIn("couldn't be read", meaning(None))
@@ -425,6 +426,7 @@ class WatcherTest(TempData):
                          (True, False))                                                  # ... and it was cancelled
         self.assertEqual(self.ended(self.SIGN_OUT, [asked], session=2), (True, False))   # another session
         self.assertEqual(self.ended(0xC0000005, [asked]), (True, False))                 # a crash still counts
+        self.assertEqual(self.ended(0xC000013A, [asked]), (False, True))                 # a console closing with it
 
 
 if __name__ == "__main__":

@@ -56,8 +56,14 @@ def meaning(code):
     return "exit code %d" % code
 
 
+# Error-range codes that aren't crashes: Ctrl+C or the console closing (how a console program ends when its session
+# does: on 2026-10-21 a restart wrote an incident for one of Claude's), and the app container ending an app.
+NOT_CRASHES = (0xC000013A, 0xCFFFFFFF)
+
+
 def crashed(code):
-    return code is not None and code != 0xFFFFFFFF and (code >= 0xC0000000 or code in (0x80000003, 0xE0000008))
+    return code is not None and code != 0xFFFFFFFF and code not in NOT_CRASHES and \
+        (code >= 0xC0000000 or code in (0x80000003, 0xE0000008))
 
 
 def is_venv_launcher(pid):
