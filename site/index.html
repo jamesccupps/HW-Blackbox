@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HW Blackbox: a hardware monitor and black box for Windows</title>
+<meta name="description" content="HW Blackbox is a free, open source hardware monitor and black box for Windows: every sensor, the voltage rails four times a second, power-offs, app crashes, ports and disk space, recorded from boot, with a report after every power-off or crash.">
+<link rel="canonical" href="https://jamesccupps.github.io/HW-Blackbox/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="HW Blackbox: a hardware monitor and black box for Windows">
+<meta property="og:description" content="Free and open source. Why did the PC switch off, or why did that app close? Every sensor, the rails four times a second, and a report after every power-off or crash.">
+<meta property="og:url" content="https://jamesccupps.github.io/HW-Blackbox/">
+<meta property="og:image" content="https://jamesccupps.github.io/HW-Blackbox/images/overview.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="color-scheme" content="light dark">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "HW Blackbox",
+  "description": "A hardware monitor and black box for Windows: every sensor, the voltage rails four times a second, power-offs, app crashes, ports and disk space, recorded from boot as a Windows service, with a local dashboard and optional Home Assistant status.",
+  "url": "https://jamesccupps.github.io/HW-Blackbox/",
+  "codeRepository": "https://github.com/jamesccupps/HW-Blackbox",
+  "downloadUrl": "https://github.com/jamesccupps/HW-Blackbox/releases/latest",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Windows 10, Windows 11 (64-bit)",
+  "license": "https://opensource.org/licenses/MIT",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+}
+</script>
+<style>
+:root { --bg: #f6f7f9; --card: #ffffff; --text: #1a1f29; --dim: #5b6575; --line: #dde1e8; --accent: #0a84c6;
+        --accent-text: #ffffff; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06); }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0e1117; --card: #151a23; --text: #e6e9ef; --dim: #9aa4b5; --line: #252c39; --accent: #5cc8ff;
+          --accent-text: #0e1117; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif; }
+a { color: var(--accent); }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+header.hero { padding: 64px 0 28px; text-align: center; }
+.logo { width: 56px; height: 56px; }
+h1 { font-size: 44px; line-height: 1.15; margin: 14px 0 10px; letter-spacing: -.5px; }
+.tagline { font-size: 20px; color: var(--dim); max-width: 760px; margin: 0 auto 26px; }
+.btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.btn { display: inline-block; padding: 12px 22px; border-radius: 10px; background: var(--accent); color: var(--accent-text);
+       text-decoration: none; font-weight: 600; }
+.btn small { font-weight: 400; opacity: .8; margin-left: 6px; }
+.btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+.meta { color: var(--dim); font-size: 14px; margin-top: 12px; }
+.shot { display: block; width: 100%; border-radius: 12px; border: 1px solid var(--line); box-shadow: var(--shadow); }
+.caption { color: var(--dim); font-size: 14px; text-align: center; margin: 8px 0 0; }
+section { padding: 44px 0 8px; }
+h2 { font-size: 28px; margin: 0 0 18px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+.card h3 { margin: 0 0 6px; font-size: 17px; }
+.card p { margin: 0; color: var(--dim); font-size: 15px; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 22px; }
+.gallery figure { margin: 0; }
+.gallery figcaption { color: var(--dim); font-size: 14px; margin-top: 8px; }
+ol li, ul li { margin: 6px 0; }
+code { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 14px; }
+footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: center; }
+@media (max-width: 520px) { h1 { font-size: 34px; } .gallery { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="hero wrap">
+  <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#151a23" stroke="#252c39"/><path d="M4 19h6l3-9 5 15 3-8h7" fill="none" stroke="#5cc8ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <h1>HW Blackbox</h1>
+  <p class="tagline">A hardware monitor and black box for Windows. For the question Windows leaves open: <em>why did the PC switch off, or why did that app close?</em></p>
+  <div class="btns">
+    <a class="btn" id="primary" href="https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip">Download for Windows <small id="ver"></small></a>
+    <a class="btn ghost" href="https://github.com/jamesccupps/HW-Blackbox">Source on GitHub</a>
+  </div>
+  <p class="meta">Free and open source (MIT) · 64-bit Windows 10 or 11 · runs locally, nothing leaves your PC</p>
+</header>
+
+<main class="wrap">
+  <img class="shot" src="images/overview.png" alt="The dashboard's overview: the service, the sensors, the key readings now, power-offs, disks and this PC" width="1440" height="1000">
+  <p class="caption">The dashboard, here over made-up demo data.</p>
+
+  <section>
+    <h2>What it records</h2>
+    <div class="grid">
+      <div class="card"><h3>Every sensor, every 5 seconds</h3><p>CPU, motherboard sensor chip, fans, GPU (NVIDIA through NVML; AMD and Intel through LibreHardwareMonitor), load and memory, with minimum, maximum and average.</p></div>
+      <div class="card"><h3>The rails, four times a second</h3><p>+12 / +5 / +3.3 V, Vcore, SoC, CPU power and temperature, on their own high-priority thread. Each row is on disk before the next is taken.</p></div>
+      <div class="card"><h3>A report after every power-off</h3><p>When the PC really went down (the last logged row, not Windows' guess), how long it was off, and the last two minutes of readings.</p></div>
+      <div class="card"><h3>Apps closing and crashing</h3><p>Starts, exits and exit codes in words for the apps you choose, and an incident report with the last three minutes of everything.</p></div>
+      <div class="card"><h3>Windows' own records</h3><p>Crashes, hangs, display driver resets, who asked for a shutdown or restart, sign-ins and sign-outs, sleep, and updates waiting for a restart.</p></div>
+      <div class="card"><h3>Ports and disk space</h3><p>Who listens on which port, and clashes; every drive's free space, with a warning when the Windows drive fills up fast.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>A closer look</h2>
+    <div class="gallery">
+      <figure><img class="shot" src="images/charts.png" alt="Charts of temperatures, power and voltages over three days, with a power-off marked" loading="lazy"><figcaption><b>Charts:</b> any reading over up to a week, with power-offs and your own milestones marked.</figcaption></figure>
+      <figure><img class="shot" src="images/power.png" alt="The rails four times a second, and the power-offs caught" loading="lazy"><figcaption><b>Power:</b> the rails four times a second, and every power-off caught.</figcaption></figure>
+      <figure><img class="shot" src="images/events.png" alt="The events list: apps, shutdowns, sessions and Windows records" loading="lazy"><figcaption><b>Events:</b> crashes, shutdowns and who asked, sessions, port clashes.</figcaption></figure>
+      <figure><img class="shot" src="images/incident.png" alt="A power-off report" loading="lazy"><figcaption><b>Incidents:</b> the report written after a power-off.</figcaption></figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>Built to keep running</h2>
+    <div class="grid">
+      <div class="card"><h3>A real Windows service</h3><p>Runs from boot, whether or not anyone signs in, and Windows restarts it within seconds if it ever fails.</p></div>
+      <div class="card"><h3>A dead man's switch</h3><p>If any part of it stops moving, a native timer ends the service so Windows starts it fresh, even when Python itself is stuck.</p></div>
+      <div class="card"><h3>Home Assistant, if you like</h3><p>A status every minute, for alerts on a problem, a power loss, or a PC that has gone quiet.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <ol>
+      <li>For the CPU and motherboard sensors, install the PawnIO driver: <code>winget install namazso.PawnIO</code></li>
+      <li><a href="https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip">Download HWBlackbox-win64.zip</a> and unzip it.</li>
+      <li>Double-click <code>Install.cmd</code> and allow admin rights. It isn't code-signed, so Windows may show <em>Windows protected your PC</em>: click <b>More info</b>, then <b>Run anyway</b>.</li>
+      <li>Open <b>HW Blackbox</b> from the Start menu.</li>
+    </ol>
+    <p>Each <a href="https://github.com/jamesccupps/HW-Blackbox/releases">release</a> lists the zip's SHA-256, and the installer checks every file against the release's manifest. Running a newer <code>Install.cmd</code> updates it and keeps your settings and history.</p>
+  </section>
+
+  <section>
+    <h2>Private by design</h2>
+    <ul>
+      <li>The dashboard listens on <code>127.0.0.1</code> only. Nothing leaves the PC unless you turn on Home Assistant, and then only a status goes to your own server.</li>
+      <li>The app in front is kept for three minutes only, for incident reports. There's no history of what you use.</li>
+      <li>The program and its Python live in Program Files, where only admins can write, because the service runs as SYSTEM.</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="wrap">
+  HW Blackbox is MIT licensed · <a href="https://github.com/jamesccupps/HW-Blackbox">GitHub</a> ·
+  <a href="https://github.com/jamesccupps/HW-Blackbox/releases">Releases</a> ·
+  <a href="https://github.com/jamesccupps/HW-Blackbox/issues">Report a problem</a>
+</footer>
+
+<script>
+fetch("https://api.github.com/repos/jamesccupps/HW-Blackbox/releases/latest")
+  .then(function (r) { return r.ok ? r.json() : null; })
+  .then(function (d) { if (d && d.tag_name) document.getElementById("ver").textContent = d.tag_name; })
+  .catch(function () {});
+</script>
+</body>
+</html>

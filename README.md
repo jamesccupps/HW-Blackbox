@@ -1,22 +1,43 @@
 # HW Blackbox
 
-A hardware monitor and a black box for a Windows PC.
+A hardware monitor and a black box for a Windows PC. It answers the question Windows leaves open: *why did the PC
+switch off, or why did that app close?*
 
-It logs every sensor, and the voltage rails four times a second, into crash-safe files. It watches the apps you care
-about and records how they end, along with Windows' own crash and shutdown records and who listens on which port.
-After a power-off or an app crash it writes a report. A dashboard in the browser shows all of it, like HWiNFO with
-the history on top.
+**[⬇ Download for Windows](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
+(64-bit Windows 10 or 11) · [All releases](https://github.com/jamesccupps/HW-Blackbox/releases) ·
+[Website](https://jamesccupps.github.io/HW-Blackbox/)
 
-HW Blackbox is for the question Windows leaves unanswered: *why did the PC switch off, or why did that app close?*
+![The dashboard's overview: the service, the sensors, the key readings now, power-offs, disks and this PC](docs/screenshots/overview.png)
+*The screenshots show made-up data (`tools\make_demo.py`).*
 
-![The dashboard's overview](docs/screenshots/overview.png)
+- **Records the moment it happens.** Every sensor every 5 s, and the voltage rails four times a second, written to
+  disk before the next reading, so the last seconds before a power loss survive.
+- **Writes the report for you.** After a power-off: when the PC really went down (not Windows' guess), for how long,
+  and the last two minutes of readings. After an app crash: the exit code in words, and the last three minutes of
+  everything.
+- **Runs from boot, as a Windows service,** whether or not anyone signs in. Windows restarts it if it ever fails.
+- **Stays on your PC.** A local dashboard on `127.0.0.1`; optionally a status for your own Home Assistant, with
+  alerts for a problem, a power loss or a PC that has gone quiet.
+
+## Install
+
+1. For the CPU and motherboard sensors, install the PawnIO driver first: `winget install namazso.PawnIO`.
+2. Download **[HWBlackbox-win64.zip](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
+   and unzip it.
+3. Double-click **`Install.cmd`**. It asks for admin rights, installs the service and the agent, and shows what it
+   did. The scripts aren't code-signed, so Windows may show *Windows protected your PC*: click **More info**, then
+   **Run anyway**.
+4. Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`.
+
+Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`), and the installer checks every file
+against the release's manifest. More options are under [Install, in detail](#install-in-detail).
+
+## A closer look
 
 | | |
 |---|---|
 | ![Charts](docs/screenshots/charts.png) **Charts:** any reading over days, with power-offs (red) and your own milestones | ![Power](docs/screenshots/power.png) **Power:** the rails four times a second, and every power-off caught |
 | ![Events](docs/screenshots/events.png) **Events:** crashes, shutdowns and who asked, sessions, port clashes | ![Incident](docs/screenshots/incident.png) **Incidents:** the report written after a power-off |
-
-*(The screenshots show made-up data: `tools\make_demo.py`.)*
 
 ## What it records
 
@@ -88,12 +109,10 @@ What keeps it reliable:
 - **To build:** Python 3.12 (64-bit), and LibreHardwareMonitorLib's DLLs in `lib\` (see [Building](#building)). The
   installed program carries its own Python, so nothing else is needed on the PC.
 
-## Install
+## Install, in detail
 
-1. Download `HWBlackbox-<version>-win64.zip` from [Releases](../../releases) and unzip it.
-2. Double-click **`Install.cmd`**. It asks for admin rights, installs, and shows what it did.
-
-Install.cmd runs `install.ps1`:
+`Install.cmd`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), runs
+`install.ps1`:
 - It copies the program to `C:\Program Files\HWBlackbox` and checks every file against the release's manifest.
 - It sets up the data folder.
 - It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu.
