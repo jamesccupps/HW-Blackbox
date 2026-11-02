@@ -6,6 +6,7 @@ r"""Build the folder the installer copies to C:\Program Files\HWBlackbox:
                    only (no PYTHONPATH, no user site-packages, no current folder)
   app\hwblackbox\   the program
   app\lib\         LibreHardwareMonitorLib and its dependencies (from lib\)
+  licenses\        the full license texts of the bundled .NET libraries (MPL-2.0, Apache-2.0, MIT)
   install.ps1, README.md, LICENSE, THIRD_PARTY_NOTICES.md, MANIFEST.json
 
 The service runs as SYSTEM, so everything it loads has to be where only admins can write: hence a Python of its own
@@ -90,6 +91,7 @@ def main():
     for name in ("install.ps1", "Install.cmd", "Uninstall.cmd", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         if os.path.exists(os.path.join(ROOT, name)):
             shutil.copy2(os.path.join(ROOT, name), os.path.join(out, name))
+    copytree(os.path.join(ROOT, "licenses"), os.path.join(out, "licenses"))     # (the bundled DLLs' license texts)
     exe = os.path.join(py, "python.exe")
     # compiled now, so nothing is written next to the program at run time
     subprocess.run([exe, "-m", "compileall", "-q", "-j", "0", os.path.join(py, "Lib"), os.path.join(out, "app")],

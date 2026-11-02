@@ -1,8 +1,13 @@
 # Third-party software
 
-The built program (`build\HWBlackbox`, installed to `C:\Program Files\HWBlackbox`) bundles the software below. Each is
-used under its own license; the license texts ship with the packages (Python packages: their `*.dist-info` folders
-under `python\Lib\site-packages`).
+The built program (`build\HWBlackbox`, installed to `C:\Program Files\HWBlackbox`) bundles the software below, each
+used unmodified under its own license. The license texts ship with it:
+- `licenses\MPL-2.0.txt` (LibreHardwareMonitorLib, RAMSPDToolkit), `licenses\Apache-2.0.txt` (HidSharp) and
+  `licenses\dotnet-runtime-MIT.txt` (the System.* libraries), for the .NET libraries in `app\lib\`;
+- CPython's `python\LICENSE.txt`;
+- the Python packages' `*.dist-info` folders under `python\Lib\site-packages`.
+
+The MPL-2.0 libraries' source code is at the links below.
 
 | Software | Version | License | Where |
 |---|---|---|---|

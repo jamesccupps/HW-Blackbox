@@ -251,6 +251,18 @@ $hwb = "C:\Program Files\HWBlackbox\python\python.exe"
 The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings, the last 72 hours),
 `#charts:168:disk:C:` (C:'s free space, the last week), `#sensors:logger`, `#incidents:<report file>`.
 
+## Limitations
+
+- **Tested on one PC so far:** an AMD Ryzen 5 5600G on a B550 board, with an NVIDIA RTX 3060, on Windows 11. Other
+  CPUs, sensor chips and GPUs go through LibreHardwareMonitor and should work. Which readings show up, and what
+  they're called, varies by board, and the rails need a sensor chip that reports them.
+- **It isn't code-signed.** Windows SmartScreen may warn about `Install.cmd` the first time. Check the zip's SHA-256
+  against the release notes; the installer then checks every file against the release's manifest.
+- **Times are local, without a time zone.** The logs and records use the PC's local time, so when daylight saving
+  ends, the repeated hour appears twice in the logs and on the charts. The checks that raise problems aren't
+  affected: they use a steady clock.
+- **Windows 10 and 11, 64-bit only.** Ports are TCP only.
+
 ## Privacy and security
 
 - **Nothing leaves the PC** unless you turn Home Assistant on, and then only the status above goes to your own Home
