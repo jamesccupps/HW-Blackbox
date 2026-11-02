@@ -43,8 +43,9 @@ def defaults():
                            "entity": "sensor.%s_hw_blackbox" % slug(HOST), "name": "%s HW Blackbox" % HOST},
         # The page. "milestones": [{"at": "2026-10-08T19:03:00", "text": "..."}], marked on the charts.
         "dashboard": {"enabled": True, "port": 9070, "milestones": []},
-        # The Windows drive: a problem below disk_warn_gb free, or when it loses disk_drop_gb within an hour
-        # (something filling it fast). Every fixed drive's free space is logged every minute (logs\disks_*.csv).
+        # The Windows drive: a problem below disk_warn_gb free, or when it loses disk_drop_gb within an hour and at that
+        # rate would be under disk_warn_gb within two hours (filling up fast). Every fixed drive's free space is logged
+        # every minute (logs\disks_*.csv).
         "disk_warn_gb": 10,
         "disk_drop_gb": 10,
     }

@@ -14,6 +14,16 @@ def addr_text(ip, port):
     return "[%s]:%d" % (ip, port) if ":" in ip else "%s:%d" % (ip, port)
 
 
+def overlap(a, b):
+    """Could listeners on these two addresses (the same port) get each other's connections? Only within one address
+    family, and only on the same address or with one of them on all addresses (0.0.0.0 or ::). (2026-10-29: Tailscale
+    on its own 100.x address and a program on 127.0.0.2 were taken for a clash; so was one browser on 127.0.0.1 and
+    ::1.)"""
+    if (":" in a) != (":" in b):
+        return False
+    return a == b or a in ("0.0.0.0", "::") or b in ("0.0.0.0", "::")
+
+
 def same_program(exe, want):
     """exe names, ignoring case; python.exe and pythonw.exe count as one (the same program, with or without a console)."""
     norm = lambda x: (x or "").lower().replace("pythonw.exe", "python.exe")        # noqa: E731
@@ -38,9 +48,9 @@ class PortWatch:
     """Scanned every 15 s.
     - A listener counts once it's been seen at OPEN_AFTER scans in a row (so one that lives for a few seconds, like a
       language server's, makes no records), and is gone after CLOSE_AFTER scans without it.
-    - Problems: two programs listening on the same port (say one on 0.0.0.0 and one on 127.0.0.1: Windows allows it,
-      and the more specific one quietly gets the connections); a port in ports.expected held by another program; an
-      "always" server not listening for down_after_min.
+    - Problems: two programs listening on the same port where their addresses overlap (say one on 0.0.0.0 and one on
+      127.0.0.1: Windows allows it, and the more specific one quietly gets the connections); a port in
+      ports.expected held by another program; an "always" server not listening for down_after_min.
     - Records: "ports" once (everything listening), then "port" for each change and each problem starting or ending.
     - state\\ports.json has the table and the problems after every scan, for the dashboard."""
 
@@ -112,16 +122,20 @@ class PortWatch:
         expected = {int(k): v for k, v in (pc.get("expected") or {}).items() if str(k).isdigit() and isinstance(v, dict)}
         ignore = {int(x) for x in (pc.get("ignore") or []) if str(x).isdigit()}
         by_port = collections.defaultdict(dict)                   # port -> {pid: entry}
+        every = collections.defaultdict(list)                     # port -> every entry (a program on several addresses)
         for e in self.sorted_open():
             by_port[e["port"]].setdefault(e["pid"], e)
+            every[e["port"]].append(e)
         found = {}
         for port, owners in by_port.items():
             if port in ignore:
                 continue
-            if len(owners) > 1:
+            clash = {a["pid"]: a for a in every[port] for b in every[port]
+                     if a["pid"] != b["pid"] and overlap(a["ip"], b["ip"])}
+            if len(clash) > 1:
                 found["shared:%d" % port] = "Port %d is held by %d programs: %s" % (
-                    port, len(owners), ", ".join("%s (pid %d, on %s)" % (e["exe"], e["pid"], e["ip"])
-                                                 for e in owners.values()))
+                    port, len(clash), ", ".join("%s (pid %d, on %s)" % (e["exe"], e["pid"], e["ip"])
+                                                for e in clash.values()))
             want = expected.get(port) or {}
             if want.get("exe"):
                 wrong = [e for e in owners.values() if not same_program(e["exe"], want["exe"])]

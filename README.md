@@ -43,8 +43,9 @@ HW Blackbox is for the question Windows leaves unanswered: *why did the PC switc
 - **Windows' records.** Crashes, hangs and error reports for any app, display driver resets, low memory, services
   ending unexpectedly, boots and shutdowns. Records written while the service wasn't running are read at its next
   start.
-- **Ports.** Who listens on which TCP port, every 15 s. It flags two programs on one port, a known port held by the
-  wrong program, and a server that should always be listening but isn't.
+- **Ports.** Who listens on which TCP port, every 15 s. It flags two programs on one port where their addresses
+  overlap (one on all addresses and one on 127.0.0.1, say), a known port held by the wrong program, and a server
+  that should always be listening but isn't.
 - **Sessions.** Sign-ins, locks and sign-outs; sleep and resume; screen changes (resolution, position, scaling); the
   taskbar coming back after Explorer restarts; the clock being changed.
 - **Disk space.** Every fixed drive's free space, once a minute, to chart over days. The Windows drive is a problem
@@ -163,8 +164,11 @@ watch list and the sensors' timing take a restart of the service (`Restart-Servi
 ```
 
 **`disk_warn_gb`** and **`disk_drop_gb`** are about the Windows drive. It's a problem when less than `disk_warn_gb`
-is free, or when it loses `disk_drop_gb` within an hour (`0` turns that off). Other drives are logged and charted,
-not judged: a data drive that's nearly full is often meant to be.
+is free, or when it's filling up fast: `disk_drop_gb` gone within an hour, and at that rate under `disk_warn_gb`
+within two hours (`0` turns that off). A drive with plenty of room that swings by tens of GB (temporary files
+written and deleted all day) isn't flagged. Once on, "filling up fast" stays on for 15 minutes, so a swing doesn't
+make it flicker. Other drives are logged and charted, not judged: a data drive that's nearly full is often meant to
+be.
 
 **`watch` rules:**
 - **`match`** and **`exclude`**: a word the command line must or mustn't have.

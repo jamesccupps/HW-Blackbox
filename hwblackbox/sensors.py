@@ -503,6 +503,9 @@ class Sensors:
         self.latest = {}
         self.count = 0
         self.errors = 0
+        # time.monotonic() of the last row written: how long ago that was is never thrown by the clock (the rows' own
+        # local times repeat an hour when daylight saving ends: on 2026-11-01 that read as "not logging" for an hour)
+        self.written = None
         self.fast_count = 0
         self.fast_last = None
         self.fast_mark = None
@@ -565,6 +568,7 @@ class Sensors:
                 with self.lock:
                     self.latest = row
                     self.count += 1
+                    self.written = time.monotonic()
                     self.lhm_count = len(lhm)
                 if row["timestamp"][:10] != day:
                     if day is not None:           # a new day: the clean-up
@@ -613,8 +617,8 @@ class Sensors:
         """What the service's status file and Home Assistant get."""
         with self.lock:
             row = dict(self.latest)
-            count, errors = self.count, self.errors
-        now, rows = time.time(), self.fast_count
+            count, errors, written = self.count, self.errors, self.written
+        now, rows = time.monotonic(), self.fast_count                # (a clock change can't skew the rate)
         prev, self.fast_mark = self.fast_mark, (now, rows)
         if not self.rails_on():
             self.fast_hz = None
@@ -626,6 +630,7 @@ class Sensors:
         return {"lhm": "ok" if s and s.lhm.computer else ((s.lhm.error if s else None) or "off"),
                 "nvml": "ok" if s and s.nvml.handle else ((s.nvml.error if s else None) or "off"),
                 "admin": s.admin if s else None, "sensors": self.lhm_count, "last_sample": row.get("timestamp"),
+                "last_sample_age_s": None if written is None else round(now - written, 1),
                 "rows": count, "errors": errors, "fast_last": self.fast_last, "fast_rows": rows,
                 "fast_hz": self.fast_hz, "rails_ok": row.get("v12_v", "") != "",
                 "cpu_temp_ok": row.get("cpu_temp_c", "") != ""}

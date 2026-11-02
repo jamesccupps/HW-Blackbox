@@ -57,7 +57,7 @@ def meaning(code):
 
 
 # Error-range codes that aren't crashes: Ctrl+C or the console closing (how a console program ends when its session
-# does: on 2026-10-21 a restart wrote an incident for one of Claude's), and the app container ending an app.
+# does: on 2026-10-21 a restart wrote an incident for a desktop app's helper), and the app container ending an app.
 NOT_CRASHES = (0xC000013A, 0xCFFFFFFF)
 
 

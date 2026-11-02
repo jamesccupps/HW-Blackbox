@@ -120,6 +120,15 @@ class PortsTest(unittest.TestCase):
         self.assertIn("down:8765", self.pw.problems)                 # (down_after_min 0: at once)
         self.assertIn("problem over", [e["event"] for e in self.events()])
 
+    def test_shared_only_where_addresses_overlap(self):
+        t = {("100.64.0.7", 443): 1, ("127.0.0.2", 443): 2,             # two addresses of one family: no clash
+             ("127.0.0.1", 8809): 1, ("::1", 8809): 2,                    # IPv4 and IPv6: no clash
+             ("0.0.0.0", 8787): 2, ("127.0.0.1", 8787): 3,                # all addresses and one of them: a clash
+             ("::", 9000): 1, ("::1", 9000): 3}
+        self.scan(t)
+        self.scan(t)
+        self.assertEqual(sorted(k for k in self.pw.problems if k.startswith("shared")), ["shared:8787", "shared:9000"])
+
     def test_holders(self):
         self.scan({("127.0.0.1", 8765): 1})
         self.scan({("127.0.0.1", 8765): 1})
@@ -288,6 +297,17 @@ class SensorsTest(unittest.TestCase):
                          [("GPU", "AMD Radeon RX 7800 XT"), ("GPU", "AMD Radeon(TM)")])
 
 
+class SensorsAgeTest(unittest.TestCase):
+    def test_last_sample_age_from_a_steady_clock(self):
+        from hwblackbox.sensors import Sensors
+        s = Sensors({"sensors": {"interval_s": 5, "rails_interval_s": 0.25, "keep_days": 1, "rails_keep_days": 1}},
+                    Recorder(), "now")
+        self.assertIsNone(s.status()["last_sample_age_s"])
+        # a row stamped in the hour that repeats when daylight saving ends, written 4 s ago: 4 s old, not an hour
+        s.latest, s.written = {"timestamp": "2026-11-01T01:00:05"}, time.monotonic() - 4
+        self.assertAlmostEqual(s.status()["last_sample_age_s"], 4, delta=1)
+
+
 class PowerOffTest(TempData):
     def test_rows_before_skips_damage(self):
         from hwblackbox.poweroff import _event_date, _rows_before
@@ -342,16 +362,21 @@ class DisksTest(TempData):
         w = disks.DiskWatch(Recorder(), 183)
         sysd, now = disks.system_drive(), time.time()
         cfg = {"disk_warn_gb": 10, "disk_drop_gb": 10}
-        w.now = {sysd: (31.8, 465.0)}
-        w.history.extend([(now - 3000, 46.0), (now - 1800, 40.0), (now, 31.8)])
-        self.assertEqual(w.problems(cfg, now), ["%s is filling up fast: 14.2 GB gone in 50 min (31.8 GB free)" % sysd])
-        w.history.clear()
-        w.history.extend([(now - 3000, 38.0), (now, 31.8)])                      # 6.2 GB: not fast
-        self.assertEqual(w.problems(cfg, now), [])
-        w.now = {sysd: (8.5, 465.0)}
-        w.history.clear()
-        w.history.extend([(now - 3000, 9.0), (now, 8.5)])
-        self.assertEqual(w.problems(cfg, now), ["%s has only 8.5 GB free" % sysd])
+        def look(free, history, at=now):
+            w.now = {sysd: (free, 465.0)}
+            w.history.clear()
+            w.history.extend(history)
+            return w.problems(cfg, at)
+
+        fast = "%s is filling up fast: 14.2 GB gone in 50 min; at that rate it's under 10 GB free in about 1 h 16 min"
+        self.assertEqual(look(31.8, [(now - 3000, 46.0), (now - 1800, 40.0), (now, 31.8)]), [fast % sysd])
+        # held on for a quarter of an hour after it was last true, so a swing doesn't make it flicker; then off
+        self.assertEqual(look(33.0, [(now - 3000, 38.0), (now + 600, 33.0)], now + 600), [fast % sysd])
+        self.assertEqual(look(33.0, [(now - 3000, 38.0), (now + 1000, 33.0)], now + 1000), [])
+        # 15 GB in 50 min with 85 GB left: under 10 GB only in four hours, so not urgent (2026-10-23's swings)
+        self.assertEqual(look(85.0, [(now - 3000, 100.0), (now, 85.0)]), [])
+        self.assertEqual(look(31.8, [(now - 3000, 38.0), (now, 31.8)]), [])            # 6.2 GB: not fast
+        self.assertEqual(look(8.5, [(now - 3000, 30.0), (now, 8.5)]), ["%s has only 8.5 GB free" % sysd])
         self.assertEqual(w.problems(dict(cfg, disk_drop_gb=0), now), ["%s has only 8.5 GB free" % sysd])
 
     def test_log_and_seed(self):

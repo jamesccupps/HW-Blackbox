@@ -78,8 +78,10 @@ def build(svc):
         if now - svc.started > 120:
             problems.append("The sensors haven't started (see the service's error records)")
     if sens is not None:
-        last = parse_iso(sens.get("last_sample") or "")
-        age = now - last if last else None
+        age = sens.get("last_sample_age_s")
+        if age is None and sens.get("last_sample"):           # (no row written yet by this run: the row's own time)
+            last = parse_iso(sens["last_sample"])
+            age = now - last if last else None
         a["sensors"] = "logging" if age is not None and age < 60 else "not logging"
         if a["sensors"] != "logging":
             problems.append("The sensors aren't logging" + ("" if age is None else " (last sample %d min ago)"

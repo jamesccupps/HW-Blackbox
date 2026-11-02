@@ -9,7 +9,7 @@ under `python\Lib\site-packages`).
 | [CPython](https://www.python.org) (the interpreter and its standard library) | 3.12 | Python Software Foundation License | `python\` (its `LICENSE.txt`) |
 | [LibreHardwareMonitorLib](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | 0.9.6 | Mozilla Public License 2.0 | `app\lib\LibreHardwareMonitorLib.dll` |
 | [HidSharp](http://software.seekye.com/hidsharp) | 2.6.4 | Apache License 2.0 | `app\lib\HidSharp.dll` |
-| [RAMSPDToolkit](https://github.com/Blacktempel/RAMSPDToolkit) (LibreHardwareMonitorLib's dependency) | 1.4.2 | see its project | `app\lib\RAMSPDToolkit-NDD.dll` |
+| [RAMSPDToolkit](https://github.com/Blacktempel/RAMSPDToolkit) (LibreHardwareMonitorLib's dependency) | 1.4.2 | Mozilla Public License 2.0 | `app\lib\RAMSPDToolkit-NDD.dll` |
 | System.Buffers, System.Memory, System.Numerics.Vectors, System.Runtime.CompilerServices.Unsafe, System.Threading.AccessControl, System.Threading.Tasks.Extensions ([.NET](https://github.com/dotnet/runtime)) | 4.x–10.x | MIT | `app\lib\` |
 | [pythonnet](https://github.com/pythonnet/pythonnet) | 3.1.0 | MIT | `python\Lib\site-packages` |
 | [clr-loader](https://github.com/pythonnet/clr-loader) | 0.3.1 | MIT | 〃 |

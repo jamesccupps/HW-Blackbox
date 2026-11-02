@@ -3,9 +3,12 @@ r"""The drives' free space: every fixed drive once a minute into a log, and the 
   logs\disks_YYYYMMDD.csv   timestamp, drive, free_gb, total_gb: a row per fixed drive a minute (about 100 KB a day
                             for two drives). One drive a row, so drives can come and go without the columns changing.
 
-The problems (the Windows drive only): less than disk_warn_gb free, or disk_drop_gb gone within the last hour
-(something filling it fast: a download, a build, an update unpacking). Other drives are logged and charted, not
-judged: a data drive that's nearly full is often meant to be."""
+The problems (the Windows drive only): less than disk_warn_gb free, or filling up fast: disk_drop_gb gone within the
+last hour AND, at that rate, under disk_warn_gb within SOON (a download, a build, an update unpacking). A drive with
+room to spare that swings by tens of GB (temporary files written and deleted all day) isn't in danger, and
+2026-10-23 showed it: a dozen phone alerts for that, from the drop alone. Once on, "filling up fast" stays on for
+HOLD after it's last true, so a swing doesn't make it flicker. Other drives are logged and charted, not judged: a
+data drive that's nearly full is often meant to be."""
 import collections
 import csv
 import datetime as dt
@@ -20,7 +23,13 @@ from .util import now_iso, parse_iso, prune
 
 COLUMNS = ["timestamp", "drive", "free_gb", "total_gb"]
 WINDOW = 3600          # seconds "filling fast" looks back
+SOON = 7200            # ... and how soon, at that rate, the drive must be headed under disk_warn_gb for it to count
+HOLD = 900             # seconds "filling fast" stays on after it was last true
 LIST_EVERY = 600       # seconds between looks at which drives there are (slow with a network or removable drive)
+
+
+def fmt_minutes(m):
+    return "%d min" % max(1, round(m)) if m < 60 else "%d h %02d min" % (m // 60, m % 60)
 
 
 def system_drive():
@@ -66,6 +75,7 @@ class DiskWatch:
         self.history = collections.deque()      # (epoch, free GB) of the Windows drive over the last WINDOW seconds
         self.day = None
         self.noted = None                       # the last error written to the journal (each one once)
+        self.fast = None                        # (text, until): "filling up fast", held on for HOLD
         self.seed()
 
     def seed(self):
@@ -122,16 +132,27 @@ class DiskWatch:
 
     def problems(self, cfg, now=None):
         """The Windows drive's problems, in words."""
-        sysd, free = system_drive(), self.free_gb()
+        sysd, free, now = system_drive(), self.free_gb(), now or time.time()
         if free is None:
             return []
         out = []
-        if free < (cfg.get("disk_warn_gb") or 10):
+        warn = cfg.get("disk_warn_gb") or 10
+        if free < warn:
             out.append("%s has only %.1f GB free" % (sysd, free))
-        drop = cfg.get("disk_drop_gb") or 0
-        if drop > 0 and self.history:
+        drop, fast = cfg.get("disk_drop_gb") or 0, None
+        if drop > 0 and self.history and free >= warn:
             t_hi, hi = max(self.history, key=lambda x: x[1])
-            if hi - free >= drop:
-                mins = max(1, round(((now or time.time()) - t_hi) / 60))
-                out.append("%s is filling up fast: %.1f GB gone in %d min (%.1f GB free)" % (sysd, hi - free, mins, free))
+            gone, mins = hi - free, max(1.0, (now - t_hi) / 60)
+            left = (free - warn) / (gone / mins) if gone > 0 else None      # minutes until under warn, at this rate
+            if gone >= drop and left is not None and left * 60 <= SOON:
+                fast = "%s is filling up fast: %.1f GB gone in %s; at that rate it's under %g GB free in about %s" % (
+                    sysd, gone, fmt_minutes(mins), warn, fmt_minutes(left))
+        if fast:
+            self.fast = (fast, now + HOLD)
+        elif self.fast and now < self.fast[1] and drop > 0 and free >= warn:
+            fast = self.fast[0]                                              # (held on: no flicker)
+        else:
+            self.fast = None
+        if fast:
+            out.append(fast)
         return out
