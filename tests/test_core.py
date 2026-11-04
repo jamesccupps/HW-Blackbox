@@ -218,6 +218,31 @@ class DashboardTest(TempData):
         self.assertEqual(d["level"], "info")
         self.assertIn("session was ending", d["text"])
 
+    def test_event_wording(self):
+        from hwblackbox.dashboard.server import describe, human_ran
+        # how long an app ran, the way a person says it (rounded to the smaller unit first: never "1 h 60 min")
+        self.assertEqual([human_ran(x) for x in ("0h 00m 03s", "0h 01m 01s", "0h 05m 00s", "26h 12m 45s",
+                                                  "1h 59m 50s", "47h 40m 00s", "?")],
+                         ["3 s", "1 min 1 s", "5 min", "1 d 2 h", "2 h", "2 d", "?"])
+        t = time.time()
+        d = describe({"kind": "exit", "app": "Slate", "meaning": "clean exit", "code": "0x00000000",
+                      "ran": "0h 01m 01s"}, t)
+        self.assertEqual(d["text"], "Slate ended: clean exit (ran 1 min 1 s)")
+        # a port whose program restarted, and one another program took over
+        d = describe({"kind": "port", "event": "new owner", "addr": "127.0.0.1:8737", "exe": "tool.exe", "pid": 31,
+                      "before": "tool.exe/29652"}, t)
+        self.assertEqual(d["text"], "Port 127.0.0.1:8737: tool.exe restarted (pid 29652, now 31)")
+        d = describe({"kind": "port", "event": "new owner", "addr": "0.0.0.0:80", "exe": "b.exe", "app": "Web",
+                      "pid": 7, "before": "a.exe/5"}, t)
+        self.assertEqual(d["text"], "Port 0.0.0.0:80: now b.exe (Web) (before: a.exe, pid 5)")
+        d = describe({"kind": "port", "event": "open", "addr": "[::]:443", "exe": "srv.exe", "pid": 9}, t)
+        self.assertEqual(d["text"], "Port [::]:443 open: srv.exe")
+        # Windows Error Reporting's names, in words
+        d = describe({"kind": "winevent", "source": "Windows Error Reporting", "id": 1001, "app": "app.exe",
+                      "inserts": ["", "", "RADAR_PRE_LEAK_64"]}, t)
+        self.assertEqual(d["text"], "Windows Error Reporting, app.exe: Windows' memory-leak check flagged it "
+                                    "(RADAR_PRE_LEAK_64)")
+
     def test_bucketed(self):
         from hwblackbox.dashboard.server import bucketed
         nan = float("nan")

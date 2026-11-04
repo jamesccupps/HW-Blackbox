@@ -96,6 +96,11 @@ foreach ($f in 'python\pythonw.exe', 'python\python312._pth', 'app\hwblackbox\__
 $manifest = Get-Content (Join-Path $PSScriptRoot 'MANIFEST.json') -Raw | ConvertFrom-Json
 Say "HW Blackbox $($manifest.version), built $($manifest.built), $($manifest.files) files"
 if ($PSScriptRoot.TrimEnd('\') -ieq $Dest) { Say 'run the install from the built folder, not from the installed one'; exit 1 }
+# the CPU and motherboard sensors need the PawnIO driver (LibreHardwareMonitor reads them through it)
+$pawn = Get-CimInstance Win32_SystemDriver -Filter "Name='PawnIO'" -ErrorAction SilentlyContinue
+$pawnHint = 'install the PawnIO driver (winget install namazso.PawnIO), then run Install.cmd again'
+if ($pawn) { Say "PawnIO driver: $($pawn.State)" }
+else { Warn "the PawnIO driver isn't installed, so there will be no CPU or motherboard sensors (the rails, the CPU temperature): $pawnHint" }
 
 Say '== 2. Stop a running HW Blackbox (an update)'
 Stop-HWBlackbox
@@ -205,7 +210,7 @@ else {
   if ($st.sensors) {
     Say "sensors: LibreHardwareMonitor $($st.sensors.lhm), NVML $($st.sensors.nvml), admin $($st.sensors.admin), $($st.sensors.sensors) sensors, rails $($st.sensors.rails_ok), CPU temperature $($st.sensors.cpu_temp_ok)"
     if (-not $st.sensors.admin) { Fail 'the sensors are not elevated' }
-    if (-not $st.sensors.rails_ok) { Fail 'no rail voltages' }
+    if (-not $st.sensors.rails_ok) { Fail ('no rail voltages' + $(if (-not $pawn) { ": $pawnHint" } else { ' (the board''s sensor chip may not be supported)' })) }
   } else { Fail 'the sensors have not started' }
 }
 $me = $env:USERNAME
@@ -228,7 +233,8 @@ if ($hbFile) {
   } else { Warn "the dashboard isn't serving: $($hb.dashboard.error)" }
 } else { Warn 'no session agent heartbeat in 45 s (the service starts it within minutes, and every sign-in does)' }
 
-if ($script:failed) { Say "DONE WITH PROBLEMS: $($script:failed -join '; ')"; exit 2 }
-if ($script:warned) { Say "DONE WITH WARNINGS: $($script:warned -join '; ')"; exit 0 }
-Say 'DONE'
+$open = 'Open HW Blackbox from the Start menu' + $(if ($hbFile -and $hb.dashboard.port) { " (or http://127.0.0.1:$($hb.dashboard.port)/ in a browser)." } else { '.' })
+if ($script:failed) { Say "DONE WITH PROBLEMS: $($script:failed -join '; ')"; Say $open; exit 2 }
+if ($script:warned) { Say "DONE WITH WARNINGS: $($script:warned -join '; ')"; Say $open; exit 0 }
+Say "DONE. $open"
 exit 0

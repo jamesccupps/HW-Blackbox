@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,17 +36,40 @@ def main():
         reports = json.loads(r.read())["incidents"]
     report = next((x["name"] for x in reports if x["src"] == "power"), "")
     os.makedirs(args.out, exist_ok=True)
-    profile = tempfile.mkdtemp(prefix="hwb-edge-")
-    try:
-        for name, frag, w, h in SHOTS:
-            path = os.path.join(args.out, name + ".png")
-            subprocess.run([edge, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-                            "--no-default-browser-check", "--force-device-scale-factor=1", "--user-data-dir=" + profile,
-                            "--window-size=%d,%d" % (w, h), "--virtual-time-budget=15000", "--screenshot=" + path,
-                            base + frag.format(report=report)], capture_output=True, timeout=120)
-            print("%-9s %s" % (name, "%d KB" % (os.path.getsize(path) // 1024) if os.path.exists(path) else "FAILED"))
-    finally:
-        shutil.rmtree(profile, ignore_errors=True)
+    failed = 0
+    for name, frag, w, h in SHOTS:
+        # each shot into a new file, with a profile of its own (an Edge still closing would hand the next one to
+        # itself and take no picture), and only a new picture replaces the old one: a failure can't pass as done
+        path = os.path.join(args.out, name + ".png")
+        new = path + ".new.png"
+        if os.path.exists(new):
+            os.remove(new)
+        profile = tempfile.mkdtemp(prefix="hwb-edge-")
+        try:
+            r = subprocess.run([edge, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+                                "--no-default-browser-check", "--force-device-scale-factor=1",
+                                "--user-data-dir=" + profile, "--window-size=%d,%d" % (w, h),
+                                "--virtual-time-budget=15000", "--screenshot=" + new,
+                                base + frag.format(report=report)], capture_output=True, text=True, timeout=120)
+            # (msedge.exe can return before its browser process has written the picture: wait for the file, and
+            # for it to stop growing)
+            deadline, last = time.time() + 60, -1
+            while time.time() < deadline:
+                size = os.path.getsize(new) if os.path.exists(new) else -1
+                if size > 0 and size == last:
+                    break
+                last = size
+                time.sleep(1)
+        finally:
+            shutil.rmtree(profile, ignore_errors=True)
+        if os.path.exists(new) and os.path.getsize(new) > 0:
+            os.replace(new, path)
+            print("%-9s %d KB" % (name, os.path.getsize(path) // 1024))
+        else:
+            failed += 1
+            print("%-9s FAILED (exit %s) %s" % (name, r.returncode, (r.stderr or "").strip()[-300:]))
+    if failed:
+        raise SystemExit("%d screenshots failed" % failed)
 
 
 if __name__ == "__main__":

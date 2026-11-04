@@ -8,8 +8,8 @@
 <style>
 :root {
   --bg: #0d1016; --bg2: #11151d; --panel: #151a23; --panel2: #1a202b; --line: #252c39; --line2: #2f3747;
-  --text: #e6e9ef; --muted: #8d96a7; --dim: #5f6879; --accent: #5cc8ff; --good: #3ecf8e; --warn: #f0b429;
-  --bad: #ff5d5d; --violet: #a78bfa;
+  --text: #e6e9ef; --muted: #8d96a7; --dim: #7d8698; --accent: #5cc8ff; --good: #3ecf8e; --warn: #f0b429;
+  --bad: #ff5d5d; --violet: #a78bfa; --hdr: 86px;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
@@ -18,6 +18,8 @@ html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.
 body { min-height: 100vh; }
 a { color: var(--accent); }
 button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+tr:focus-visible { outline-offset: -2px; }
 .mono, td.num, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* header */
@@ -33,8 +35,11 @@ header { position: sticky; top: 0; z-index: 10; background: rgba(13,16,22,.94); 
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
 .dot.good { background: var(--good); box-shadow: 0 0 6px rgba(62,207,142,.6); }
 .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); box-shadow: 0 0 6px rgba(255,93,93,.6); }
+.chip .short { display: none; }
+header.stale .chip { opacity: .45; } header.stale .chip .dot { background: var(--dim); box-shadow: none; }
 .updated { color: var(--dim); font-size: 12px; min-width: 120px; text-align: right; }
-nav { display: flex; gap: 2px; padding: 8px 16px 0; overflow-x: auto; }
+.updated.bad-t { color: var(--bad); }
+nav { display: flex; gap: 2px; padding: 8px 16px 0; overflow-x: auto; scrollbar-width: none; }
 nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px 9px; cursor: pointer;
   color: var(--muted); font-weight: 550; white-space: nowrap; }
 nav button:hover { color: var(--text); }
@@ -52,8 +57,15 @@ section { display: none; } section.on { display: block; }
 
 /* cards */
 .grid { display: grid; gap: 14px; }
-.g4 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
-.g3 { grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+/* four cards: 4 in a row, else 2 by 2, else one under another (never 3 and a lone 1) */
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1180px) { .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .g4 { grid-template-columns: minmax(0, 1fr); } }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); }
+/* two side by side (the rails in pairs, the CPU power under them across the row), one under another when narrow */
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 900px) { .g2 { grid-template-columns: minmax(0, 1fr); } }
+.g2 > .chart:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
 .card h3 { margin: 0 0 10px; font-size: 12px; font-weight: 650; color: var(--muted); text-transform: uppercase;
   letter-spacing: .7px; display: flex; align-items: center; gap: 8px; }
@@ -80,7 +92,13 @@ section { display: none; } section.on { display: block; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { padding: 6px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px;
-  background: var(--bg2); position: sticky; top: 0; }
+  background: var(--bg2); }
+/* long tables keep their column names in view under the page header (on a wide screen; on a narrow one the table
+   scrolls sideways in its own box, and a sticky row can't follow the page there) */
+@media (min-width: 901px) {
+  .tablewrap.long { overflow: clip; }
+  .tablewrap.long th { position: sticky; top: var(--hdr); z-index: 2; box-shadow: 0 1px 0 var(--line); }
+}
 td.num, th.num { text-align: right; }
 tr:last-child td { border-bottom: 0; }
 tbody tr:hover td { background: rgba(255,255,255,.025); }
@@ -107,12 +125,19 @@ input[type=search] { min-width: 220px; }
 .seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .btn { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
 .btn:hover, .seg button:hover { color: var(--text); }
+.btn:disabled { opacity: .45; cursor: default; color: inherit; }
 label.chk { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
 
 /* charts */
 .charts-layout { display: grid; grid-template-columns: 250px 1fr; gap: 16px; align-items: start; }
 @media (max-width: 900px) { .charts-layout { grid-template-columns: 1fr; } }
 .picker { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; }
+.picker summary { cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none; }
+.picker summary::-webkit-details-marker { display: none; }
+.picker summary::before { content: "▾"; display: inline-block; width: 16px; transition: transform .15s; }
+.picker:not([open]) summary::before { transform: rotate(-90deg); }
+.picker summary b { color: var(--text); font-weight: 600; }
+.picker[open] summary .picked { display: none; }   /* (the list itself shows what's picked) */
 .picker .grp { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 10px 0 4px; }
 .picker label { display: flex; gap: 8px; align-items: center; padding: 3px 0; cursor: pointer; }
 .picker .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
@@ -146,15 +171,28 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 .inc-item { padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .inc-item:hover { background: rgba(255,255,255,.03); } .inc-item.on { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
 .inc-item .t { font-size: 12px; color: var(--muted); }
+.inc-item .h { display: flex; gap: 7px; align-items: baseline; }
+.inc-item .h .dot { position: relative; top: -1px; }
+.inc-item .h span:last-child { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .viewer { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-height: 300px;
-  max-height: calc(100vh - 220px); overflow: auto; }
+  max-height: calc(100vh - 220px); overflow: auto; position: relative; scroll-margin-top: calc(var(--hdr) + 12px); }
 .viewer pre { margin: 0; font: 12px/1.45 var(--mono); white-space: pre; color: #cfd5df; }
+.viewer .vbar { position: sticky; top: -14px; margin: -14px -14px 10px; padding: 8px 14px; display: flex; gap: 10px;
+  align-items: center; background: var(--bg2); border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.viewer .vbar .btn { margin-left: auto; padding: 3px 10px; font-size: 12.5px; }
 
 .bars td.barcell { width: 40%; }
 .hbar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .8; }
 .foot { color: var(--dim); font-size: 12px; margin-top: 8px; }
 .err { color: var(--bad); }
-@media (max-width: 640px) { main { padding: 14px 16px 30px; } .bar { padding: 10px 16px 0; } .updated { display: none; } }
+@media (max-width: 640px) {
+  main { padding: 14px 16px 30px; } .bar { padding: 10px 16px 0; gap: 8px 18px; } .updated { display: none; }
+  /* the four chips on one line, with short names, so the header doesn't take a fifth of a phone's screen */
+  .chips { margin-left: 0; width: 100%; flex-wrap: nowrap; gap: 6px; }
+  .chip { padding: 3px 9px; font-size: 12px; } .chip .long { display: none; } .chip .short { display: inline; }
+  nav { padding: 4px 6px 0; } nav button { padding: 8px 9px 9px; }
+  input[type=search] { min-width: 0; flex: 1 1 160px; }
+}
 </style>
 </head>
 <body>
@@ -168,20 +206,20 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
     <div class="updated" id="updated"></div>
   </div>
   <nav id="nav" role="tablist">
-    <button data-tab="overview">Overview</button>
-    <button data-tab="sensors">Sensors</button>
-    <button data-tab="charts">Charts</button>
-    <button data-tab="power">Power</button>
-    <button data-tab="events">Events</button>
-    <button data-tab="ports">Ports</button>
-    <button data-tab="incidents">Incidents</button>
-    <button data-tab="processes">Processes</button>
+    <button role="tab" data-tab="overview" aria-controls="tab-overview">Overview</button>
+    <button role="tab" data-tab="sensors" aria-controls="tab-sensors">Sensors</button>
+    <button role="tab" data-tab="charts" aria-controls="tab-charts">Charts</button>
+    <button role="tab" data-tab="power" aria-controls="tab-power">Power</button>
+    <button role="tab" data-tab="events" aria-controls="tab-events">Events</button>
+    <button role="tab" data-tab="ports" aria-controls="tab-ports">Ports</button>
+    <button role="tab" data-tab="incidents" aria-controls="tab-incidents">Incidents</button>
+    <button role="tab" data-tab="processes" aria-controls="tab-processes">Processes</button>
   </nav>
 </header>
 <main>
   <div id="offline" class="banner bad" style="display:none"></div>
 
-  <section id="tab-overview">
+  <section id="tab-overview" role="tabpanel">
     <div id="ov-problems"></div>
     <div class="grid g4 health" id="ov-health"><div class="card dim">Loading…</div></div>
     <div class="h2">Now</div>
@@ -190,7 +228,7 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
     <div class="grid g3" id="ov-more"></div>
   </section>
 
-  <section id="tab-sensors">
+  <section id="tab-sensors" role="tabpanel">
     <div class="toolbar">
       <input type="search" id="s-search" placeholder="Filter sensors…">
       <div class="seg" id="s-mode"><button data-v="page" class="on">Since this page opened</button><button data-v="logger">Since the logger started</button></div>
@@ -199,23 +237,23 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
       <label class="chk"><input type="checkbox" id="s-hidden"> <span id="s-hidden-label">Show hidden readings</span></label>
     </div>
     <div id="s-source" class="banner info"></div>
-    <div class="tablewrap"><table id="s-table"><thead><tr><th>Sensor</th><th class="num">Current</th><th class="num">Minimum</th><th class="num">Maximum</th><th class="num">Average</th></tr></thead><tbody><tr><td colspan="5" class="dim">Loading…</td></tr></tbody></table></div>
+    <div class="tablewrap long"><table id="s-table"><thead><tr><th>Sensor</th><th class="num">Current</th><th class="num">Minimum</th><th class="num">Maximum</th><th class="num">Average</th></tr></thead><tbody><tr><td colspan="5" class="dim">Loading…</td></tr></tbody></table></div>
     <div class="foot" id="s-foot"></div>
   </section>
 
-  <section id="tab-charts">
+  <section id="tab-charts" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="c-range"><button data-h="1">1 hour</button><button data-h="6" class="on">6 hours</button><button data-h="24">24 hours</button><button data-h="72">3 days</button><button data-h="168">7 days</button></div>
       <span class="spacer"></span>
       <span class="dim" id="c-info"></span>
     </div>
     <div class="charts-layout">
-      <div class="picker" id="c-picker"></div>
+      <details class="picker" id="c-pick" open><summary id="c-sum">Readings</summary><div id="c-picker"></div></details>
       <div id="c-charts"></div>
     </div>
   </section>
 
-  <section id="tab-power">
+  <section id="tab-power" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="p-range"><button data-m="2">2 min</button><button data-m="10" class="on">10 min</button><button data-m="30">30 min</button></div>
       <span class="spacer"></span><span class="dim" id="p-info"></span>
@@ -228,28 +266,28 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
     <div class="foot">The rails columns are the last quarter-second sample before the gap. Windows' own estimate of when the PC went down can be half an hour off, so this uses the last logged sample.</div>
   </section>
 
-  <section id="tab-events">
+  <section id="tab-events" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="e-range"><button data-h="24">24 hours</button><button data-h="48" class="on">48 hours</button><button data-h="168">7 days</button><button data-h="720">30 days</button></div>
       <div class="seg" id="e-group"><button data-g="" class="on">All</button><button data-g="apps">Apps</button><button data-g="power">Power &amp; shutdowns</button><button data-g="sessions">Sessions</button><button data-g="windows">Windows</button><button data-g="ports">Ports</button><button data-g="monitor">HW Blackbox</button></div>
       <input type="search" id="e-search" placeholder="Search…">
       <span class="spacer"></span><span class="dim" id="e-info"></span>
     </div>
-    <div class="tablewrap"><table id="e-table"><thead><tr><th style="width:90px">Time</th><th style="width:24px"></th><th>What happened</th></tr></thead><tbody><tr><td colspan="3" class="dim">Loading…</td></tr></tbody></table></div>
+    <div class="tablewrap long"><table id="e-table"><thead><tr><th style="width:90px">Time</th><th style="width:24px"></th><th>What happened</th></tr></thead><tbody><tr><td colspan="3" class="dim">Loading…</td></tr></tbody></table></div>
   </section>
 
-  <section id="tab-ports">
+  <section id="tab-ports" role="tabpanel">
     <div id="pt-problems"></div>
     <div class="toolbar">
       <input type="search" id="pt-search" placeholder="Filter by port, program…">
       <label class="chk"><input type="checkbox" id="pt-system"> Show Windows' own</label>
       <span class="spacer"></span><span class="dim" id="pt-info"></span>
     </div>
-    <div class="tablewrap"><table id="pt-table"><thead><tr><th class="num">Port</th><th>Address</th><th>Program</th><th>What it is</th><th class="num">PID</th><th>Command line</th><th>Seen since</th></tr></thead><tbody><tr><td colspan="7" class="dim">Loading…</td></tr></tbody></table></div>
-    <div class="foot">From the service, every 15 s, read from Windows' own list of listening sockets (on some Windows builds netstat and PowerShell's Get-NetTCPConnection list the wrong ports: the state they go by is garbage there). "Seen since" is when the service first saw it, which is at most its own start.</div>
+    <div class="tablewrap long"><table id="pt-table"><thead><tr><th class="num">Port</th><th>Address</th><th>Program</th><th>What it is</th><th class="num">PID</th><th>Command line</th><th>Seen since</th></tr></thead><tbody><tr><td colspan="7" class="dim">Loading…</td></tr></tbody></table></div>
+    <div class="foot">From the service, every 15 s, read from Windows' own list of listening sockets. (On some Windows builds netstat and PowerShell's Get-NetTCPConnection show the wrong ports, because the connection state they filter on is unreliable there.) "Seen since" is when the service first saw it, which is at most its own start.</div>
   </section>
 
-  <section id="tab-incidents">
+  <section id="tab-incidents" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="i-src"><button data-s="" class="on">All</button><button data-s="power">Power-offs</button><button data-s="app">Apps</button></div>
       <input type="search" id="i-search" placeholder="Search…">
@@ -261,9 +299,9 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
     </div>
   </section>
 
-  <section id="tab-processes">
+  <section id="tab-processes" role="tabpanel">
     <div class="toolbar"><span id="pr-info" class="muted"></span></div>
-    <div class="grid g3" style="grid-template-columns:repeat(auto-fit,minmax(420px,1fr))">
+    <div class="grid g2">
       <div><div class="h2" style="margin-top:0">Using the CPU</div><div class="tablewrap"><table class="bars" id="pr-cpu"><thead><tr><th>Process</th><th class="num">PID</th><th class="num">CPU</th><th></th></tr></thead><tbody><tr><td colspan="4" class="dim">Loading…</td></tr></tbody></table></div></div>
       <div><div class="h2" style="margin-top:0">Using memory</div><div class="tablewrap"><table class="bars" id="pr-mem"><thead><tr><th>Process</th><th class="num">PID</th><th class="num">Private</th><th></th></tr></thead><tbody><tr><td colspan="4" class="dim">Loading…</td></tr></tbody></table></div></div>
     </div>
@@ -293,26 +331,33 @@ function offline(e) {
   const b = $("#offline");
   b.style.display = "";
   b.innerHTML = "<b>Can't reach HW Blackbox.</b> The session agent serves this page; if it was restarting, this clears by itself. Otherwise open <b>HW Blackbox</b> from the Start menu or the desktop again. <span class='dim'>(" + esc(e.message || e) + ")</span>";
+  // what the header showed is old now: grey it out rather than leave green dots up
+  $("header").classList.add("stale");
+  const u = $("#updated");
+  u.textContent = lastOk ? "Last reached " + fmtTime(lastOk / 1000) : "Not reached";
+  u.classList.add("bad-t");
 }
 
 // formatting ---------------------------------------------------------------------------------------------------
+// a span in two units at most: "45 s", "3 min 20 s", "2 h 5 min", "3 d 4 h" (rounded to the smaller unit first, so
+// never "1 h 60 min")
+function span2(s, dayWord) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + " s";
+  if (s < 3600) { const m = Math.floor(s / 60), r = s % 60; return m + " min" + (r ? " " + r + " s" : ""); }
+  const mins = Math.round(s / 60);
+  if (mins < 1440) { const h = Math.floor(mins / 60), m = mins % 60; return h + " h" + (m ? " " + m + " min" : ""); }
+  const hrs = Math.round(s / 3600), d = Math.floor(hrs / 24), h = hrs % 24;
+  return d + (dayWord ? (d === 1 ? " day" : " days") : " d") + (h ? " " + h + " h" : "");
+}
 function fmtAgo(s) {
   if (s == null) return "never";
   s = Math.max(0, s);
-  if (s < 60) return Math.round(s) + " s ago";
-  if (s < 3600) return Math.round(s / 60) + " min ago";
-  if (s < 86400) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + " h" + (m ? " " + m + " min" : "") + " ago"; }
-  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600);
-  return d + (d === 1 ? " day" : " days") + (h ? " " + h + " h" : "") + " ago";
+  if (s < 59.5) return Math.round(s) + " s ago";
+  if (s < 3570) return Math.round(s / 60) + " min ago";
+  return span2(Math.max(s, 3600), true) + " ago";     // (59 min 40 s ago reads as "1 h ago")
 }
-function fmtDur(s) {
-  if (s == null) return "–";
-  s = Math.round(s);
-  if (s < 60) return s + " s";
-  if (s < 3600) return Math.floor(s / 60) + " min " + (s % 60 ? (s % 60) + " s" : "");
-  if (s < 86400) return Math.floor(s / 3600) + " h " + Math.round((s % 3600) / 60) + " min";
-  return Math.floor(s / 86400) + " d " + Math.round((s % 86400) / 3600) + " h";
-}
+function fmtDur(s) { return s == null ? "–" : span2(s); }
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const DAY = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const pad = n => String(n).padStart(2, "0");
@@ -323,6 +368,14 @@ function fmtDateTime(t, sec = false) { return fmtDate(t) + " " + fmtTime(t, sec)
 function isoT(s) { if (!s) return null; const t = Date.parse(s); return isNaN(t) ? null : t / 1000; }
 function lsGet(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (_) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} }
+// someone is selecting text in el: a redraw now would drop their selection, so the timed refresh waits
+function selecting(el) { const s = getSelection(); return !!(s && !s.isCollapsed && s.anchorNode && el.contains(s.anchorNode)); }
+// replace el's contents, keeping the keyboard focus on the row with the same key (attr) if it had it
+function redraw(el, html, attr) {
+  const a = document.activeElement, key = a && a !== el && el.contains(a) ? a.getAttribute(attr) : null;
+  el.innerHTML = html;
+  if (key != null) { const n = $$(`[${attr}]`, el).find(x => x.getAttribute(attr) === key); if (n) n.focus({preventScroll: true}); }
+}
 function fmtVal(v, unit) {
   if (v == null || Number.isNaN(v)) return "–";
   const u = unit || "";
@@ -365,8 +418,10 @@ function show(tab) {
   if (name === "charts" && arg2) cSel = new Set(arg2.split(","));
   tab = TABS[name] ? name : "overview";
   current = tab;
-  $$("nav button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  $$("nav button").forEach(b => { const on = b.dataset.tab === tab; b.setAttribute("aria-selected", on); b.tabIndex = on ? 0 : -1; });
   $$("main section").forEach(s => s.classList.toggle("on", s.id === "tab-" + tab));
+  const nb = $(`nav button[data-tab="${tab}"]`); if (nb) nb.scrollIntoView({block: "nearest", inline: "nearest"});    // (a phone's nav scrolls sideways)
+  $("#tip").style.display = "none";
   if (tab === "incidents" && arg) openIncident(/^incident_\d{8}_\d{6}\.txt$/.test(arg) ? "power" : "app", arg);
   else if (location.hash !== "#" + tab && !(tab === "charts" && arg)) history.replaceState(null, "", "#" + tab);
   if (tab === "charts" && +arg > 0) {                // "#charts:72": the last 72 hours
@@ -377,15 +432,29 @@ function show(tab) {
     sMode = "logger";
     $$("#s-mode button").forEach(b => b.classList.toggle("on", b.dataset.v === "logger"));
   }
+  refresh();
+}
+// load the current tab now, then again every so often
+function refresh() {
   clearTimeout(timer);
+  const tab = current;
   const run = async () => {
     const t = TABS[tab];
-    try { await t.load(); } catch (e) { offline(e); }
-    if (current === tab) timer = setTimeout(run, t.every);
+    // (nothing to refresh while the page is hidden or minimized; it catches up the moment it's back)
+    if (!document.hidden) { try { await t.load(); } catch (e) { offline(e); } }
+    if (current === tab) { clearTimeout(timer); timer = setTimeout(run, t.every); }
   };
   run();
 }
 $$("nav button").forEach(b => b.addEventListener("click", () => show(b.dataset.tab)));
+// the tabs as a tab list: the arrow keys, Home and End move between them
+$("#nav").addEventListener("keydown", e => {
+  const bs = $$("nav button"), i = bs.indexOf(document.activeElement); if (i < 0) return;
+  const j = {ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: bs.length - 1}[e.key]; if (j == null) return;
+  e.preventDefault();
+  const b = bs[(j + bs.length) % bs.length]; b.focus(); show(b.dataset.tab);
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden && current) { header(); refresh(); } });
 window.addEventListener("hashchange", () => show(location.hash.slice(1)));
 function segment(el, on) {
   el.addEventListener("click", e => {
@@ -416,19 +485,25 @@ async function header() {
     $("#host").textContent = o.host;
     document.title = "HW Blackbox · " + o.host;
     const h = healthOf(o);
-    const chip = (st, label, title) => `<span class="chip" title="${esc(title)}"><span class="dot ${st}"></span>${esc(label)}</span>`;
+    // (a chip's short name is for a phone's width; its title says what the colour means)
+    const WORD = {good: "OK", warn: "needs a look", bad: "not working", "": "off"};
+    const chip = (st, label, short, title) => `<span class="chip" title="${esc(label + ": " + WORD[st] + ". " + title)}"><span class="dot ${st}"></span><span class="long">${esc(label)}</span><span class="short">${esc(short)}</span></span>`;
     $("#chips").innerHTML =
-      chip(h.sv, "Service", h.svOk ? "Running as a Windows service; status " + fmtAgo(o.ages.status) : "The service isn't reporting") +
-      chip(h.sens, "Sensors", "Every sensor every 5 s, the rails 4 times a second; last sample " + fmtAgo(o.ages.flight)) +
-      chip(h.ag, "Session agent", h.agents.length ? "Watching the screens, the app in front and sign-outs" : "Not running in any session") +
-      (o.ha.enabled ? chip(h.ha, "Home Assistant", "Last report " + (h.haAge != null ? fmtAgo(h.haAge) : "unknown")) : "");
+      chip(h.sv, "Service", "Service", h.svOk ? "Running as a Windows service; status " + fmtAgo(o.ages.status) : "The service isn't reporting") +
+      chip(h.sens, "Sensors", "Sensors", "Every sensor every 5 s, the rails 4 times a second; last sample " + fmtAgo(o.ages.flight)) +
+      chip(h.ag, "Session agent", "Agent", h.agents.length ? "Watching the screens, the app in front and sign-outs" : "Not running in any session") +
+      (o.ha.enabled ? chip(h.ha, "Home Assistant", "HA", "Last report " + (h.haAge != null ? fmtAgo(h.haAge) : "unknown")) : "");
+    $("header").classList.remove("stale");
+    $("#updated").classList.remove("bad-t");
     const n = (o.problems || []).length;
     const btn = $('nav button[data-tab="overview"]');
     btn.innerHTML = "Overview" + (n ? `<span class="count">${n}</span>` : "");
     $("#updated").textContent = "Updated " + fmtTime(o.now);
   } catch (e) { offline(e); }
 }
-setInterval(header, 5000);
+setInterval(() => { if (!document.hidden) header(); }, 5000);
+// the page header's height, for the tables' sticky column names under it (it wraps on narrower windows)
+new ResizeObserver(() => document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px")).observe($("header"));
 
 // Overview -----------------------------------------------------------------------------------------------------
 let ovSpark = null, ovSparkAt = 0, ovDisk = null;
@@ -455,16 +530,17 @@ TABS.overview = {every: 5000, async load() {
   const threads = sv.threads || {};
   $("#ov-health").innerHTML = [
     card(h.sv, "Service", h.svOk ? (sv.test ? "Running (test)" : "Running") : "Not reporting",
-      h.svOk ? `${esc(sv.version || "")} · up ${fmtDur(now - (isoT(sv.started) || now))} · ${sv.mem_mb ?? "?"} MB · CPU ${sv.cpu_pct ?? "…"} %<br>` +
-        `Watching ${(sv.apps || []).length} apps` + (sv.attributes && sv.attributes.ports_listening != null ? ` · ${sv.attributes.ports_listening} ports` : "") +
+      h.svOk ? `Version ${esc(sv.version || "?")} · up ${fmtDur(now - (isoT(sv.started) || now))}<br>` +
+        `${sv.mem_mb != null ? Math.round(sv.mem_mb) : "?"} MB · CPU ${sv.cpu_pct != null ? (+sv.cpu_pct).toFixed(1) : "…"} % · watching ${plural((sv.apps || []).length, "app", "apps")}` +
+        (sv.attributes && sv.attributes.ports_listening != null ? ` and ${sv.attributes.ports_listening} ports` : "") +
         (Object.values(sv.event_logs || {}).some(x => !x) ? "<br><span class='warn-t'>Some of Windows' event logs can't be read</span>" : "")
-        : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It runs as the Windows service "HWBlackbox".`),
+        : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It's the Windows service "HW Blackbox": start it in Services (services.msc), or run Install.cmd again.`),
     card(h.sens, "Sensors", h.sensOk ? "Logging" : "Not logging",
       `Last sample ${fmtAgo(a.flight)} · rails ${a.rails != null ? fmtAgo(a.rails) : "–"}<br>` +
       `${sens.fast_hz ? sens.fast_hz + " rails rows a second · " : ""}${sens.sensors ?? "?"} sensors` +
       (sens.lhm && sens.lhm !== "ok" ? "<br><span class='bad-t'>LibreHardwareMonitor: " + esc(sens.lhm) + "</span>" : "") +
       (sens.rails_ok === false && sens.admin ? "<br><span class='bad-t'>No rail voltages: the sensor driver may be gone</span>" : "")),
-    card(h.ag, "Session agent", h.agents.length ? h.agents.map(x => esc(x.user)).join(", ") : (o.agents || []).length ? "Stopped" : "Nobody signed in",
+    card(h.ag, "Session agent", h.agents.length ? h.agents.map(x => x.user).join(", ") : (o.agents || []).length ? "Stopped" : "Nobody signed in",
       sessions.length ? sessions.map(s => `Session ${s.session} (${esc(s.user)}, ${esc(s.state)}): ${s.agent === "running" ? "running" : "<span class='warn-t'>" + esc(s.agent) + "</span>"}`).join("<br>")
         : "Runs in each signed-in session: the screens, the app in front, sign-outs, this page"),
     o.ha.enabled ? card(h.ha, "Home Assistant", ha.ok ? "Reporting" : ha.ok === false ? "Failing" : "Waiting",
@@ -510,6 +586,7 @@ TABS.overview = {every: 5000, async load() {
       R("GPU memory", first(pick("Nvml/gpu_vram_mb"), find("Gpu", "SmallData", /Memory Used/), pick("Flight/gpu_vram_mb")), vramTotal ? " of " + fmtVal(vramTotal.value, "MB") : "") +
       sp("ram_pct", COLORS[2]) + `</div>`,
   ].join("");
+  for (const c of $$("#ov-now .card")) if (!$(".reading", c)) c.insertAdjacentHTML("beforeend", `<div class="dim">No readings${h.sensOk ? " from this part" : " yet"}</div>`);
   // power-offs, disks, this PC
   const po = o.power_offs || [];
   const lastPo = po.filter(p => p.went_down).slice(-1)[0];
@@ -582,7 +659,7 @@ const sess = {stats: {}, sample: null};
 const TYPE_LABEL = {SmallData: "Memory", Data: "Memory", Factor: "Multiplier", Level: "State"};
 const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
 let sMode = "page", sClosed = new Set(lsGet("hwb.closed", []));
-segment($("#s-mode"), b => { sMode = b.dataset.v; TABS.sensors.render(); });
+segment($("#s-mode"), b => { sMode = b.dataset.v; $("#s-reset").disabled = sMode !== "page"; TABS.sensors.render(); });
 $("#s-reset").addEventListener("click", () => { sess.stats = {}; sess.sample = null; TABS.sensors.load(); });
 $("#s-search").addEventListener("input", () => TABS.sensors.render());
 $("#s-hidden").addEventListener("change", () => TABS.sensors.render());
@@ -599,15 +676,16 @@ TABS.sensors = {every: 2500, async load() {
       st.min = Math.min(st.min, x.value); st.max = Math.max(st.max, x.value); st.sum += x.value; st.n++;
     }
   }
-  this.render();
+  if (!selecting($("#s-table"))) this.render();
 }, render() {
   if (!sData) return;
   const q = $("#s-search").value.trim().toLowerCase();
   const showHidden = $("#s-hidden").checked;
   const v4 = sData.source === "sensors.json";
   $("#s-source").innerHTML = v4
-    ? `Every sensor the service reads: ${sData.sensors.length} readings from ${Object.values(sData.devices || {}).length} devices, a new sample every 5 s (the last ${fmtAgo(sData.age)}). The service started ${esc((sData.started || "").replace("T", " "))}.` +
+    ? `Every sensor the service reads: ${sData.sensors.length} readings from ${Object.values(sData.devices || {}).length} devices, a new sample every 5 s (the latest ${fmtAgo(sData.age)}). The service started ${esc((sData.started || "").replace("T", " "))}.` +
       (sData.admin === false ? ` <span class="warn-t">Not elevated: no CPU or board sensors.</span>` : "")
+    : sData.age == null ? `The service hasn't logged a sample yet. Its readings show here once it does (every 5 s).`
     : `The service's sensor file isn't fresh, so these are the 16 readings the 5-second log keeps (minimum, maximum and average over today). <span class="dim">Last sample ${fmtAgo(sData.age)}.</span>`;
   const groups = new Map();
   let hidden = 0;
@@ -626,7 +704,7 @@ TABS.sensors = {every: 2500, async load() {
   for (const [g, list] of groups) {
     const [grp, dev] = g.split("|");
     const closed = sClosed.has(g);
-    rows.push(`<tr class="group${closed ? " closed" : ""}" data-g="${esc(g)}"><td colspan="5"><span class="caret">▾</span>${esc(grp)}<span class="dev">${esc(dev)}</span><span class="tag">${list.length}</span></td></tr>`);
+    rows.push(`<tr class="group${closed ? " closed" : ""}" data-g="${esc(g)}" tabindex="0" aria-expanded="${!closed}"><td colspan="5"><span class="caret">▾</span>${esc(grp)}<span class="dev">${esc(dev)}</span><span class="tag">${list.length}</span></td></tr>`);
     if (closed) continue;
     for (const x of list) {
       const st = sMode === "page" ? sess.stats[x.id] : {min: x.min, max: x.max, avg: x.avg};
@@ -638,7 +716,7 @@ TABS.sensors = {every: 2500, async load() {
         `<td class="num${st ? c(st.max) : ""}">${st ? fmtVal(st.max, x.unit) : "–"}</td><td class="num">${avg != null ? fmtVal(avg, x.unit) : "–"}</td></tr>`);
     }
   }
-  $("#s-table tbody").innerHTML = rows.join("") || `<tr><td colspan="5" class="dim">Nothing matches.</td></tr>`;
+  redraw($("#s-table tbody"), rows.join("") || `<tr><td colspan="5" class="dim">${sData.sensors.length ? "Nothing matches." : "No readings yet: the service hasn't logged any."}</td></tr>`, "data-g");
   const n = sMode === "page" ? Object.values(sess.stats)[0]?.n : sData.samples;
   $("#s-foot").textContent = (sMode === "page" ? "Minimum, maximum and average over the " + plural(n || 0, "sample", "samples") + " since this page opened (or Reset)." : "Minimum, maximum and average over the " + plural(sData.samples || 0, "sample", "samples") + " since the logger started.") +
     " Red: outside the safe band (for the rails, ATX's ±5 %); yellow: getting close.";
@@ -648,6 +726,10 @@ $("#s-table").addEventListener("click", e => {
   const g = tr.dataset.g; sClosed.has(g) ? sClosed.delete(g) : sClosed.add(g);
   lsSet("hwb.closed", [...sClosed]);
   TABS.sensors.render();
+});
+// rows that open or close (a sensor group, an event, a report): Enter or Space too, not only a click
+document.addEventListener("keydown", e => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("tr[tabindex], .inc-item[tabindex]")) { e.preventDefault(); e.target.click(); }
 });
 
 // charts -------------------------------------------------------------------------------------------------------
@@ -680,21 +762,29 @@ function bucketize(ts, vs, t0, t1, n) {
   return {t: sum.map((_, b) => t0 + (b + 0.5) * step), avg: sum.map((s, b) => cnt[b] ? s / cnt[b] : null), min: lo, max: hi};
 }
 // one chart: series [{name, color, unit, t[], avg[], min[], max[]}] on a shared time axis; marks [{t, color, text}]
-function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true}) {
-  const W = Math.max(320, host.clientWidth - 24), H = height, L = 54, R = 12, T = 10, B = 24;
+// (minSpan: the smallest range the height stands for, so the sensor chip's one-step flicker doesn't fill the chart)
+let pointer = null;     // where the mouse was last, so a chart redrawn under it keeps its tooltip
+function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true, minSpan = 0}) {
+  const W = Math.max(280, host.clientWidth - 24), H = height, L = 54, R = 12, T = 10, B = 24;
   let lo = Infinity, hi = -Infinity;
   for (const s of series) for (let i = 0; i < s.avg.length; i++) {
     const a = band && s.min ? s.min[i] : s.avg[i], b = band && s.max ? s.max[i] : s.avg[i];
     if (a != null && a < lo) lo = a; if (b != null && b > hi) hi = b;
   }
   if (!isFinite(lo)) { host.innerHTML = `<div class="title">${title}</div><div class="dim" style="padding:30px 10px">No data in this range.</div>`; return; }
+  if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
   if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
   const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
   const x = t => L + ((t - t0) / (t1 - t0)) * (W - L - R), y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
   const yt = niceTicks(lo, hi, 5), xt = timeTicks(t0, t1);
-  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img">`;
-  for (const v of yt.ticks) svg += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${fmtVal(v, unit).replace(" " + unit, "")}</text>`;
-  for (const t of xt.ticks) svg += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" stroke-dasharray="2 4"/><text class="axis" x="${x(t)}" y="${H - 6}" text-anchor="middle">${xt.label(t)}</text>`;
+  // the axis numbers carry as many decimals as the step between them needs ("12.25", not "12.250"; "50", not "50.0")
+  const dec = Math.min(3, (String(+yt.step.toFixed(6)).split(".")[1] || "").length);
+  const yLab = v => v.toLocaleString("en-US", {minimumFractionDigits: dec, maximumFractionDigits: dec});
+  // time labels no closer than ~76 px: on a narrow chart every second (or third) one
+  const every = Math.max(1, Math.ceil(76 / (xt.ticks.length > 1 ? x(xt.ticks[1]) - x(xt.ticks[0]) : 999)));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="${esc(series.map(s => s.name).join(", "))}">`;
+  for (const v of yt.ticks) svg += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${yLab(v)}</text>`;
+  xt.ticks.forEach((t, i) => { svg += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" stroke-dasharray="2 4"/>` + (i % every ? "" : `<text class="axis" x="${x(t)}" y="${H - 6}" text-anchor="middle">${xt.label(t)}</text>`); });
   for (const m of marks) if (m.t >= t0 && m.t <= t1) svg += `<line x1="${x(m.t)}" x2="${x(m.t)}" y1="${T}" y2="${H - B}" stroke="${m.color}" stroke-width="1.5" stroke-dasharray="${m.dash || ""}"><title>${esc(m.text)}</title></line>`;
   for (const s of series) {
     const segs = []; let cur = [];
@@ -714,7 +804,7 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
   const leg = legend ? series.map(s => `<span class="legend"><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("") : "";
   host.innerHTML = `<div class="title">${title}${leg}</div>` + svg;
   const sv = $("svg", host), xh = $("#xh", sv), tip = $("#tip");
-  sv.addEventListener("mousemove", e => {
+  const move = e => {
     const r = sv.getBoundingClientRect(), px = (e.clientX - r.left) * (W / r.width);
     if (px < L || px > W - R) { tip.style.display = "none"; xh.style.display = "none"; return; }
     const tt = t0 + ((px - L) / (W - L - R)) * (t1 - t0);
@@ -729,8 +819,16 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
     tip.style.display = "block";
     const tw = tip.offsetWidth; let left = e.clientX + 14; if (left + tw > innerWidth - 8) left = e.clientX - tw - 14;
     tip.style.left = left + "px"; tip.style.top = (e.clientY + 12) + "px";
-  });
-  sv.addEventListener("mouseleave", () => { tip.style.display = "none"; xh.style.display = "none"; });
+  };
+  // (pointer events: a mouse, a pen or a finger)
+  sv.addEventListener("pointermove", e => { pointer = {clientX: e.clientX, clientY: e.clientY}; move(e); });
+  sv.addEventListener("pointerdown", move);
+  sv.addEventListener("pointerleave", () => { pointer = null; tip.style.display = "none"; xh.style.display = "none"; });
+  // redrawn under the mouse (the Power tab every 5 s): keep the tooltip, with the new values
+  if (pointer) {
+    const r = sv.getBoundingClientRect();
+    if (pointer.clientX >= r.left && pointer.clientX <= r.right && pointer.clientY >= r.top && pointer.clientY <= r.bottom) move(pointer);
+  }
 }
 
 let cCols = null, cSel = new Set(lsGet("hwb.charts", ["cpu_temp_c", "gpu_temp_c"])), cHours = 6, cData = null;
@@ -738,8 +836,10 @@ segment($("#c-range"), b => { cHours = +b.dataset.h; TABS.charts.load(true); });
 TABS.charts = {every: 60000, async load(force) {
   if (!cCols) {
     cCols = (await api("/api/flight_columns")).cols;
-    const groups = {};
-    cCols.forEach((c, i) => { c.color = COLORS[i % COLORS.length]; (groups[c.group] = groups[c.group] || []).push(c); });
+    // colours counted within each unit: the readings that share a chart never share a colour
+    const groups = {}, nth = {};
+    cCols.forEach(c => { nth[c.unit] = (nth[c.unit] || 0) + 1; c.color = COLORS[(nth[c.unit] - 1) % COLORS.length]; (groups[c.group] = groups[c.group] || []).push(c); });
+    if (matchMedia("(max-width: 900px)").matches) $("#c-pick").open = false;    // (on a phone the list would push the charts away)
     $("#c-picker").innerHTML = Object.entries(groups).map(([g, list]) => `<div class="grp">${esc(g)}</div>` + list.map(c =>
       `<label><input type="checkbox" value="${c.id}" ${cSel.has(c.id) ? "checked" : ""}><span class="sw" style="background:${c.color}"></span>${esc(c.label)}</label>`).join("")).join("");
     $("#c-picker").addEventListener("change", e => {
@@ -750,7 +850,8 @@ TABS.charts = {every: 60000, async load(force) {
   }
   $$("#c-picker input").forEach(i => { i.checked = cSel.has(i.value); });    // (a link may have picked others)
   const cols = cCols.filter(c => cSel.has(c.id));
-  if (!cols.length) { $("#c-charts").innerHTML = `<div class="banner info">Pick a reading on the left.</div>`; return; }
+  $("#c-sum").innerHTML = "Readings" + (cols.length ? `<span class="picked">: <b>${cols.length <= 2 ? cols.map(c => esc(c.label)).join(", ") : cols.length + " picked"}</b></span>` : "");
+  if (!cols.length) { $("#c-charts").innerHTML = `<div class="banner info">Pick one or more readings to chart.</div>`; $("#c-info").textContent = ""; return; }
   const host = $("#c-charts");
   const w = Math.max(400, host.clientWidth || 900);
   cData = await api(`/api/history?cols=${cols.map(c => c.id).join(",")}&hours=${cHours}&points=${Math.min(1400, Math.round(w / 1.3))}`);
@@ -768,9 +869,13 @@ TABS.charts = {every: 60000, async load(force) {
   for (const p of (overview && overview.power_offs) || []) { const t = isoT(p.went_down); if (t) marks.push({t, color: "#ff5d5d", text: "Power-off " + fmtDateTime(t, true)}); }
   for (const m of (overview && overview.milestones) || []) { const t = isoT(m.at); if (t) marks.push({t, color: "#a78bfa", dash: "5 4", text: m.text}); }
   host.innerHTML = [...byUnit.keys()].map((u, i) => `<div class="chart" id="cc${i}"></div>`).join("");
-  [...byUnit.entries()].forEach(([u, series], i) => drawChart($("#cc" + i), {series, t0: cData.start, t1: cData.end, unit: u, marks,
+  $("#tip").style.display = "none";
+  // one or two charts get the room there is; more stay compact
+  const height = Math.min(byUnit.size === 1 ? 360 : byUnit.size === 2 ? 280 : 230, innerWidth < 640 ? 220 : 999);
+  [...byUnit.entries()].forEach(([u, series], i) => drawChart($("#cc" + i), {series, t0: cData.start, t1: cData.end, unit: u, marks, height,
     title: `<b>${esc(u === "°C" ? "Temperatures" : u === "W" ? "Power" : u === "V" ? "Voltages" : u === "%" ? "Load" : u === "GB free" ? "Free disk space" : u)}</b>`}));
-  const gaps = cData.t.filter((_, i) => Object.values(cData.series)[0].avg[i] == null).length;
+  const first = Object.values(cData.series)[0];
+  const gaps = first ? cData.t.filter((_, i) => first.avg[i] == null).length : 0;
   $("#c-info").textContent = `${cData.rows.toLocaleString()} samples · one point per ${fmtDur(cData.step)}` + (gaps ? ` · ${gaps} empty (the PC off or the logger down)` : "") + " · line: average, band: min to max";
 }};
 let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (current === "charts") TABS.charts.render(); if (current === "power") TABS.power.render(); }, 150); });
@@ -789,28 +894,33 @@ TABS.power = {every: 5000, async load() {
   // drawn raw is a solid wall: so one point per 2 pixels, the average as the line and min to max as the band
   // (a point per 6 pixels: a bucket of a few seconds, enough samples that a reading flipping between two steps
   // averages out into a steady line, its band showing the two steps)
-  const n = Math.max(40, Math.round(((($("#p-rails").clientWidth || 1200) / 2) - 80) / 6));
+  // (the rails' scale is at least 2 % of the rail, so the chip's one-step flicker shows as the small thing it is)
+  const defs = [["v12_v", "+12 V rail", "#ff9f43", "V", 0.24], ["v5_v", "+5 V rail", "#feca57", "V", 0.1], ["v33_v", "+3.3 V rail", "#3ecf8e", "V", 0.066],
+                ["vcore_v", "Vcore", "#5cc8ff", "V", 0], ["cpu_power_w", "CPU package power", "#f368e0", "W", 0]];
+  $("#tip").style.display = "none";
+  $("#p-rails").innerHTML = `<div class="grid g2">` + defs.map((_, i) => `<div class="chart" id="pr${i}" style="margin:0"></div>`).join("") + `</div>`;
+  const n = Math.max(40, Math.round((($("#pr0").clientWidth || 600) - 80) / 6));
   const S = (col, name, color, unit) => Object.assign({name, color, unit}, bucketize(d.t, d[col], t0, t1, n));
-  const defs = [["v12_v", "+12 V rail", "#ff9f43", "V"], ["v5_v", "+5 V rail", "#feca57", "V"], ["v33_v", "+3.3 V rail", "#3ecf8e", "V"],
-                ["vcore_v", "Vcore", "#5cc8ff", "V"], ["cpu_power_w", "CPU package power", "#f368e0", "W"]];
-  $("#p-rails").innerHTML = `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px">` + defs.map((_, i) => `<div class="chart" id="pr${i}" style="margin:0"></div>`).join("") + `</div>`;
-  defs.forEach(([col, name, color, unit], i) => {
+  defs.forEach(([col, name, color, unit, minSpan], i) => {
     const vals = d[col].filter(v => v != null);
-    const st = vals.length ? `now <b>${fmtVal(vals[vals.length - 1], unit)}</b> · ${fmtVal(Math.min(...vals), unit)} to ${fmtVal(Math.max(...vals), unit)}` : "";
-    drawChart($("#pr" + i), {series: [S(col, name, color, unit)], t0, t1, unit, height: 150, legend: false, title: `<b>${esc(name)}</b><span>${st}</span>`});
+    const lo = vals.length ? Math.min(...vals) : null, hi = vals.length ? Math.max(...vals) : null;
+    const st = !vals.length ? "" : `now <b>${fmtVal(vals[vals.length - 1], unit)}</b> · ` + (lo === hi ? "steady" : `${fmtVal(lo, unit)} to ${fmtVal(hi, unit)}`);
+    drawChart($("#pr" + i), {series: [S(col, name, color, unit)], t0, t1, unit, height: 150, legend: false, minSpan, title: `<b>${esc(name)}</b><span>${st}</span>`});
   });
   $("#p-info").textContent = `${d.t.length.toLocaleString()} samples` + (d.fast_hz ? ` · ${d.fast_hz} a second` : "") + " · from the rails log, 4 a second";
   // the sensor chip's step on each rail: the smallest difference between two readings it gave (in mV)
   const step = col => { const v = [...new Set(d[col].filter(x => x != null).map(x => Math.round(x * 1000)))].sort((a, b) => a - b); let m = Infinity; for (let i = 1; i < v.length; i++) m = Math.min(m, v[i] - v[i - 1]); return isFinite(m) ? m : null; };
   const steps = [["+12 V", step("v12_v")], ["+5 V", step("v5_v")], ["+3.3 V", step("v33_v")]].filter(x => x[1]);
   $("#p-note").innerHTML = "<b>How far to trust the rails.</b> The board's sensor chip measures them in steps" + (steps.length ? " (here: " + steps.map(([n, s]) => `${s} mV on ${n}`).join(", ") + ")" : "") + `, ${d.fast_hz ? Math.round(d.fast_hz) + " times" : "a few times"} a second. A flat line means steady to within a step. A power supply that trips cuts out in milliseconds, between two samples, so steady rails right up to a power-off don't clear the supply.`;
+  if (!overview) return;
   const po = (overview.power_offs || []).slice().reverse();
   const marks = (overview.milestones || []).map(m => ({t: isoT(m.at), text: m.text})).filter(m => m.t).sort((a, b) => b.t - a.t);
   const rows = [];
   let mi = 0;
+  const markRow = m => `<tr><td colspan="10" style="color:var(--violet);white-space:normal">◆ ${fmtDateTime(m.t)} · ${esc(m.text)}</td></tr>`;
   for (const p of po) {
     const t = isoT(p.went_down), b = isoT(p.boot);
-    while (mi < marks.length && (t || b) < marks[mi].t) { rows.push(`<tr><td colspan="10" style="color:var(--violet)">◆ ${fmtDateTime(marks[mi].t)} · ${esc(marks[mi].text)}</td></tr>`); mi++; }
+    while (mi < marks.length && (t || b) < marks[mi].t) rows.push(markRow(marks[mi++]));
     const r = p.last_rails || {};
     rows.push(`<tr><td class="mono">${t ? fmtDateTime(t, true) : `<span class="dim">unknown</span>${p.windows_estimate ? ` <span class="dim">(Windows guessed ${esc(p.windows_estimate)})</span>` : ""}`}</td>` +
       `<td class="mono">${b ? fmtDateTime(b, true) : "–"}</td><td class="num">${p.gap_s != null ? fmtDur(p.gap_s) : "–"}</td>` +
@@ -818,6 +928,8 @@ TABS.power = {every: 5000, async load() {
       `<td class="num">${r.cpu_power_w != null ? r.cpu_power_w.toFixed(1) + " W" : "–"}</td><td class="num">${r.cpu_temp_c != null ? r.cpu_temp_c.toFixed(1) + " °C" : "–"}</td>` +
       `<td><a href="#incidents" data-open="power|${esc(p.report)}">${esc(p.report)}</a></td></tr>`);
   }
+  while (mi < marks.length) rows.push(markRow(marks[mi++]));     // (the changes older than every power-off)
+  if (!po.length) rows.unshift(`<tr><td colspan="10" class="dim" style="white-space:normal">None caught. When the PC loses power or switches off without shutting down, a row appears here with the readings just before, and a report.</td></tr>`);
   $("#p-table tbody").innerHTML = rows.join("");
   const last = po.find(p => p.went_down);
   const lastT = last ? isoT(last.went_down) : null;
@@ -844,7 +956,7 @@ segment($("#e-group"), b => { eGroup = b.dataset.g; TABS.events.render(); });
 $("#e-search").addEventListener("input", () => TABS.events.render());
 TABS.events = {every: 15000, async load() {
   eData = await api(`/api/events?hours=${eHours}&limit=3000`);
-  this.render();
+  if (!selecting($("#e-table"))) this.render();
 }, render() {
   if (!eData) return;
   const q = $("#e-search").value.trim().toLowerCase();
@@ -854,10 +966,10 @@ TABS.events = {every: 15000, async load() {
     const dkey = new Date(e.t * 1000).toDateString();
     if (dkey !== day) { day = dkey; rows.push(`<tr class="ev-day"><td colspan="3">${DAY[new Date(e.t * 1000).getDay()]} ${fmtDate(e.t)}</td></tr>`); }
     const id = e.t + "|" + e.kind + "|" + e.text.slice(0, 60);
-    rows.push(`<tr class="ev" data-id="${esc(id)}"><td class="mono">${fmtTime(e.t)}</td><td><span class="dot ${e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : ""}"></span></td><td class="text">${esc(e.text)}</td></tr>`);
+    rows.push(`<tr class="ev" data-id="${esc(id)}" tabindex="0" aria-expanded="${eOpen.has(id)}"><td class="mono">${fmtTime(e.t)}</td><td><span class="dot ${e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : ""}"></span></td><td class="text">${esc(e.text)}</td></tr>`);
     if (eOpen.has(id)) rows.push(`<tr class="raw"><td></td><td colspan="2"><pre>${esc(JSON.stringify(e.rec, null, 1))}</pre></td></tr>`);
   });
-  $("#e-table tbody").innerHTML = rows.join("") || `<tr><td colspan="3" class="dim">Nothing in this range.</td></tr>`;
+  redraw($("#e-table tbody"), rows.join("") || `<tr><td colspan="3" class="dim">Nothing in this range.</td></tr>`, "data-id");
   $("#e-info").textContent = `${list.length.toLocaleString()} of ${eData.total.toLocaleString()} records` + (list.length > 1500 ? " (the newest 1,500 shown)" : "");
 }};
 $("#e-table").addEventListener("click", e => {
@@ -871,7 +983,7 @@ const SYSTEM_EXE = /^(System|svchost\.exe|lsass\.exe|wininit\.exe|services\.exe|
 let ptData = null;
 $("#pt-search").addEventListener("input", () => TABS.ports.render());
 $("#pt-system").addEventListener("change", () => TABS.ports.render());
-TABS.ports = {every: 15000, async load() { ptData = await api("/api/ports"); this.render(); }, render() {
+TABS.ports = {every: 15000, async load() { ptData = await api("/api/ports"); if (!selecting($("#pt-table"))) this.render(); }, render() {
   if (!ptData) return;
   const q = $("#pt-search").value.trim().toLowerCase(), sys = $("#pt-system").checked;
   const exp = ptData.expected || {};
@@ -903,10 +1015,12 @@ TABS.incidents = {every: 60000, async load() { iData = await api("/api/incidents
   if (!iData) return;
   const q = $("#i-search").value.trim().toLowerCase();
   const list = iData.incidents.filter(x => (!iSrc || x.src === iSrc) && (!q || (x.title + " " + x.name).toLowerCase().includes(q)));
-  $("#i-list").innerHTML = list.map(x => `<div class="inc-item${iOpen === x.src + "|" + x.name ? " on" : ""}" data-k="${esc(x.src + "|" + x.name)}">` +
-    `<div><span class="dot ${x.src === "power" ? "bad" : "warn"}" style="display:inline-block;margin-right:6px"></span>${esc(x.src === "power" ? "Power-off" : x.title.replace(/^(.{70}).*$/, "$1…"))}</div>` +
-    `<div class="t">${fmtDateTime(x.t, true)} · ${esc(x.name)}</div></div>`).join("") || `<div class="inc-item dim">None.</div>`;
-  $("#i-info").textContent = `${list.length} reports`;
+  // (the title in two lines at most; the file's name is in the tooltip and at the top of the report)
+  redraw($("#i-list"), list.map(x => `<div class="inc-item${iOpen === x.src + "|" + x.name ? " on" : ""}" data-k="${esc(x.src + "|" + x.name)}" tabindex="0" title="${esc(x.name)}">` +
+    `<div class="h"><span class="dot ${x.src === "power" ? "bad" : "warn"}"></span><span>${esc(x.src === "power" ? "Power-off" : x.title)}</span></div>` +
+    `<div class="t">${DAY[new Date(x.t * 1000).getDay()]} ${fmtDateTime(x.t, true)} · ${x.src === "power" ? "power-off report" : "app report"}</div></div>`).join("") ||
+    `<div class="inc-item dim" style="cursor:default">${iData.incidents.length ? "Nothing matches." : "No reports yet. One is written after a power-off, and when an app you watch crashes or closes unexpectedly."}</div>`, "data-k");
+  $("#i-info").textContent = list.length === iData.incidents.length ? plural(list.length, "report", "reports") : `${list.length} of ${plural(iData.incidents.length, "report", "reports")}`;
 }};
 $("#i-list").addEventListener("click", e => {
   const it = e.target.closest(".inc-item[data-k]"); if (!it) return;
@@ -916,11 +1030,20 @@ async function openIncident(src, name) {
   iOpen = src + "|" + name;
   if (location.hash !== "#incidents:" + name) history.replaceState(null, "", "#incidents:" + name);
   if (iData) TABS.incidents.render();
-  $("#i-view").innerHTML = `<span class="dim">Loading…</span>`;
+  const v = $("#i-view");
+  v.innerHTML = `<span class="dim">Loading…</span>`;
+  // (on a narrow screen the report is under the list: bring it into view)
+  if (matchMedia("(max-width: 900px)").matches && current === "incidents") v.scrollIntoView({block: "start", behavior: "smooth"});
   try {
     const r = await api(`/api/incident?src=${encodeURIComponent(src)}&name=${encodeURIComponent(name)}`);
-    $("#i-view").innerHTML = `<pre>${esc(r.text)}</pre>`;
-  } catch (e) { $("#i-view").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    v.innerHTML = `<div class="vbar"><span class="mono">${esc(name)}</span><button class="btn" id="i-copy">Copy</button></div><pre>${esc(r.text)}</pre>`;
+    v.scrollTop = 0;
+    $("#i-copy").addEventListener("click", async e => {
+      try { await navigator.clipboard.writeText(r.text); e.target.textContent = "Copied"; }
+      catch (_) { e.target.textContent = "Copy failed"; }
+      setTimeout(() => { e.target.textContent = "Copy"; }, 1500);
+    });
+  } catch (e) { v.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
 // Processes ----------------------------------------------------------------------------------------------------
@@ -931,7 +1054,7 @@ TABS.processes = {every: 3000, async load() {
   $("#pr-cpu tbody").innerHTML = d.warming_up ? `<tr><td colspan="4" class="dim">Measuring… (CPU use needs two looks)</td></tr>` :
     d.cpu.map(r => `<tr><td>${name(r)}</td><td class="num">${r.pid}</td><td class="num">${r.cpu.toFixed(1)} %</td><td class="barcell"><div class="hbar" style="width:${(r.cpu / maxCpu * 100).toFixed(1)}%"></div></td></tr>`).join("");
   $("#pr-mem tbody").innerHTML = d.mem.map(r => `<tr><td>${name(r)}</td><td class="num">${r.pid}</td><td class="num">${r.mem_mb.toLocaleString()} MB</td><td class="barcell"><div class="hbar" style="width:${(r.mem_mb / maxMem * 100).toFixed(1)}%;background:var(--violet)"></div></td></tr>`).join("");
-  $("#pr-info").textContent = `${d.count} processes · CPU ${d.total_cpu == null ? "…" : d.total_cpu.toFixed(0) + " %"} in use (${d.threads} threads) · memory ${d.ram.used_pct.toFixed(0)} % of ${d.ram.total_gb} GB`;
+  $("#pr-info").textContent = `${d.count} processes · CPU ${d.total_cpu == null ? "…" : d.total_cpu.toFixed(0) + " %"} in use (${d.threads} logical processors) · memory ${d.ram.used_pct.toFixed(0)} % of ${d.ram.total_gb} GB`;
 }};
 
 // go

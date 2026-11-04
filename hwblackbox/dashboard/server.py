@@ -540,6 +540,32 @@ WIN_EVENTS = {("User32", 1074): "Shutdown or restart asked for", ("Microsoft-Win
               ("Winlogon", 1002): "Explorer stopped and was restarted"}
 
 
+RAN = re.compile(r"^(\d+)h (\d+)m (\d+)s$")
+
+
+def human_ran(text):
+    """How long something ran, as a record says it ("26h 12m 45s"), the way a person would: "26 h 13 min",
+    "1 min 1 s". Anything else comes back as it was."""
+    m = RAN.match(str(text or ""))
+    if not m:
+        return text
+    s = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    if s < 60:
+        return "%d s" % s
+    if s < 3600:
+        return "%d min" % (s // 60) + (" %d s" % (s % 60) if s % 60 else "")
+    mins = int(round(s / 60.0))
+    if mins < 1440:
+        return "%d h" % (mins // 60) + (" %d min" % (mins % 60) if mins % 60 else "")
+    hrs = int(round(s / 3600.0))
+    return "%d d" % (hrs // 24) + (" %d h" % (hrs % 24) if hrs % 24 else "")
+
+
+# what Windows Error Reporting's report names mean (the ones the service keeps)
+WER_MEANING = (("RADAR_PRE_LEAK", "Windows' memory-leak check flagged it"), ("AppHang", "it stopped responding"),
+               ("LiveKernelEvent", "a driver recovered from a problem (often the graphics driver)"))
+
+
 def describe(rec, t, src="service"):
     """One line for a record, and how bad it is: info, warn or bad."""
     k = rec.get("kind")
@@ -551,7 +577,7 @@ def describe(rec, t, src="service"):
     if k == "exit":
         meaning = rec.get("meaning") or ""
         level = "bad" if "crash" in meaning else ("info" if (rec.get("code") or "") == "0x00000000" else "warn")
-        text = "%s ended: %s (ran %s)" % (rec.get("app"), meaning, rec.get("ran"))
+        text = "%s ended: %s (ran %s)" % (rec.get("app"), meaning, human_ran(rec.get("ran")))
         if rec.get("ports_now"):
             text += "; its port now: %s" % ", ".join("%s %s" % kv for kv in rec["ports_now"].items())
         if rec.get("while_shutting_down"):
@@ -579,7 +605,10 @@ def describe(rec, t, src="service"):
                                 (" in %s" % ins[3]) if s == "Application Error" and len(ins) > 3 else "")
             level = "bad"
         elif s == "Windows Error Reporting":
-            text = "Windows Error Reporting: %s, %s" % (ins[2] if len(ins) > 2 else "?", rec.get("app") or "?")
+            name = ins[2] if len(ins) > 2 else "?"
+            meaning = next((m for p, m in WER_MEANING if name.startswith(p)), None)
+            text = "Windows Error Reporting, %s: %s" % (rec.get("app") or "?",
+                                                         "%s (%s)" % (meaning, name) if meaning else name)
             level = "warn"
         elif s == "Service Control Manager":
             text = "The %s service ended unexpectedly" % (ins[0] if ins else "?")
@@ -613,8 +642,16 @@ def describe(rec, t, src="service"):
             level = "bad" if ev == "problem" else "info"
         else:
             holder = "%s%s" % (rec.get("exe"), " (%s)" % rec["app"] if rec.get("app") else "")
-            text = "Port %s %s: %s%s" % (rec.get("addr"), ev, holder,
-                                         ", before: %s" % rec["before"] if rec.get("before") else "")
+            before = str(rec.get("before") or "")
+            old_exe, _, old_pid = before.rpartition("/")
+            if ev == "new owner" and old_exe and old_exe == rec.get("exe"):
+                # the same program, a new process: it restarted
+                text = "Port %s: %s restarted (pid %s, now %s)" % (rec.get("addr"), holder, old_pid, rec.get("pid"))
+            elif ev == "new owner" and before:
+                text = "Port %s: now %s (before: %s)" % (rec.get("addr"), holder,
+                                                          "%s, pid %s" % (old_exe, old_pid) if old_exe else before)
+            else:
+                text = "Port %s %s: %s" % (rec.get("addr"), ev, holder)
     elif k == "startup":
         text = "%s started (%s%s)" % (who, "v" if old else "", rec.get("version"))
         prev = rec.get("previous_run") or {}
