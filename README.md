@@ -144,6 +144,8 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 | **Incidents** | the power-off and crash reports |
 | **Processes** | what's using the CPU and memory right now |
 
+The header shows the page's version. After an update, a page that was already open says so and offers a reload.
+
 The dashboard only reads. It listens on `127.0.0.1` alone and answers only requests addressed that way, so a web page
 can't reach it through DNS rebinding.
 

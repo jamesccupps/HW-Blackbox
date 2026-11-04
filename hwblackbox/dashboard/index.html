@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="hwb-version" content="__HWB_VERSION__">
 <title>HW Blackbox</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121620'/%3E%3Cpath d='M4 19h6l3-9 5 15 3-8h7' fill='none' stroke='%235cc8ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
@@ -29,6 +30,12 @@ header { position: sticky; top: 0; z-index: 10; background: rgba(13,16,22,.94); 
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; letter-spacing: .2px; }
 .brand svg { width: 26px; height: 26px; }
 .brand .host { color: var(--muted); font-weight: 500; font-size: 13px; }
+.brand .ver { color: var(--dim); font: 500 12px var(--mono); cursor: default; }
+/* after an update: the program is newer than this page */
+.newver { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 7px 22px;
+  background: rgba(92,200,255,.12); border-bottom: 1px solid rgba(92,200,255,.3); font-size: 13px; }
+.newver[hidden] { display: none; }
+.newver .btn { margin-left: auto; padding: 3px 14px; border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
 .chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border: 1px solid var(--line);
   border-radius: 999px; background: var(--panel); font-size: 12.5px; color: var(--muted); cursor: default; }
@@ -187,6 +194,7 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 .err { color: var(--bad); }
 @media (max-width: 640px) {
   main { padding: 14px 16px 30px; } .bar { padding: 10px 16px 0; gap: 8px 18px; } .updated { display: none; }
+  .newver { padding: 7px 16px; }
   /* the four chips on one line, with short names, so the header doesn't take a fifth of a phone's screen */
   .chips { margin-left: 0; width: 100%; flex-wrap: nowrap; gap: 6px; }
   .chip { padding: 3px 9px; font-size: 12px; } .chip .long { display: none; } .chip .short { display: inline; }
@@ -197,10 +205,14 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 </head>
 <body>
 <header>
+  <div class="newver" id="newver" role="status" hidden>
+    <span><b>HW Blackbox was updated to <span id="nv-new"></span>.</b> This page is still <span id="nv-old"></span>: reload it to get the new one.</span>
+    <button class="btn" id="nv-reload">Reload</button>
+  </div>
   <div class="bar">
     <div class="brand">
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#151a23" stroke="#252c39"/><path d="M4 19h6l3-9 5 15 3-8h7" fill="none" stroke="#5cc8ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      HW Blackbox <span class="host" id="host"></span>
+      HW Blackbox <span class="ver" id="ver"></span> <span class="host" id="host"></span>
     </div>
     <div class="chips" id="chips"></div>
     <div class="updated" id="updated"></div>
@@ -317,6 +329,8 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const COLORS = ["#5cc8ff", "#ff9f43", "#3ecf8e", "#f368e0", "#feca57", "#a78bfa", "#ff6b6b", "#48dbfb", "#1dd1a1", "#c8d6e5", "#ff9ff3", "#54a0ff"];
 let lastOk = 0, overview = null;
+// this page's version, stamped in by the server (null if it wasn't: then the API's version is shown, with no check)
+const PAGE_VERSION = (v => /^\d/.test(v) ? v : null)($('meta[name="hwb-version"]').content);
 
 async function api(path) {
   const r = await fetch(path, {cache: "no-store"});
@@ -484,6 +498,12 @@ async function header() {
     const o = overview = await api("/api/overview");
     $("#host").textContent = o.host;
     document.title = "HW Blackbox · " + o.host;
+    // the page's version; after an update the program answers with a newer one, and the page offers a reload
+    const pv = PAGE_VERSION || o.version, moved = !!(PAGE_VERSION && o.version && o.version !== PAGE_VERSION);
+    $("#ver").textContent = pv ? "v" + pv : "";
+    $("#ver").title = "This page is HW Blackbox " + pv + (moved ? "; the program is " + o.version : "");
+    $("#nv-new").textContent = o.version; $("#nv-old").textContent = PAGE_VERSION;
+    $("#newver").hidden = !moved;
     const h = healthOf(o);
     // (a chip's short name is for a phone's width; its title says what the colour means)
     const WORD = {good: "OK", warn: "needs a look", bad: "not working", "": "off"};
@@ -502,6 +522,7 @@ async function header() {
   } catch (e) { offline(e); }
 }
 setInterval(() => { if (!document.hidden) header(); }, 5000);
+$("#nv-reload").addEventListener("click", () => location.reload());     // (the address keeps the tab)
 // the page header's height, for the tables' sticky column names under it (it wraps on narrower windows)
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px")).observe($("header"));
 

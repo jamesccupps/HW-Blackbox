@@ -775,6 +775,13 @@ def api_config(q):
     return cfg
 
 
+def page():
+    """index.html with this version stamped in: an open page compares it with the API's version, and after an update
+    it offers a reload instead of running an old page against the new program."""
+    with open(PAGE, "rb") as f:
+        return f.read().replace(b"__HWB_VERSION__", VERSION.encode("ascii"))
+
+
 ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/history": api_history,
           "/api/flight_columns": api_flight_columns, "/api/rails": api_rails, "/api/events": api_events,
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
@@ -812,8 +819,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
         if url.path in ("/", "/index.html"):
             try:
-                with open(PAGE, "rb") as f:
-                    self.send(200, f.read(), "text/html; charset=utf-8")
+                self.send(200, page(), "text/html; charset=utf-8")
             except OSError:
                 self.send(500, b"index.html is missing", "text/plain")
             return

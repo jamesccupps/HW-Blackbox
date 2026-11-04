@@ -243,6 +243,15 @@ class DashboardTest(TempData):
         self.assertEqual(d["text"], "Windows Error Reporting, app.exe: Windows' memory-leak check flagged it "
                                     "(RADAR_PRE_LEAK_64)")
 
+    def test_page_carries_its_version(self):
+        # an open page compares its own version with the API's, to offer a reload after an update
+        from hwblackbox import VERSION
+        from hwblackbox.dashboard import server
+        body = server.page().decode("utf-8")
+        self.assertIn('<meta name="hwb-version" content="%s">' % VERSION, body)
+        self.assertNotIn("__HWB_VERSION__", body)
+        self.assertEqual(server.api_overview({})["version"], VERSION)
+
     def test_bucketed(self):
         from hwblackbox.dashboard.server import bucketed
         nan = float("nan")
