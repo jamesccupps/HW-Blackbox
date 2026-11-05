@@ -84,6 +84,12 @@ def main():
     copytree(os.path.join(base, "DLLs"), os.path.join(py, "DLLs"), SKIP_DLLS)
     copytree(os.path.join(base, "Lib"), os.path.join(py, "Lib"), SKIP_LIB)
     copytree(site, os.path.join(py, "Lib", "site-packages"), SKIP_SITE)
+    # pywin32's COM cache (win32com.client unpickles its dicts.dat as it's imported). Without a gen_py folder of its
+    # own, pywin32 uses the temp folder: for the service, as SYSTEM, C:\Windows\Temp, where any user can make the
+    # folder first. This one is under Program Files, which only admins can change.
+    gen = os.path.join(py, "Lib", "site-packages", "win32com", "gen_py")
+    os.makedirs(gen, exist_ok=True)
+    open(os.path.join(gen, "__init__.py"), "w").close()
     with open(os.path.join(py, "python312._pth"), "w", encoding="ascii") as f:
         f.write(PTH)
     copytree(os.path.join(ROOT, "hwblackbox"), os.path.join(out, "app", "hwblackbox"), {"__pycache__"})
@@ -99,7 +105,8 @@ def main():
     # does it run on its own? (the module path comes only from python312._pth)
     probe = subprocess.run([exe, "-c", "import sys, hwblackbox, hwblackbox.service, hwblackbox.agent, "
                             "hwblackbox.dashboard.server, win32api, win32evtlog, win32com.client, clr_loader, psutil, "
-                            "pynvml; print(hwblackbox.VERSION, sys.flags.isolated, sys.path)"],
+                            "pynvml; from hwblackbox import agents; assert agents.com_cache_ok(), 'COM cache outside'; "
+                            "print(hwblackbox.VERSION, sys.flags.isolated, sys.path)"],
                            capture_output=True, text=True, env={k: v for k, v in os.environ.items()
                                                                   if not k.startswith("PYTHON")})
     if probe.returncode:

@@ -67,6 +67,55 @@ function Stop-HWBlackbox {
     ForEach-Object { Say "  ending pid $($_.ProcessId) ($($_.CommandLine))"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
+# The data folder. The service writes there as SYSTEM, so nobody else may own it or the folders in it, and none of them
+# may be a link to somewhere else: someone who could do either could make SYSTEM write or delete any file. It's made
+# with its owner and permissions final before anything goes in it (SYSTEM and admins: everything; users: read). A
+# folder someone else made first, or a link, is moved aside, never used.
+# (the attributes of the path itself, not of where a link points: $null when there's nothing there, even a link to
+# something gone, which Test-Path calls missing)
+function Get-OwnAttributes([string]$Path) { try { [IO.File]::GetAttributes($Path) } catch { $null } }
+function Test-TrustedFolder([string]$Path, [string[]]$Owners) {
+  $a = Get-OwnAttributes $Path
+  if (($a -band [IO.FileAttributes]::ReparsePoint) -or -not ($a -band [IO.FileAttributes]::Directory)) { return $false }
+  return $Owners -contains (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+}
+function Initialize-DataFolder([string]$Root) {
+  # who may own them: SYSTEM, Administrators, TrustedInstaller, or an admin's own account (where a policy gives an
+  # admin's new folders to the admin instead of the Administrators group)
+  $owners = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+  try { $owners += @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { $_.SID.Value }) }
+  catch { Say "  (the Administrators group's members can't be listed: $($_.Exception.Message))" }
+  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $aside = {
+    param($p)
+    try { Rename-Item -LiteralPath $p -NewName ("{0}.untrusted-{1}" -f (Split-Path $p -Leaf), $stamp) }
+    catch { Say "$p was made by someone else, or is a link, and can't be moved aside: $($_.Exception.Message)"; exit 1 }
+    Warn "$p was made by someone other than SYSTEM or an admin, or is a link to somewhere else: moved aside to $p.untrusted-$stamp"
+  }
+  if ((Get-OwnAttributes $Root) -and -not (Test-TrustedFolder $Root $owners)) { & $aside $Root }
+  $sec = New-Object Security.AccessControl.DirectorySecurity
+  $sec.SetSecurityDescriptorSddlForm('O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)',
+                                     'Owner, Group, Access')
+  if (-not (Get-OwnAttributes $Root)) { [void][IO.Directory]::CreateDirectory($Root, $sec) }
+  $kids = 'logs', 'state', 'incidents', 'sessions', 'secrets'
+  foreach ($d in $kids) {
+    $p = Join-Path $Root $d
+    if ((Get-OwnAttributes $p) -and -not (Test-TrustedFolder $p $owners)) { & $aside $p }
+  }
+  # (only now, with nothing but trusted folders in it, since setting these passes them down to what's inside: for
+  # one that was there, the owner, and no grants but these)
+  Set-Acl -LiteralPath $Root -AclObject $sec
+  foreach ($d in $kids) {
+    $p = Join-Path $Root $d
+    if (-not (Get-OwnAttributes $p)) { [void](New-Item -ItemType Directory -Path $p) }
+  }
+  # sessions\: each user's session agent makes a folder of its own there (and owns it). secrets\: SYSTEM and admins.
+  & icacls.exe (Join-Path $Root 'sessions') /grant '*S-1-5-32-545:(AD)' '*S-1-3-0:(OI)(CI)(IO)M' /Q | Out-Null
+  if ($LASTEXITCODE) { Say "setting the permissions of sessions\ failed (icacls $LASTEXITCODE)"; exit 1 }
+  & icacls.exe (Join-Path $Root 'secrets') /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
+  if ($LASTEXITCODE) { Say "setting the permissions of secrets\ failed (icacls $LASTEXITCODE)"; exit 1 }
+}
+
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
            [Security.Principal.WindowsBuiltInRole]::Administrator)
 "HW Blackbox install: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), user $env:USERNAME, from $PSScriptRoot" | Out-File $Report -Encoding utf8
@@ -82,7 +131,12 @@ if ($Uninstall) {
   }
   if (Test-Path $StartMenu) { Remove-Item $StartMenu -Force; Say 'removed the Start menu shortcut' }
   if (Test-Path $Dest) { Remove-Item $Dest -Recurse -Force; Say "removed $Dest" }
-  if ($RemoveData -and (Test-Path $Data)) { Remove-Item $Data -Recurse -Force; Say "removed $Data" }
+  if ($RemoveData -and (Get-OwnAttributes $Data)) {
+    # (rmdir removes a link it meets without going into it; Windows PowerShell's Remove-Item -Recurse can follow one)
+    if ((Get-OwnAttributes $Data) -band [IO.FileAttributes]::ReparsePoint) { & cmd.exe /c rmdir "$Data" }
+    else { & cmd.exe /c rmdir /s /q "$Data" }
+    Say "removed $Data"
+  }
   elseif (Test-Path $Data) { Say "kept the data in $Data" }
   Say 'DONE (uninstalled)'
   exit 0
@@ -120,15 +174,7 @@ Get-ChildItem $Dest -Recurse -File | Unblock-File
 Say "copied and checked $($manifest.files) files"
 
 Say "== 4. The data folder $Data"
-foreach ($d in '', 'logs', 'state', 'incidents', 'sessions', 'secrets') {
-  $p = Join-Path $Data $d
-  if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p | Out-Null }
-}
-# SYSTEM and admins: everything; users: read. sessions\: each user may make a folder of their own (and owns it).
-# secrets\: SYSTEM and admins only.
-& icacls.exe $Data /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /Q | Out-Null
-& icacls.exe (Join-Path $Data 'sessions') /grant '*S-1-5-32-545:(AD)' '*S-1-3-0:(OI)(CI)(IO)M' /Q | Out-Null
-& icacls.exe (Join-Path $Data 'secrets') /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
+Initialize-DataFolder $Data
 $initArgs = @('init', '--data-dir', $Data)
 foreach ($s in $Set) { $initArgs += @('--set', $s) }
 Run-Hwb $initArgs

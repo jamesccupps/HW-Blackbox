@@ -344,15 +344,28 @@ class SensorsAgeTest(unittest.TestCase):
 
 class PowerOffTest(TempData):
     def test_rows_before_skips_damage(self):
-        from hwblackbox.poweroff import _event_date, _rows_before
+        from hwblackbox.poweroff import _rows_before
         p = os.path.join(paths.P.logs, "flight_20261007.csv")
         with open(p, "wb") as f:
             f.write(b"timestamp,a\n2026-10-07T02:14:50,1\n2026-10-07T02:14:55,2\n\x00\x00\x00\n"
                     b"garbage line\n2026-10-07T02:16:00,3\n")
         rows = _rows_before(p, dt.datetime(2026, 10, 7, 2, 15, 12), 5)
         self.assertEqual([r[1].split(": ")[1] for r in rows], ["2026-10-07T02:14:50,1", "2026-10-07T02:14:55,2"])
-        self.assertEqual(_event_date("Event[0]:\n  Date: 2026-10-07T02:15:15.5000000Z\n"),
-                         dt.datetime(2026, 10, 7, 2, 15, 15, 500000))
+
+    def test_check_reads_the_times_through_the_event_api(self):
+        # (wevtutil's text names its fields in Windows' display language: the check doesn't read it, the report does)
+        from unittest import mock
+        from hwblackbox import events, poweroff
+        boot = dt.datetime(2026, 10, 23, 22, 24, 31)
+        times = {poweroff.Q41: "2026-10-23 22:24:35", poweroff.Q6008: "2026-10-23 22:24:40"}
+        with mock.patch.object(events, "newest_event", lambda log, q: (times[q], {})), \
+                mock.patch.object(poweroff, "_wevtutil", lambda q, n: "Ereignis[0]:\n  Datum: ...\n"):
+            found = poweroff.check(boot=boot, now=boot + dt.timedelta(minutes=1))
+            self.assertIn("incident_20261023_222431.txt", found)
+            self.assertTrue(os.path.exists(os.path.join(paths.P.incidents, "incident_20261023_222431.txt")))
+            # a clean boot later: the newest 41 / 6008 are the old ones
+            later = boot + dt.timedelta(hours=3)
+            self.assertEqual(poweroff.check(boot=later, now=later + dt.timedelta(minutes=1)), "")
 
 
 class AgentsTest(TempData):
@@ -486,6 +499,234 @@ class WatcherTest(TempData):
         self.assertEqual(self.ended(self.SIGN_OUT, [asked], session=2), (True, False))   # another session
         self.assertEqual(self.ended(0xC0000005, [asked]), (True, False))                 # a crash still counts
         self.assertEqual(self.ended(0xC000013A, [asked]), (False, True))                 # a console closing with it
+
+
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class HardeningTest(TempData):
+    """The 2026-11-05 review's findings: what another account on the PC, a web page or a typo could do."""
+
+    def test_com_cache_must_be_the_programs_own(self):
+        from unittest import mock
+        from hwblackbox import agents
+        prog = r"C:\Program Files\HWBlackbox\python"
+        self.assertTrue(agents.inside(prog + r"\Lib\site-packages\win32com\gen_py", prog))
+        self.assertFalse(agents.inside(r"C:\Windows\TEMP\gen_py\3.12", prog))
+        self.assertFalse(agents.inside(r"D:\HWBlackbox\python", prog))
+        self.assertFalse(agents.inside(r"C:\Program Files\HWBlackbox\python2", prog))
+        # outside it, the service doesn't touch COM at all (importing win32com.client unpickles the cache)
+        with mock.patch.object(agents, "com_cache_ok", return_value=False):
+            self.assertEqual(agents.get_task(), ("unsafe", None))
+
+    def test_a_typo_in_the_settings_never_stops_the_service(self):
+        with open(paths.P.config, "w", encoding="utf-8") as f:
+            json.dump({"sensors": {"interval_s": "fast", "keep_days": "30", "rails_keep_days": -1, "lhm_gpu": True},
+                       "events": {"keep_days": None}, "dashboard": {"port": 99999, "enabled": "yes",
+                                                                    "milestones": [{"at": "2026-10-08", "text": "x"}, 5]},
+                       "ports": {"expected": {"80": "web", "443": {"label": "Web"}}, "ignore": "all"},
+                       "watch": [{"exe": "a.exe", "ports": 8080, "match": 5}], "disk_warn_gb": -3}, f)
+        cfg = config.load()
+        self.assertEqual((cfg["sensors"]["interval_s"], cfg["sensors"]["keep_days"], cfg["sensors"]["rails_keep_days"]),
+                         (5.0, 183, 7))
+        self.assertIs(cfg["sensors"]["lhm_gpu"], True)                   # (it may be "auto", true or false)
+        self.assertEqual((cfg["events"]["keep_days"], cfg["dashboard"]["port"], cfg["dashboard"]["enabled"]),
+                         (183, 9070, True))
+        self.assertEqual(cfg["dashboard"]["milestones"], [{"at": "2026-10-08", "text": "x"}])
+        self.assertEqual((cfg["ports"]["expected"], cfg["ports"]["ignore"]), ({"443": {"label": "Web"}}, []))
+        self.assertEqual(cfg["watch"], [{"exe": "a.exe", "ports": [], "label": "a.exe"}])
+        self.assertEqual(cfg["disk_warn_gb"], 10)
+        for name in ("sensors.interval_s", "dashboard.port", "ports.ignore", "disk_warn_gb", "ports.expected"):
+            self.assertIn(name, cfg["error"])
+
+    def test_secrets_in_command_lines_are_hidden(self):
+        from hwblackbox.ports import redact
+        cases = {
+            "--port 8080 --password hunter2 --verbose": "--port 8080 --password *** --verbose",
+            "-api-key=abc123 serve": "-api-key=*** serve",
+            "/token:xyz run": "/token:*** run",
+            'db --auth-token "a b c" x': 'db --auth-token *** x',
+            "connect https://bob:s3cret@db.local:5432/x": "connect https://bob:***@db.local:5432/x",
+            "PASSWORD=pw1 node app.js": "PASSWORD=*** node app.js",
+            "-m hwblackbox agent": "-m hwblackbox agent",
+            "server.js --port 8765 --data G:\\Beam\\data": "server.js --port 8765 --data G:\\Beam\\data",
+        }
+        for cmd, want in cases.items():
+            self.assertEqual(redact(cmd), want, cmd)
+
+    def test_history_reads_each_column_once(self):
+        from unittest import mock
+        from hwblackbox.dashboard import server
+        seen = []
+        with mock.patch.object(server.FLIGHT_CACHE, "rows_between",
+                               side_effect=lambda s, e, cols: seen.append(list(cols)) or ([], {})):
+            server.api_history({"cols": ",".join(["cpu_temp_c"] * 5000 + ["v12_v"]), "hours": "1"})
+        self.assertEqual(seen, [["cpu_temp_c", "v12_v"]])
+
+    def test_events_survive_bad_and_forged_session_records(self):
+        from hwblackbox.dashboard import server
+        now = dt.datetime.now().replace(microsecond=0)
+        day = now.strftime("%Y%m%d")
+
+        def line(**r):
+            return json.dumps(dict({"ts": now.isoformat()}, **r)) + "\n"
+        with open(os.path.join(paths.P.logs, "events_%s.jsonl" % day), "w", encoding="utf-8") as f:
+            f.write(line(kind="startup", version="1.0.6", data_dir="x"))
+        folder = os.path.join(paths.P.sessions, "service")         # (a user named "service", or posing as it)
+        os.makedirs(folder)
+        with open(os.path.join(folder, "session_%s.jsonl" % day), "w", encoding="utf-8") as f:
+            f.write("[]\n")                                                       # not a record
+            f.write(line(kind="winevent", source="Microsoft-Windows-Kernel-Power", id=41, at=now.isoformat()))
+            f.write(line(kind="display", before=5, after=6))                      # wrong types
+            f.write(json.dumps({"ts": "2099-01-01T00:00:00", "kind": "startup", "version": "x"}) + "\n")
+            f.write(line(kind="startup", version="1.0.6", data_dir="x"))
+        texts = [e["text"] for e in server.api_events({})["events"]]
+        self.assertEqual(texts, ["HW Blackbox's service started (1.0.6)", "The session agent (service) started (1.0.6)"])
+
+    def test_app_reports_are_capped_and_pruned(self):
+        from hwblackbox import watcher
+
+        class FakeAgents:
+            def screens(self):
+                return {}
+
+            def recent_records(self, seconds):
+                return []
+
+            def front(self, seconds):
+                return {}
+        jr = Recorder()
+        w = watcher.Watcher(jr, {"watch": [], "events": {"keep_days": 30}}, None, FakeAgents())
+        for i in range(watcher.REPORTS_PER_HOUR + 5):
+            w.incident("app%d.exe" % i, "app%d crashed" % i, {})
+        reports = [f for f in os.listdir(paths.P.incidents) if f.endswith(".txt")]
+        self.assertEqual(len(reports), watcher.REPORTS_PER_HOUR)
+        self.assertEqual(len([r for r in jr.recs if r["kind"] == "error"]), 1)
+        # old app reports go; power-off reports stay
+        for name in ("incident_20200101_120000_old.exe.txt", "incident_20200101_120000.txt"):
+            open(os.path.join(paths.P.incidents, name), "w").close()
+        self.assertEqual(w.prune_reports(), 1)
+        self.assertTrue(os.path.exists(os.path.join(paths.P.incidents, "incident_20200101_120000.txt")))
+        self.assertEqual(len(os.listdir(paths.P.incidents)), watcher.REPORTS_PER_HOUR + 1)
+
+    def test_no_network_paths_from_other_programs(self):
+        from unittest import mock
+        from hwblackbox import watcher
+        proc = mock.Mock()
+        proc.exe.return_value = r"\\host\share\venv\Scripts\pythonw.exe"
+        with mock.patch.object(watcher.psutil, "Process", return_value=proc), \
+                mock.patch.object(watcher.os.path, "isfile", side_effect=AssertionError("looked on the share")):
+            self.assertFalse(watcher.is_venv_launcher(1234))
+
+    def test_links_are_not_followed(self):
+        import _winapi
+        from hwblackbox.dashboard import server
+        from hwblackbox.util import is_link
+        target = os.path.join(self.dir, "elsewhere")
+        os.makedirs(target)
+        os.makedirs(os.path.join(paths.P.sessions, "alice"))
+        _winapi.CreateJunction(target, os.path.join(paths.P.sessions, "bob"))
+        self.assertTrue(is_link(os.path.join(paths.P.sessions, "bob")))
+        self.assertFalse(is_link(os.path.join(paths.P.sessions, "alice")))
+        self.assertEqual([n for n, _ in server.session_dirs()], ["alice"])
+
+    def test_the_data_only_for_the_page_itself(self):
+        import urllib.error
+        import urllib.request
+        from hwblackbox.dashboard import server
+        port = free_port()
+        httpd = server.start(port)
+        try:
+            def get(path, site=None):
+                req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                             headers={"Sec-Fetch-Site": site} if site else {})
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                try:
+                    with opener.open(req, timeout=5) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    return e.code
+            self.assertEqual(get("/api/ping", "cross-site"), 403)
+            self.assertEqual(get("/api/ping", "same-site"), 403)                 # (another local port's page)
+            self.assertEqual(get("/api/ping", "same-origin"), 200)
+            self.assertEqual(get("/api/ping"), 200)                              # (a program: the installer's check)
+            self.assertEqual(get("/", "cross-site"), 200)                        # (a link to the page from elsewhere)
+            self.assertEqual(server.who_serves(port)[:11], "HW Blackbox")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_a_slow_port_holder_cant_hold_the_agent(self):
+        import socket
+        import threading
+        from hwblackbox.dashboard import server
+        lst = socket.socket()
+        lst.bind(("127.0.0.1", 0))
+        lst.listen(1)
+        port, stop = lst.getsockname()[1], threading.Event()
+
+        def trickle():                  # answers, then a byte a second for ever
+            conn, _ = lst.accept()
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 100000\r\n\r\n")
+            while not stop.is_set():
+                try:
+                    conn.sendall(b" ")
+                except OSError:
+                    break
+                time.sleep(1)
+            conn.close()
+        threading.Thread(target=trickle, daemon=True).start()
+        t0 = time.monotonic()
+        try:
+            self.assertIsNone(server.who_serves(port, wait=2))
+            self.assertLess(time.monotonic() - t0, 3)
+        finally:
+            stop.set()
+            lst.close()
+
+    def test_home_assistant_redirects_are_not_followed(self):
+        import http.server
+        import threading
+        from hwblackbox.homeassistant import HaReporter
+        got = []
+
+        class Elsewhere(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                got.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                pass
+        other = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+
+        class Moved(Elsewhere):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/steal" % other.server_port)
+                self.end_headers()
+        ha = http.server.HTTPServer(("127.0.0.1", 0), Moved)
+        for s in (other, ha):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        env = os.path.join(self.dir, "ha.env")
+        with open(env, "w", encoding="utf-8") as f:
+            f.write("HA_URL=http://127.0.0.1:%d\nHA_TOKEN=secret-token\n" % ha.server_port)
+        try:
+            r = HaReporter._post({"env_file": env, "entity": "sensor.x"}, {"state": "ok"})
+            self.assertFalse(r["ok"])
+            self.assertTrue(r["error"].startswith("HTTP 302"))
+            self.assertEqual(got, [])
+        finally:
+            for s in (other, ha):
+                s.shutdown()
+                s.server_close()
 
 
 if __name__ == "__main__":

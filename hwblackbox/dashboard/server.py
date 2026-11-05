@@ -62,6 +62,8 @@ RAILS = ("v12_v", "v5_v", "v33_v", "vcore_v", "vsoc_v", "cpu_power_w", "cpu_temp
 # records worth a line on the Events page (the rest are bulky or minute-by-minute)
 EVENT_KINDS = {"exit", "start", "winevent", "shutdown", "power", "session", "display", "taskbar", "port", "startup",
                "stop", "error", "agent", "clock", "sensors", "power_off_report", "boot_part"}
+# the kinds a session agent writes: the only ones taken from sessions\ (which every user can write a folder in)
+AGENT_KINDS = {"display", "taskbar", "shutdown", "startup", "stop", "error"}
 POWEROFF_NAME = re.compile(r"incident_\d{8}_\d{6}\.txt$")
 INCIDENT_NAME = re.compile(r"incident_\d{8}_\d{6}[\w.\-]*\.txt$")
 
@@ -78,9 +80,10 @@ def settings():
 
 
 def session_dirs():
-    """[(user folder name, path)] for every session agent's folder."""
+    """[(user folder name, path)] for every session agent's folder (not one that's a link to somewhere else)."""
     try:
-        return [(e.name, e.path) for e in os.scandir(paths.P.sessions) if e.is_dir()]
+        return [(e.name, e.path) for e in os.scandir(paths.P.sessions)
+                if e.is_dir(follow_symlinks=False) and not e.is_junction()]
     except OSError:
         return []
 
@@ -314,7 +317,8 @@ def api_sensors(q):
 
 
 def api_history(q):
-    want = (q.get("cols") or "cpu_temp_c,gpu_temp_c").split(",")
+    # (each column once: a column asked for many times over would be read that many times over, into gigabytes)
+    want = list(dict.fromkeys((q.get("cols") or "cpu_temp_c,gpu_temp_c").split(",")))[:64]
     cols = [c for c in want if c in FLIGHT]
     dcols = [c for c in want if c.startswith(DISK)]
     hours = min(24 * 7, max(0.25, float(q.get("hours") or 6)))
@@ -503,11 +507,13 @@ def journal_files(day):
 def api_events(q):
     hours = min(24 * 31, max(1, float(q.get("hours") or 48)))
     limit = min(5000, max(50, int(q.get("limit") or 1500)))
-    cutoff = time.time() - hours * 3600
+    now = time.time()
+    cutoff = now - hours * 3600
     out = []
     d = dt.date.fromtimestamp(cutoff)
     while d <= dt.date.today():
-        for src, path in journal_files(d):
+        for i, (src, path) in enumerate(journal_files(d)):
+            agent = i > 0                                # (the first is the service's own)
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -517,13 +523,16 @@ def api_events(q):
                             rec = json.loads(line)
                         except ValueError:
                             continue
-                        if rec.get("kind") not in EVENT_KINDS:
+                        if not isinstance(rec, dict) or rec.get("kind") not in (AGENT_KINDS if agent else EVENT_KINDS):
                             continue
                         # (Windows' records at the time they happened: one read after a restart was written later)
                         t = (epoch(rec.get("at")) if rec.get("kind") == "winevent" else None) or epoch(rec.get("ts"))
-                        if t is None or t < cutoff:
+                        if t is None or t < cutoff or t > now + 300:
                             continue
-                        out.append(describe(rec, t, src))
+                        try:
+                            out.append(describe(rec, t, src, agent=agent))
+                        except Exception:                # (a damaged or odd record: the rest still show)
+                            continue
             except OSError:
                 continue
         d += dt.timedelta(days=1)
@@ -566,14 +575,17 @@ WER_MEANING = (("RADAR_PRE_LEAK", "Windows' memory-leak check flagged it"), ("Ap
                ("LiveKernelEvent", "a driver recovered from a problem (often the graphics driver)"))
 
 
-def describe(rec, t, src="service"):
-    """One line for a record, and how bad it is: info, warn or bad."""
+def describe(rec, t, src="service", agent=None):
+    """One line for a record, and how bad it is: info, warn or bad. agent: from a session agent's folder (src is then
+    the folder's name, whatever it is: a folder named "service" is still a session agent's)."""
+    if agent is None:
+        agent = src != "service"
     k = rec.get("kind")
     level, text = "info", k
     # (records written by AppWatch, the script HW Blackbox grew out of, where its history was brought in)
-    old = src == "service" and k in ("startup", "stop", "error") and "data_dir" not in rec and "why" not in rec \
+    old = not agent and k in ("startup", "stop", "error") and "data_dir" not in rec and "why" not in rec \
         and "trace" not in rec
-    who = "AppWatch" if old else "HW Blackbox's service" if src == "service" else "The session agent (%s)" % src
+    who = "AppWatch" if old else "The session agent (%s)" % src if agent else "HW Blackbox's service"
     if k == "exit":
         meaning = rec.get("meaning") or ""
         level = "bad" if "crash" in meaning else ("info" if (rec.get("code") or "") == "0x00000000" else "warn")
@@ -792,6 +804,7 @@ ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/hist
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "HWBlackbox/%s" % VERSION
     last_request = time.time()
+    timeout = 15                                 # (a connection that sends nothing doesn't hold a thread for ever)
 
     def log_message(self, fmt, *args):            # (quiet: pythonw has nowhere to print)
         pass
@@ -814,8 +827,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if host not in self.server.allowed_hosts:
             self.send(421, b"Misdirected request", "text/plain")   # (a DNS-rebinding page, or a typo)
             return
-        Handler.last_request = time.time()
         url = urllib.parse.urlsplit(self.path)
+        # The data only for this page itself (or a program that isn't a browser): a browser says where a request comes
+        # from, and another site's page has no business asking. (Opening the page from a link elsewhere is fine.)
+        site = self.headers.get("Sec-Fetch-Site")
+        if url.path.startswith("/api/") and site and site not in ("same-origin", "none"):
+            self.send(403, b"Cross-site request", "text/plain")
+            return
+        Handler.last_request = time.time()
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
         if url.path in ("/", "/index.html"):
             try:
@@ -873,13 +892,22 @@ def start(port):
     return httpd
 
 
-def who_serves(port):
-    """'HW Blackbox, <user>'s' if an HW Blackbox dashboard answers on the port, else None."""
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/api/ping" % port, timeout=2) as r:
-            j = json.loads(r.read())
-        if j.get("app") == APP:
-            return "HW Blackbox, %s's" % j.get("user")
-    except Exception:
-        pass
-    return None
+def who_serves(port, wait=3.0):
+    """'HW Blackbox, <user>'s' if an HW Blackbox dashboard answers on the port, else None. Asked from a thread of its
+    own, for `wait` seconds at most: whatever holds the port can't keep the caller (the agent's only thread) waiting,
+    however slowly it answers."""
+    found = []
+
+    def ask():
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))     # (straight there, no proxy)
+            with opener.open("http://127.0.0.1:%d/api/ping" % port, timeout=2) as r:
+                j = json.loads(r.read(4096))
+            if isinstance(j, dict) and j.get("app") == APP:
+                found.append("HW Blackbox, %s's" % j.get("user"))
+        except Exception:
+            pass
+    t = threading.Thread(target=ask, name="who-serves", daemon=True)
+    t.start()
+    t.join(wait)
+    return found[0] if found else None

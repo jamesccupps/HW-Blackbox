@@ -2,6 +2,7 @@
 program, a server that should always be listening and isn't."""
 import collections
 import datetime as dt
+import re
 import time
 
 import psutil
@@ -30,15 +31,33 @@ def same_program(exe, want):
     return norm(exe) == norm(want)
 
 
+# A command line's secrets: the value after a password-, token- or key-like option ("--password x", "-api-key=x",
+# "/token:x"), and a password in an address ("https://user:pw@host").
+_NAME = r"[\w.-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|key|auth\w*|credentials?|cookie|session[-_]?id)[\w.-]*"
+SECRET_OPTION = re.compile(r"(?i)((?:^|\s)(?:[-/]{1,2}%s(?:\s*[=:]\s*|\s+)|%s\s*[=:]\s*))(\"[^\"]*\"|'[^']*'|\S+)"
+                           % (_NAME, _NAME))
+SECRET_IN_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@")
+
+
+def redact(cmd):
+    """A command line with what looks like a secret replaced by ***. The ports' files are readable by every user of
+    the PC, and these are other users' and services' command lines too."""
+    if not cmd:
+        return cmd
+    cmd = SECRET_IN_URL.sub(r"\1***@", cmd)
+    return SECRET_OPTION.sub(lambda m: m.group(1) + "***", cmd)
+
+
 def describe_pid(pid):
-    """(exe name, its command line without the program, or None where Windows won't show it)."""
+    """(exe name, its command line without the program and with secrets hidden, or None where Windows won't show
+    it)."""
     try:
         p = psutil.Process(pid)
         exe = p.name()
     except Exception:
         return "?", None
     try:
-        cmd = " ".join(p.cmdline()[1:])[:200] or None
+        cmd = redact(" ".join(p.cmdline()[1:]))[:200] or None
     except Exception:
         cmd = None
     return exe, cmd

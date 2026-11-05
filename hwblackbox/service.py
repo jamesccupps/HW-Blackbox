@@ -27,7 +27,7 @@ from .homeassistant import HaReporter
 from .journal import Journal
 from .ports import PortWatch
 from .sensors import Sensors
-from .util import now_iso
+from .util import is_link, now_iso
 from .watcher import Watcher
 
 WTS_EVENTS = {1: "console connect", 2: "console disconnect", 3: "remote connect", 4: "remote disconnect",
@@ -93,6 +93,7 @@ class Service:
                 self.deadman = DeadMan(self.DEADMAN_S)
             except OSError as e:
                 self.jrnl.write("error", {"where": "dead man's switch", "error": str(e)})
+        threading.Thread(target=self._poweroff_check, name="poweroff-check", daemon=True).start()
         threading.Thread(target=self._sensors_start, name="sensors-open", daemon=True).start()
         threading.Thread(target=self._watch_loop, name="watcher", daemon=True).start()
         threading.Thread(target=self._supervise, name="supervisor", daemon=True).start()
@@ -112,6 +113,10 @@ class Service:
                                             "admin": s.sampler.admin})
         except Exception as e:
             self.error("sensors", e)
+
+    def _poweroff_check(self):
+        """On a thread of its own from the start: a sensor library that's slow to open after a power loss mustn't
+        hold up that power loss's report."""
         try:
             found = poweroff.check()
             if found:
@@ -139,6 +144,7 @@ class Service:
                 w.check_events()
                 w.logs_size()
                 w.sample_memory()
+                w.prune_reports()
             self.disks.sample()
         except Exception as e:
             self.error("watcher start", e)
@@ -163,6 +169,8 @@ class Service:
                         w.users = {s["session"]: s["user"] for s in self.agents.view}
                     if tick % 600 == 5:
                         w.logs_size()
+                    if tick % 3600 == 1805:
+                        w.prune_reports()
                 if tick % 60 == 0:
                     self.disks.sample()           # (once a minute, just before a status)
                 if tick % 30 == 7:
@@ -290,6 +298,25 @@ class Service:
         self.jrnl.close()
 
 
+def started_by_scm():
+    """Was this process started by Windows' service manager (services.exe)?"""
+    try:
+        me = psutil.Process()
+        parent = me.parent()
+        return bool(parent) and parent.name().lower() == "services.exe" and parent.create_time() <= me.create_time()
+    except Exception:
+        return False
+
+
+def service_running():
+    """Is the installed service running (anything but stopped)?"""
+    from . import SERVICE
+    try:
+        return psutil.win_service_get(SERVICE).status() != "stopped"
+    except Exception:                    # (not installed)
+        return False
+
+
 def single_instance(test):
     """Hold the service's machine-wide lock for as long as this process lives; False if another holds it."""
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -322,6 +349,9 @@ def main(console=False, test=False, sensors=True, run_for=None):
     this console instead, until Ctrl+C (or for run_for seconds)."""
     from .winservice import ConsoleHost, ServiceHost
     from . import SERVICE
+    if is_link(paths.P.data):
+        print("%s is a link to somewhere else: HW Blackbox won't write through it." % paths.P.data)
+        return 3                         # (not even the crash log: it's in there)
     log = crash_log()
 
     def note(text):
@@ -329,11 +359,23 @@ def main(console=False, test=False, sensors=True, run_for=None):
             log.write(now_iso() + " " + text + "\n")
             log.flush()
 
-    lock = single_instance(test)
-    if not lock:
-        note("another HW Blackbox service is already running: this one exits")
-        print("Another HW Blackbox service is already running.")
-        return 2
+    links = [p for p in (paths.P.logs, paths.P.state, paths.P.incidents, paths.P.secrets) if is_link(p)]
+    if links:
+        note("refusing to start: %s is a link to somewhere else (run Install.cmd again)" % ", ".join(links))
+        print("%s is a link to somewhere else: HW Blackbox won't write through it." % ", ".join(links))
+        return 3
+    # Started by the service manager, which never runs a service twice, there's no lock: a lock's name is one any
+    # account can take first, and that would keep the service from ever starting again.
+    if console or test or not started_by_scm():
+        lock = single_instance(test)                     # (held for as long as this process lives)
+        if not lock:
+            note("another HW Blackbox service is already running: this one exits")
+            print("Another HW Blackbox service is already running.")
+            return 2
+        if not test and service_running():
+            note("the HW Blackbox service is running: this one exits")
+            print("The HW Blackbox service is running: stop it first, or add --test.")
+            return 2
     svc = Service(test=test, sensors=sensors)
     if console:
         host = ConsoleHost(svc)

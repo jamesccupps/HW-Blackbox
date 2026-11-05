@@ -1,18 +1,25 @@
 r"""The session agents, seen from the service: what each one last said (sessions\<user>\agent.json and front.json),
 and starting one again, through its scheduled task, when a signed-in session's agent has stopped."""
 import os
+import sys
 import time
 
 import psutil
 
 from . import AGENT_TASK, paths, winapi
 from .journal import read_tail
-from .util import read_json
+from .util import is_link, read_json
 
 STALE = 150          # seconds without a heartbeat
 GRACE = 180          # seconds a session gets after it first appears (its agent starts at sign-in)
 RETRY = 300          # seconds between restarts of the same session's agent
 TASK_RUN_USE_SESSION_ID = 4
+
+
+def session_folder(user):
+    """A session agent's folder, or None when it's a link to somewhere else (users make their own folders there)."""
+    folder = paths.P.session_dir(user)
+    return None if is_link(folder) else folder
 
 
 def agent_procs(session):
@@ -32,8 +39,31 @@ def agent_procs(session):
     return out
 
 
+def inside(path, folder):
+    """Is path in folder (or folder itself)?"""
+    try:
+        path, folder = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:                     # (different drives)
+        return False
+
+
+def com_cache_ok():
+    """pywin32's COM cache must be the program's own (under Program Files, admins only): win32com.client unpickles a
+    file from it as it's imported, and the fallback, the temp folder, is C:\\Windows\\Temp for SYSTEM, where any user
+    can make the folder first. (Importing win32com itself reads nothing from it.)"""
+    try:
+        import win32com
+        return inside(win32com.__gen_path__, sys.prefix)
+    except Exception:
+        return False
+
+
 def get_task():
-    """('present', task), ('missing', None) or ('unknown', None). Only Task Scheduler's own "not found" counts."""
+    """('present', task), ('missing', None), ('unknown', None) or ('unsafe', None). Only Task Scheduler's own "not
+    found" counts as missing."""
+    if not com_cache_ok():
+        return "unsafe", None
     try:
         import pythoncom
         import pywintypes
@@ -69,11 +99,14 @@ class Agents:
         for s in current:
             sid, user = s["id"], s["user"]
             self.first_seen.setdefault(sid, now)
-            path = os.path.join(paths.P.session_dir(user), "agent.json")
-            hb = read_json(path, limit=1 << 20) or {}
+            folder = session_folder(user)
+            path = os.path.join(folder, "agent.json") if folder else None
+            hb = (read_json(path, limit=1 << 20) if path else None) or {}
+            if not isinstance(hb, dict):
+                hb = {}
             try:
                 written = os.path.getmtime(path) if hb.get("session") == sid and isinstance(hb.get("ts"), str) else None
-            except OSError:
+            except (OSError, TypeError):
                 written = None
             if written is not None:
                 beats[sid], self.last_beat[sid] = hb, written
@@ -137,16 +170,21 @@ class Agents:
         out = {}
         cutoff = time.time() - seconds
         for s in self.view:
-            data = read_json(os.path.join(paths.P.session_dir(s["user"]), "front.json"), limit=1 << 20) or {}
-            if data.get("session") == s["session"]:
-                out[s["session"]] = [x for x in data.get("ring") or [] if isinstance(x, list) and x and x[0] >= cutoff]
+            folder = session_folder(s["user"])
+            data = (read_json(os.path.join(folder, "front.json"), limit=1 << 20) if folder else None) or {}
+            if isinstance(data, dict) and data.get("session") == s["session"]:
+                ring = data.get("ring") if isinstance(data.get("ring"), list) else []
+                out[s["session"]] = [x for x in ring if isinstance(x, list) and len(x) >= 2
+                                     and isinstance(x[0], (int, float)) and x[0] >= cutoff]
         return out
 
     def recent_records(self, seconds=180):
         """The agents' own records from the last `seconds` (display changes, the taskbar, shutdown requests)."""
         out = []
         for s in self.view:
-            day = time.strftime("%Y%m%d")
-            path = os.path.join(paths.P.session_dir(s["user"]), "session_%s.jsonl" % day)
-            out.extend(dict(r, session=s["session"]) for r in read_tail(path, seconds, 1 << 20))
+            folder = session_folder(s["user"])
+            if not folder:
+                continue
+            path = os.path.join(folder, "session_%s.jsonl" % time.strftime("%Y%m%d"))
+            out.extend(dict(r, session=s["session"]) for r in read_tail(path, seconds, 1 << 20) if isinstance(r, dict))
         return sorted(out, key=lambda r: r.get("ts", ""))

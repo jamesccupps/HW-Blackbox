@@ -59,6 +59,8 @@ def meaning(code):
 # Error-range codes that aren't crashes: Ctrl+C or the console closing (how a console program ends when its session
 # does: on 2026-10-21 a restart wrote an incident for a desktop app's helper), and the app container ending an app.
 NOT_CRASHES = (0xC000013A, 0xCFFFFFFF)
+REPORTS_PER_HOUR = 20
+APP_REPORT = re.compile(r"incident_(\d{8})_\d{6}_.+\.txt$")     # (a power-off report has no app name)
 
 
 def crashed(code):
@@ -73,6 +75,8 @@ def is_venv_launcher(pid):
         folder = os.path.dirname(psutil.Process(pid).exe())
     except Exception:
         return False
+    if folder.startswith(("\\\\", "//")):
+        return False      # (a program run from a network share: SYSTEM doesn't go looking there, as the PC's account)
     return os.path.basename(folder).lower() == "scripts" and \
         os.path.isfile(os.path.join(os.path.dirname(folder), "pyvenv.cfg"))
 
@@ -98,7 +102,9 @@ class Watcher:
         self.users = {}                                     # session -> user
         self.events = EventReader(paths.P.eventpos)
         self.last_incident = {}
-        self.ending = False                                 # Windows is shutting down: exits are expected now
+        self.reports = collections.deque()                  # when the app reports of the last hour were written
+        self.capped_at = 0
+        self.ending = False                                # Windows is shutting down: exits are expected now
         self.signed_out = {}                                # session -> when Windows said it signed out
         self.notes = {"last_incident": None, "last_shutdown": None, "last_power_loss": None}
         self.logs_mb = None
@@ -328,9 +334,20 @@ class Watcher:
         if self.ending:
             return   # (Windows is closing everything: exits now are expected, and there's no time for this)
         key = app.lower()
-        if time.time() - self.last_incident.get(key, 0) < 60:
+        now = time.time()
+        if now - self.last_incident.get(key, 0) < 60:
             return   # (a crash loop writes one a minute)
-        self.last_incident[key] = time.time()
+        # and REPORTS_PER_HOUR in all: Windows' crash records can be written by any program, under any app's name
+        while self.reports and now - self.reports[0] > 3600:
+            self.reports.popleft()
+        if len(self.reports) >= REPORTS_PER_HOUR:
+            if now - self.capped_at > 3600:
+                self.capped_at = now
+                self.jrnl.write("error", {"where": "incident report", "error": "%d app reports in the last hour: no "
+                                          "more this hour (the records are still kept)" % REPORTS_PER_HOUR})
+            return
+        self.reports.append(now)
+        self.last_incident[key] = now
         self.notes["last_incident"] = "%s: %s" % (now_iso().replace("T", " "), title)
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(paths.P.incidents, "incident_%s_%s.txt" % (stamp, safe_name(app)))
@@ -360,6 +377,25 @@ class Watcher:
                 os.fsync(f.fileno())
         except Exception as e:
             self.jrnl.write("error", {"where": "incident report", "error": repr(e)[:300]})
+
+    def prune_reports(self):
+        """App reports older than the records (events.keep_days) go. Power-off reports are kept."""
+        keep = ((self.cfg.get("events") or {}).get("keep_days")) or 183
+        cutoff = (dt.date.today() - dt.timedelta(days=keep)).strftime("%Y%m%d")
+        try:
+            names = os.listdir(paths.P.incidents)
+        except OSError:
+            return 0
+        gone = 0
+        for f in names:
+            m = APP_REPORT.match(f)
+            if m and m.group(1) < cutoff:
+                try:
+                    os.remove(os.path.join(paths.P.incidents, f))
+                    gone += 1
+                except OSError:
+                    pass
+        return gone
 
     def logs_size(self):
         total = 0

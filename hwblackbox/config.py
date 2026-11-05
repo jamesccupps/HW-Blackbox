@@ -4,6 +4,8 @@ The service reads it at start, and again every minute for "ports", "home_assista
 "disk_drop_gb", so those take effect without a restart. The watch list and the sensors' timing take a restart of the
 service."""
 import copy
+import json
+import math
 import os
 import re
 import socket
@@ -51,30 +53,89 @@ def defaults():
     }
 
 
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _fits(default, val):
+    """Is val the same kind of setting as its default?"""
+    if isinstance(default, bool):
+        return isinstance(val, bool)
+    if _number(default):
+        return _number(val)
+    if isinstance(default, (str, list, dict)):
+        return isinstance(val, type(default))
+    return True
+
+
+# settings whose default doesn't say all they may be, and the ranges of numbers
+EITHER = {("sensors", "lhm_gpu"): (str, bool)}
+RANGES = {("sensors", "keep_days"): (1, 3650), ("sensors", "rails_keep_days"): (1, 3650),
+          ("events", "keep_days"): (1, 3650), ("ports", "down_after_min"): (0, 1440), ("dashboard", "port"): (1, 65535),
+          ("disk_warn_gb",): (0, 1 << 20), ("disk_drop_gb",): (0, 1 << 20)}
+
+
+def _rules(val, errors):
+    rules = []
+    for x in val:
+        if not (isinstance(x, dict) and isinstance(x.get("exe"), str) and x["exe"]):
+            errors.append("watch: a rule without an \"exe\"")
+            continue
+        r = dict(x)
+        if not isinstance(r.get("label"), str):
+            r["label"] = r["exe"]
+        for k in ("match", "exclude", "incidents"):
+            if k in r and not isinstance(r[k], str):
+                errors.append("watch: %s's \"%s\" isn't text" % (r["exe"], k))
+                del r[k]
+        if "ports" in r:
+            ports = r["ports"] if isinstance(r["ports"], list) else []
+            if not isinstance(r["ports"], list):
+                errors.append("watch: %s's \"ports\" isn't a list" % r["exe"])
+            r["ports"] = [int(p) for p in ports if str(p).isdigit()]
+        rules.append(r)
+    return rules
+
+
 def _merge(cfg, user):
+    """The user's settings over the defaults. A setting of the wrong kind (a word where a number goes, ...) keeps its
+    default and is named in the errors: a typo never stops the service."""
     errors = []
     for key, val in user.items():
         if key not in cfg:
             continue
         if key == "watch":
             if isinstance(val, list) and val:
-                rules = [dict(x) for x in val if isinstance(x, dict) and isinstance(x.get("exe"), str) and x["exe"]]
-                for r in rules:
-                    r.setdefault("label", r["exe"])
-                    if r.get("ports"):
-                        r["ports"] = [int(p) for p in r["ports"] if str(p).isdigit()]
-                cfg["watch"] = rules
+                cfg["watch"] = _rules(val, errors)
             else:
                 errors.append("watch: not a list of rules")
         elif isinstance(cfg[key], dict):
-            if isinstance(val, dict):
-                cfg[key].update(val)
-            else:
+            if not isinstance(val, dict):
                 errors.append("%s: not an object" % key)
-        elif isinstance(cfg[key], (int, float)) and not isinstance(val, bool) and isinstance(val, (int, float)):
+                continue
+            for k, v in val.items():
+                ok = isinstance(v, EITHER[(key, k)]) if (key, k) in EITHER else \
+                    k not in cfg[key] or _fits(cfg[key][k], v)
+                lo, hi = RANGES.get((key, k), (None, None))
+                if ok and lo is not None and not lo <= v <= hi:
+                    ok = False
+                if ok:
+                    cfg[key][k] = v
+                else:
+                    errors.append("%s.%s: %s isn't a setting it can take" % (key, k, json.dumps(v)[:40]))
+            if key == "ports":
+                exp = cfg["ports"].get("expected") or {}
+                cfg["ports"]["expected"] = {str(p): w for p, w in exp.items() if isinstance(w, dict)}
+                if len(cfg["ports"]["expected"]) < len(exp):
+                    errors.append("ports.expected: an entry that isn't an object")
+            if key == "dashboard":
+                cfg["dashboard"]["milestones"] = [m for m in cfg["dashboard"].get("milestones") or []
+                                                  if isinstance(m, dict) and isinstance(m.get("at"), str)]
+        elif _number(cfg[key]) and _number(val) and \
+                RANGES.get((key,), (-math.inf, math.inf))[0] <= val <= RANGES.get((key,), (-math.inf, math.inf))[1]:
             cfg[key] = val
         else:
-            errors.append("%s: wrong type" % key)
+            errors.append("%s: %s isn't a setting it can take" % (key, json.dumps(val)[:40]))
     return errors
 
 
@@ -88,7 +149,10 @@ def load(path=None):
     if not isinstance(user, dict):
         cfg["error"] = "%s is unreadable: using the defaults" % path
         return cfg
-    errors = _merge(cfg, user)
+    try:
+        errors = _merge(cfg, user)
+    except Exception as e:                # (never: but a settings file must not be able to stop the service)
+        cfg, errors = defaults(), ["%s: %s (using the defaults)" % (type(e).__name__, e)]
     s = cfg["sensors"]
     s["interval_s"] = min(60.0, max(1.0, float(s.get("interval_s") or 5)))
     s["rails_interval_s"] = min(5.0, max(0.0, float(s.get("rails_interval_s") or 0)))

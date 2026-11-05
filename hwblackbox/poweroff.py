@@ -29,17 +29,19 @@ def _wevtutil(query, count):
         return ""
 
 
-def _event_date(text):
-    m = re.search(r"^\s*Date:\s*(\S+)", text, re.MULTILINE)
-    if not m:
+Q41 = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=41)]]"
+Q6008 = "*[System[(EventID=6008)]]"
+
+
+def _event_time(query):
+    """The newest matching System record's local time, through the event log API: wevtutil's text names its fields
+    in Windows' display language ("Date:", "Datum:", ...), so only the report shows that text."""
+    from .events import newest_event
+    at, _ = newest_event("System", query)
+    try:
+        return dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S") if at else None
+    except ValueError:
         return None
-    raw = m.group(1).rstrip("Z")
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return dt.datetime.strptime(raw[:26], fmt)
-        except ValueError:
-            continue
-    return None
 
 
 def boot_time():
@@ -168,15 +170,14 @@ def check(boot=None, now=None):
     boot = boot or boot_time()
     if (now or dt.datetime.now()) - boot > dt.timedelta(hours=48):
         return ""
-    txt_41 = _wevtutil("*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=41)]]", 1)
-    txt_6008 = _wevtutil("*[System[(EventID=6008)]]", 1)
     margin = dt.timedelta(minutes=2)
-    dirty = [t for t in (_event_date(txt_41), _event_date(txt_6008)) if t and t >= boot - margin]
+    dirty = [t for t in (_event_time(Q41), _event_time(Q6008)) if t and t >= boot - margin]
     if not dirty:
         return ""
     existing = _existing_incident(boot)
     if existing:
         return "Dirty shutdown before this boot  ->  %s" % existing
+    txt_41, txt_6008 = _wevtutil(Q41, 1), _wevtutil(Q6008, 1)      # (the records as text, for the report)
     os.makedirs(paths.P.incidents, exist_ok=True)
     name = "incident_%s.txt" % boot.strftime("%Y%m%d_%H%M%S")
     flight = _tail_rows("flight_", boot, 120)

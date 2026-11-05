@@ -7,6 +7,16 @@ import urllib.request
 from .util import now_iso
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an error, not followed: urllib would send the token on to wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def read_env(path):
     """KEY=value lines (HA_URL, HA_TOKEN). The token never goes into a log or a record."""
     out = {}
@@ -58,11 +68,13 @@ class HaReporter:
             req = urllib.request.Request(
                 "%s/api/states/%s" % (url, settings["entity"]), data=json.dumps(payload, default=str).encode(),
                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with OPENER.open(req, timeout=10) as r:
                 r.read()
             return {"ok": True, "at": at, "error": None}
         except urllib.error.HTTPError as e:
-            return {"ok": False, "at": at, "error": "HTTP %d" % e.code}
+            moved = " (Home Assistant redirects: set HA_URL to the address it sends you to)" if 300 <= e.code < 400 \
+                else ""
+            return {"ok": False, "at": at, "error": "HTTP %d%s" % (e.code, moved)}
         except FileNotFoundError:
             return {"ok": False, "at": at, "error": "the env file isn't there"}
         except Exception as e:

@@ -158,8 +158,10 @@ admin, or from an elevated prompt:
 & "C:\Program Files\HWBlackbox\python\python.exe" -m hwblackbox set dashboard.port=9071 home_assistant.enabled=true
 ```
 
-The service reads `ports`, `home_assistant`, `dashboard`, `disk_warn_gb` and `disk_drop_gb` again every minute. The
-watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`).
+The service reads `ports`, `home_assistant`, `dashboard` (its milestones), `disk_warn_gb` and `disk_drop_gb` again
+every minute. The watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`);
+the dashboard's port, or turning it off, takes signing out and in again (the session agent serves it). A setting of
+the wrong kind (a word where a number goes) keeps its default, and the Overview says which.
 
 ```jsonc
 {
@@ -288,11 +290,16 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 - **Nothing leaves the PC** unless you turn Home Assistant on, and then only the status above goes to your own Home
   Assistant.
-- **The app in front is kept for 3 minutes only**, for incident reports and the shutdown record. There's no history
-  of what you use beyond that.
+- **The app in front is kept for the last 3 minutes only**, as a rolling window. It's copied into a record when
+  Windows shuts down or restarts, and into an app's incident report; those are kept (records 183 days, app reports
+  the same, power-off reports until you delete them). There's no other history of what you use.
+- **On a PC with several accounts, everyone signed in sees the same dashboard:** every account's sessions, the app
+  in front included, and every listening program's command line (with password-like values hidden as `***`).
 - **The program can only be changed by admins:** Program Files, with a Python of its own. The service runs as
-  SYSTEM, so nothing it loads can be in a folder a normal account can write. The data folder is the same: users can
-  read it and write only in their own `sessions\` folder, and the token in `secrets\` is for SYSTEM and admins only.
+  SYSTEM, so nothing it loads can be in a folder a normal account can write. The data folder is the same: it belongs
+  to Administrators and users can only read it, except that each session agent makes a folder of its own in
+  `sessions\`. The token in `secrets\` is for SYSTEM and admins only. The installer moves aside a data folder anyone
+  else made first, and the service never writes through a link.
 - **Watching is reading only:** other processes are opened for their exit code and nothing more. HW Blackbox changes
   no settings and never blocks a shutdown.
 

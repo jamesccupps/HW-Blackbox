@@ -82,6 +82,15 @@ def tail_lines(path, n, line_guess=200):
         return []
 
 
+def is_link(path):
+    """A junction or a symbolic link (a folder that stands for another path)? The service, as SYSTEM, never writes
+    through one, nor reads users' folders through one."""
+    try:
+        return bool(os.lstat(path).st_file_attributes & 0x400)        # FILE_ATTRIBUTE_REPARSE_POINT
+    except (OSError, AttributeError):
+        return False
+
+
 def safe_name(text, n=40):
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in (text or "?"))[:n]
 
