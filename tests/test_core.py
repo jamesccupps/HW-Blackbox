@@ -321,12 +321,14 @@ class SensorsTest(unittest.TestCase):
         class Fake:
             admin = False                               # (unelevated: GPU readings still count, the CPU's don't)
             lhm = type("L", (), {"names": {"GpuAmd": "AMD Radeon RX 7800 XT", "GpuAmd#2": "AMD Radeon(TM)"}})()
-            nvml = type("N", (), {"name": None})()
+            nvml = type("N", (), {"name": None, "handle": None})()
             last_nv = {}
             ram_total_gb = None
         lhm = {("GpuAmd", "Temperature", "GPU Core"): 61.0, ("GpuAmd#2", "Temperature", "GPU Core"): 30.0,
                ("Cpu", "Temperature", "Core (Tctl/Tdie)"): 55.0}
-        out = SensorStats("now").build(Fake(), lhm, {"timestamp": "x"})["sensors"]
+        built = SensorStats("now").build(Fake(), lhm, {"timestamp": "x"})
+        out = built["sensors"]
+        self.assertNotIn("Nvml", built["devices"])                   # (no NVIDIA GPU: the page names the AMD one)
         self.assertEqual([(x["group"], x["device"]) for x in out],
                          [("GPU", "AMD Radeon RX 7800 XT"), ("GPU", "AMD Radeon(TM)")])
 
@@ -833,6 +835,122 @@ class RailsLaneTest(TempData):
         self.assertEqual(problems, ["No CPU temperature (the sensor driver, PawnIO, may be gone)"])
 
 
+class LaptopTest(TempData):
+    """1.0.9: a laptop (2026-11-06, a Framework with an i7-1260P) had two false problems: "No rail voltages" (a laptop
+    has none to read) and "No CPU temperature (the driver may be gone)" when the driver had never been installed."""
+
+    def problems(self, **sens):
+        from hwblackbox import status
+        s = {"rails_ok": False, "cpu_temp_ok": False, "cpu_age_s": 0.5, "driver": "running", "board_chip": None,
+             "board_chip_before": None, "portable": False}
+        s.update(sens)
+        a = {}
+        return status.sensor_problems(s, a), a
+
+    def test_a_laptop_without_the_driver(self):
+        probs, a = self.problems(driver="missing", portable=True)
+        self.assertEqual(len(probs), 1)
+        self.assertTrue(probs[0].startswith("The PawnIO driver isn't installed, so there's no reading of the CPU's "
+                                            "temperature and power: run Install.cmd again"), probs)
+        self.assertEqual((a["rails"], a["cpu_temperature"]), ("none on this PC", "missing"))
+        self.assertEqual(a["board_note"], "A laptop: no power supply rails to read")
+
+    def test_a_laptop_with_the_driver_has_no_problems(self):
+        probs, a = self.problems(portable=True, cpu_temp_ok=True)
+        self.assertEqual(probs, [])
+        self.assertEqual(a["rails"], "none on this PC")
+
+    def test_a_desktop(self):
+        probs, a = self.problems(driver="missing")                  # no driver: one problem, rails included
+        self.assertEqual(len(probs), 1)
+        self.assertIn("the rail voltages", probs[0])
+        self.assertEqual(a["rails"], "missing")
+        probs, a = self.problems(driver="stopped", cpu_temp_ok=True)
+        self.assertTrue(probs[0].startswith("The PawnIO driver isn't running (stopped)"))
+        probs, a = self.problems(cpu_temp_ok=True)                  # a board chip it can't read: a note
+        self.assertEqual(probs, [])
+        self.assertIn("No board sensor chip", a["board_note"])
+        probs, a = self.problems(cpu_temp_ok=True, board_chip_before="Nuvoton NCT6798D")
+        self.assertIn("The board's sensor chip (Nuvoton NCT6798D) didn't answer", probs[0])
+        self.assertEqual(a["rails"], "missing")
+        probs, a = self.problems(cpu_temp_ok=True, rails_ok=True, board_chip="Nuvoton NCT6798D")
+        self.assertEqual((probs, a["rails"]), ([], "ok"))
+        self.assertNotIn("board_note", a)
+        probs, a = self.problems(driver=None, cpu_temp_ok=True)    # the driver's state unknown: as before 1.0.9
+        self.assertEqual(probs, ["No rail voltages (the sensor driver, PawnIO, may be gone)"])
+
+    def test_the_board_chip_is_remembered(self):
+        from hwblackbox import sensors
+        s = sensors.Sensors.__new__(sensors.Sensors)
+        s.sampler = type("S", (), {})()
+        s.sampler.lhm = type("L", (), {"names": {"Motherboard": "MSI B550", "SuperIO": "Nuvoton NCT6798D"}})()
+        self.assertEqual(s.find_board_chip()["now"], "Nuvoton NCT6798D")
+        s.sampler.lhm.names = {"Motherboard": "MSI B550"}           # (the chip didn't answer this time)
+        self.assertEqual(s.find_board_chip()["before"], "Nuvoton NCT6798D")
+        s.sampler.lhm.names = {"Motherboard": "Another board"}      # (a new board: what the old one had doesn't count)
+        self.assertIsNone(s.find_board_chip()["before"])
+
+    def test_an_intel_cpus_temperature(self):
+        from hwblackbox.sensors import _cpu_temp
+        intel = {("Cpu", "Temperature", "P-Core #1"): 47.0, ("Cpu", "Temperature", "P-Core #1 Distance to TjMax"): 53.0,
+                 ("Cpu", "Temperature", "Core Max"): 49.0, ("Cpu", "Temperature", "CPU Package"): 50.0}
+        self.assertEqual(_cpu_temp(intel), 50.0)
+        del intel[("Cpu", "Temperature", "CPU Package")]
+        self.assertEqual(_cpu_temp(intel), 49.0)
+        del intel[("Cpu", "Temperature", "Core Max")]
+        self.assertEqual(_cpu_temp(intel), 47.0)                     # (never the 53 "Distance to TjMax")
+        self.assertEqual(_cpu_temp({("Cpu", "Temperature", "Core (Tctl/Tdie)"): 61.0,
+                                    ("Cpu", "Temperature", "CCD1 (Tdie)"): 55.0}), 61.0)
+
+    def test_why_it_went_off(self):
+        from hwblackbox.poweroff import why_41
+        self.assertEqual(why_41({"BugcheckCode": "159", "PowerButtonTimestamp": "0"}),
+                         "Windows crashed: a blue screen, stop code 0x0000009F")
+        self.assertEqual(why_41({"BugcheckCode": "0", "PowerButtonTimestamp": "133000000000000000"}),
+                         "the power button was held down (a forced power-off)")
+        self.assertEqual(why_41({"BugcheckCode": "0", "LongPowerButtonPressDetected": "true"}),
+                         "the power button was held down (a forced power-off)")
+        self.assertEqual(why_41({"BugcheckCode": "0", "SleepInProgress": "4"}),
+                         "it went off going into or coming out of sleep")
+        self.assertEqual(why_41({"BugcheckCode": "0", "PowerButtonTimestamp": "0", "SleepInProgress": "0"}), "")
+        self.assertEqual(why_41({}), "")
+
+    def test_the_battery_before_it_went_off(self):
+        from hwblackbox.poweroff import battery_before
+        from hwblackbox.sensors import COLUMNS
+        old = ",".join(["2026-11-05T09:00:00"] + ["1"] * 19)              # (a row from before 1.0.9: no battery)
+        new = dict.fromkeys(COLUMNS, "")
+        new.update(timestamp="2026-11-05T09:01:00", battery_pct="3", on_ac="0", note="a, quoted note")
+        import csv
+        import io
+        buf = io.StringIO()
+        csv.writer(buf).writerow([new[c] for c in COLUMNS])
+        rows = [(0, "flight_20261105.csv: " + old), (1, "flight_20261105.csv: " + buf.getvalue().strip())]
+        self.assertEqual(battery_before(rows), "3 %, on battery")
+        self.assertEqual(battery_before(rows[:1]), "")
+
+    def test_a_logs_column_names_are_written_again_after_an_update(self):
+        from hwblackbox.sensors import CsvLogger
+        log = CsvLogger("flight_", ["timestamp", "a"])
+        log.write({"timestamp": "2026-11-06T10:00:00", "a": 1})
+        log.close()
+        log = CsvLogger("flight_", ["timestamp", "a", "b"])                # (the new version: one more column)
+        log.write({"timestamp": "2026-11-06T10:00:05", "a": 2, "b": 3})
+        log.close()
+        log = CsvLogger("flight_", ["timestamp", "a", "b"])                # (a restart: no new header)
+        log.write({"timestamp": "2026-11-06T10:00:10", "a": 4, "b": 5})
+        log.close()
+        with open(os.path.join(paths.P.logs, "flight_20261106.csv"), encoding="utf-8") as f:
+            self.assertEqual(f.read().split(), ["timestamp,a", "2026-11-06T10:00:00,1", "timestamp,a,b",
+                                                "2026-11-06T10:00:05,2,3", "2026-11-06T10:00:10,4,5"])
+        from hwblackbox.dashboard.server import FlightCache
+        c = FlightCache().get("flight_20261106.csv")
+        self.assertEqual(len(c["t"]), 3)
+        self.assertEqual(list(c["a"]), [1.0, 2.0, 4.0])
+        self.assertEqual(len(c["b"]), 3)                                    # (a value for every row: blank first)
+        self.assertEqual(list(c["b"])[1:], [3.0, 5.0])
+
+
 MB = 2 ** 20
 
 
@@ -1035,6 +1153,26 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(c["cpu_temp_c"]["level"], "bad")
         self.assertEqual(c["rails"]["level"], "bad")
         self.assertTrue(any("+12 V" in s and "outside the ATX limit" in s for s in c["rails"]["seen"]))
+
+    def test_a_laptops_power_offs(self):
+        now = time.time()
+        boot = dt.datetime.fromtimestamp(now - 3600).isoformat(timespec="seconds")
+        st = self.inputs()["status"]
+        st["sensors"] = {"portable": True}
+        po = [{"boot": boot, "went_down": None, "why": None, "battery": "3 %, on battery"}]
+        c = self.run_(power_offs=po, status=st)["power"]
+        self.assertIn("battery 3 %, on battery", c["seen"][0])
+        self.assertTrue(c["advice"][0].startswith("The battery ran out"))
+        self.assertFalse(any("power supply" in a for a in c["advice"]))           # (no desktop advice on a laptop)
+        po = [{"boot": boot, "went_down": None, "why": "Windows crashed: a blue screen, stop code 0x0000009F"}]
+        c = self.run_(power_offs=po, status=st)["power"]
+        self.assertTrue(c["seen"][0].endswith("Windows crashed: a blue screen, stop code 0x0000009F"))
+        self.assertTrue(c["advice"][0].startswith("A blue screen"))
+        po = [{"boot": boot, "went_down": None, "why": None}]
+        c = self.run_(power_offs=po, status=st)["power"]
+        self.assertIn("on a laptop", c["advice"][0])
+        c = self.run_(power_offs=po)["power"]                                       # (a desktop)
+        self.assertIn("A power supply that trips", c["advice"][1])
 
     def test_the_service_not_reporting_and_a_check_that_breaks(self):
         c = self.run_(status_age=None, power_offs=[None])

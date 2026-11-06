@@ -171,6 +171,16 @@ def cores(c):
 # the checks ----------------------------------------------------------------------------------------------------------
 
 PROBLEM_ADVICE = [
+    (r"The PawnIO driver isn't",
+     ["Run Install.cmd again (from the folder you installed from) and answer yes when it offers to install PawnIO: it "
+      "installs the driver, then starts HW Blackbox again with the settings and history kept. PawnIO is the signed "
+      "driver LibreHardwareMonitor reads the CPU's and the board's sensors through.",
+      "Or install it yourself, in a terminal run as admin: winget install namazso.PawnIO (or its installer from "
+      "github.com/namazso/PawnIO.Setup/releases), then restart the PC, or only HW Blackbox's service (as admin: "
+      "Restart-Service HWBlackbox)."]),
+    (r"didn't answer when the service started",
+     ["Restart the service, as admin: Restart-Service HWBlackbox (or restart the PC).",
+      "If it stays missing, another monitoring program may be holding the chip: close it and restart the service."]),
     (r"aren't logging|haven't started|No rail voltages|No CPU temperature|PawnIO",
      ["Check the PawnIO driver is installed (it reads the CPU and board sensors): winget install namazso.PawnIO.",
       "Restart the service, as admin: Restart-Service HWBlackbox (or restart the PC)."]),
@@ -222,23 +232,54 @@ def check_power_offs(x):
         last = max(rows)[0] if rows else None
         return finding("power", "Power-offs", "ok", "None in the last 30 days" + (
             " (the last: %s)" % when(last, x.now) if last else ""), "the last 30 days", link="#power")
-    seen = []
+    seen, whys = [], set()
     for t, p in sorted(month, key=lambda r: r[0]):
         r = p.get("last_rails") or {}
-        bits = ["off for %s" % span(p["gap_s"]) if p.get("gap_s") else None,
+        why = p.get("why") or ""
+        whys.add("crash" if why.startswith("Windows crashed") else "button" if "power button" in why else
+                 "sleep" if "sleep" in why else "flat" if FLAT.match(p.get("battery") or "") else "none")
+        bits = [why or None,
+                "off for %s" % span(p["gap_s"]) if p.get("gap_s") else None,
+                "battery %s" % p["battery"] if p.get("battery") else None,
                 "+12 V %.3f" % r["v12_v"] if r.get("v12_v") else None,
                 "CPU %.0f W" % r["cpu_power_w"] if r.get("cpu_power_w") else None]
         seen.append("%s: %s" % (when(t, x.now), ", ".join(b for b in bits if b) or "no readings before it"))
+    portable = (x.status.get("sensors") or {}).get("portable")
+    advice = []
+    if "crash" in whys:
+        advice += ["A blue screen: look up its stop code (Microsoft's \"Bug check code reference\"). Update the graphics, "
+                   "chipset and storage drivers and the BIOS; if they keep coming, test the memory (run mdsched.exe) "
+                   "and undo any overclock (XMP / EXPO off)."]
+    if "button" in whys:
+        advice += ["Held down on the power button: if the PC had frozen first, the freeze is what to chase (the "
+                   "report's last readings, and the Events tab just before it). If it was only a quick way off, there's "
+                   "nothing wrong."]
+    if "sleep" in whys:
+        advice += ["Going to sleep or waking up: update the graphics, chipset and Wi-Fi drivers and the BIOS; if it "
+                   "keeps happening, turn off fast startup and hibernation to see if it stops."]
+    if "flat" in whys:
+        advice += ["The battery ran out: Windows should hibernate before that. If it doesn't, the battery's gauge is "
+                   "off (it's worn): see its wear in powercfg /batteryreport, and set the critical battery action to "
+                   "hibernate in the power options."]
+    if "none" in whys and portable:
+        advice += ["Windows recorded no reason, which on a laptop is a battery that ran out, a hard freeze, or a power "
+                   "cut it couldn't ride out (a worn battery that can't hold the load). The report's last readings say "
+                   "which: the battery's charge and whether it was plugged in, the CPU's power and temperature."]
+    elif "none" in whys:
+        advice += ["Windows recorded no reason: the power was cut, or the PC froze too hard to record anything. Check "
+                   "the power cables at both ends, and anything between the wall and the PC (a power strip, a UPS and "
+                   "its battery).",
+                   "A power supply that trips under load cuts out within milliseconds, so steady rails up to the last "
+                   "reading don't clear it. If it went off under heavy load (a game, a render), the supply is the "
+                   "first suspect; if it went off while idle, the wall power, the UPS, and anything changed in the "
+                   "BIOS."]
+    advice.append("Each one has a report on the Incidents tab, with the last readings before it.")
     return finding("power", "Power-offs", "bad" if len(week) >= 2 else "warn",
                    "%d in the last 30 days%s" % (len(month), " (%d this week)" % len(week) if week else ""),
-                   "the last 30 days", seen,
-                   ["Check the power cables at both ends, and anything between the wall and the PC (a power strip, a "
-                    "UPS and its battery).",
-                    "A power supply that trips under load cuts out within milliseconds, so steady rails up to the last "
-                    "reading don't clear it. If it went off under heavy load (a game, a render), the supply is the "
-                    "first suspect.",
-                    "If it went off while idle, look at the wall power, the UPS, and anything changed in the BIOS.",
-                    "Each one has a report on the Incidents tab, with the last readings before it."], "#power")
+                   "the last 30 days", seen, advice, "#power")
+
+
+FLAT = re.compile(r"[0-5](?:\.\d+)? %, on battery")       # (the last sample before it: 5 % or less, unplugged)
 
 
 def check_crashes(x):

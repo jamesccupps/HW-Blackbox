@@ -29,13 +29,14 @@ import threading
 import time
 
 from . import paths, winapi
-from .util import now_iso, prune, write_json
+from .util import now_iso, prune, read_json, write_json
 
 COLUMNS = [
     "timestamp", "cpu_temp_c", "cpu_power_w", "vcore_v", "vsoc_v",
     "v12_v", "v5_v", "v33_v", "board_temp_c", "coolant_temp_c",
     "gpu_temp_c", "gpu_power_w", "gpu_util_pct", "gpu_clock_mhz",
     "gpu_vram_mb", "cpu_load_pct", "ram_used_gb", "ram_pct", "fans", "note",
+    "battery_pct", "on_ac",              # (1.0.9: a laptop's battery; added last, so a day's earlier rows still read)
 ]
 
 # The 4-a-second lane: only the channels that move fast enough to matter for a power event, so the row stays small
@@ -100,6 +101,12 @@ class LhmBackend:
             # was the slowest part of every sweep. Its GPU code is on only for AMD and Intel GPUs (see Sampler).
             comp.IsGpuEnabled = bool(gpu)
             comp.IsControllerEnabled = True   # fan / pump controllers (Corsair Commander and the like)
+            # A laptop's battery: its charge, the rate it charges or drains at, and its wear (the capacity it has
+            # left against the one it was made with). No-op without one.
+            try:
+                comp.IsBatteryEnabled = True
+            except AttributeError:
+                pass
             # A Corsair digital power supply (RMi/HXi/AXi) reports its own rail voltages, temperature and output over
             # USB: the only reading of the rails at the supply rather than at the far end of the board. No-op
             # without one; iCUE may hold the device, and then its sensors stay absent.
@@ -245,6 +252,20 @@ def _vsoc(lhm):
     return v if v is not None else _pick(lhm, "", "Voltage", ("soc",))
 
 
+def _cpu_temp(lhm):
+    """The CPU's temperature: AMD's Tctl/Tdie, Intel's package, else the hottest core. (Intel CPUs also list, in °C,
+    each core's "Distance to TjMax": how far below its limit it runs, not a temperature, and higher when cooler.)"""
+    v = _pick(lhm, "Cpu", "Temperature", ("tctl", "tdie"))
+    for name in ("package", "core max"):
+        if v is None:
+            v = _pick(lhm, "Cpu", "Temperature", (name,), ("distance", "tjmax"))
+    if v is None:
+        temps = [x for (h, t, n), x in lhm.items() if h == "Cpu" and t == "Temperature" and
+                 "distance" not in n.lower() and "tjmax" not in n.lower()]
+        v = max(temps) if temps else None
+    return v
+
+
 def _r(v, nd=1):
     return "" if v is None else round(v, nd)
 
@@ -346,11 +367,7 @@ class Sampler:
         lhm.update(self.cpu_now(SLOW_CPU_AGE))
         if lhm and self.admin:
             # The CPU's own sensors read zeros or made-up values without the ring-0 driver: only trust them elevated.
-            v = _pick(lhm, "Cpu", "Temperature", ("tctl", "tdie"))
-            if v is None:
-                temps = [x for (h, t, n), x in lhm.items() if h == "Cpu" and t == "Temperature"]
-                v = max(temps) if temps else None
-            s["cpu_temp_c"] = _temp(v)
+            s["cpu_temp_c"] = _temp(_cpu_temp(lhm))
             s["cpu_power_w"] = _r(_pick(lhm, "Cpu", "Power", ("package",)))
             s["vcore_v"] = _r(_vcore(lhm), 3)
             s["vsoc_v"] = _r(_vsoc(lhm), 3)
@@ -383,6 +400,13 @@ class Sampler:
         s["ram_used_gb"] = round((vm.total - vm.available) / 2 ** 30, 2)
         s["ram_pct"] = vm.percent
         self.ram_total_gb = round(vm.total / 2 ** 30, 1)
+        try:
+            b = self.psutil.sensors_battery()             # (None without a battery)
+        except Exception:
+            b = None
+        if b is not None:
+            s["battery_pct"] = round(b.percent, 1)
+            s["on_ac"] = "" if b.power_plugged is None else int(b.power_plugged)
         return s, lhm
 
     def sample_fast(self):
@@ -399,7 +423,7 @@ class Sampler:
         s["v5_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("+5",), ("5vsb", "standby")), 3)
         s["v33_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("3vcc", "+3.3"), ("3vsb", "avcc", "vbat", "standby")), 3)
         if self.admin:
-            s["cpu_temp_c"] = _temp(_pick(lhm, "Cpu", "Temperature", ("tctl", "tdie")))
+            s["cpu_temp_c"] = _temp(_cpu_temp(lhm))
             if s["cpu_temp_c"] != "":
                 s["cpu_power_w"] = _r(_pick(lhm, "Cpu", "Power", ("package",)))
                 s["vcore_v"] = _r(_vcore(lhm), 3)
@@ -416,7 +440,8 @@ UNITS = {"Temperature": "°C", "Voltage": "V", "Clock": "MHz", "Load": "%", "Fan
          "Factor": "x", "Data": "GB", "SmallData": "MB", "Throughput": "B/s", "Control": "%", "Level": "%",
          "Frequency": "Hz", "Flow": "L/h", "Current": "A", "Energy": "mWh", "Noise": "dBA", "Humidity": "%"}
 GROUPS = {"Cpu": "CPU", "GpuNvidia": "GPU", "GpuAmd": "GPU", "GpuIntel": "GPU", "Motherboard": "Motherboard",
-          "SuperIO": "Motherboard", "Psu": "Power supply", "Cooler": "Cooling", "EmbeddedController": "Motherboard"}
+          "SuperIO": "Motherboard", "Psu": "Power supply", "Cooler": "Cooling", "EmbeddedController": "Motherboard",
+          "Battery": "Battery"}
 TYPE_ORDER = ("Temperature", "Power", "Load", "Clock", "Factor", "Voltage", "Current", "Fan", "Control", "Flow",
               "Level", "Data", "SmallData", "Throughput")
 FLAT_AFTER = 60          # samples: a CPU voltage that hasn't moved once in this many isn't a real reading
@@ -490,8 +515,13 @@ class SensorStats:
         if sampler.ram_total_gb:
             out.append(self.entry("Psutil/ram_total_gb", "System", "Windows", "Data", "Memory total", "GB",
                                   sampler.ram_total_gb, 1))
+        for key, st, name, unit in (("battery_pct", "Level", "Battery charge", "%"),
+                                    ("on_ac", "Factor", "Plugged in (1) or on battery (0)", "")):
+            if row.get(key) not in ("", None):
+                out.append(self.entry("Psutil/" + key, "Battery", "Windows", st, name, unit, row[key], 1))
         return {"ts": row.get("timestamp"), "started": self.started, "samples": self.samples, "admin": sampler.admin,
-                "devices": dict(sampler.lhm.names, Nvml=gpu), "sensors": out}
+                # (no NVIDIA GPU: no "Nvml" device, so the page names the GPU LibreHardwareMonitor reads, an Intel one)
+                "devices": dict(sampler.lhm.names, **({"Nvml": gpu} if sampler.nvml.handle else {})), "sensors": out}
 
 
 # crash-safe CSVs -----------------------------------------------------------------------------------------------
@@ -507,16 +537,36 @@ class CsvLogger:
     def path_for(self, day):
         return os.path.join(paths.P.logs, "%s%s.csv" % (self.prefix, day.replace("-", "")))
 
+    @staticmethod
+    def header_of(path):
+        """The column names a log file's rows are written under now: its last header row (None: no file, or none).
+        Only the last 8 MB are looked through; past that, the first row (at worst, the names are written again)."""
+        try:
+            with open(path, "rb") as f:
+                first = f.readline()
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - (8 << 20)))
+                tail = f.read()
+        except OSError:
+            return None
+        at = tail.rfind(b"\ntimestamp,")
+        line = tail[at + 1:].split(b"\n", 1)[0] if at >= 0 else first
+        if not line.startswith(b"timestamp,"):
+            return None
+        return next(csv.reader([line.decode("utf-8", "replace").strip()]))
+
     def write(self, row):
         day = row["timestamp"][:10]
         if day != self.day:
             if self.fh:
                 self.fh.close()
             path = self.path_for(day)
-            new = not os.path.exists(path)
+            head = self.header_of(path)
             self.fh = open(path, "a", newline="", encoding="utf-8")
             self.writer = csv.writer(self.fh)
-            if new:
+            # a new file, or a day's file begun by an older version with other columns: the column names (again), and
+            # the readers take the rows after them by these
+            if head != self.columns:
                 self.writer.writerow(self.columns)
             self.day = day
         self.writer.writerow([row.get(c, "") for c in self.columns])
@@ -555,6 +605,7 @@ class Sensors:
         self.lhm_count = 0
         self.stats = SensorStats(started)
         self.status_cache = None
+        self.board = {}
 
     def open(self):
         """Open the sensors (slow: a few seconds for LibreHardwareMonitor) and take a first sample."""
@@ -562,9 +613,27 @@ class Sensors:
         row, lhm = self.sampler.sample()
         self.lhm_count = len(lhm)
         self.dump_inventory(lhm)
+        try:
+            self.board = self.find_board_chip()
+        except Exception:
+            self.board = {}
         prune(paths.P.logs, "flight_", ".csv", self.cfg["keep_days"])
         prune(paths.P.logs, "rails_", ".csv", self.cfg["rails_keep_days"])
         return row
+
+    def find_board_chip(self):
+        """The board's sensor chip, where the rails come from: {"now": its name (None: none found), "before": the chip
+        this board had before when none is found now, "portable": a laptop or tablet}. Laptops have no such chip, and
+        some desktop boards have one that LibreHardwareMonitor can't read: no rails is no fault there. The chip seen
+        is kept in state\\hardware.json, so one that stops answering isn't taken for a board without one."""
+        names = self.sampler.lhm.names
+        now = next((names[k] for k in sorted(names) if k.split("#")[0] == "SuperIO"), None)
+        board = names.get("Motherboard")
+        saved = read_json(paths.P.hardware) or {}
+        if now and (saved.get("board_chip"), saved.get("board")) != (now, board):
+            write_json(paths.P.hardware, {"board": board, "board_chip": now, "seen": now_iso()})
+        before = saved.get("board_chip") if not now and board and saved.get("board") == board else None
+        return {"now": now, "before": before, "portable": winapi.is_portable()}
 
     def dump_inventory(self, lhm):
         try:
@@ -696,4 +765,7 @@ class Sensors:
                 "last_sample_age_s": None if written is None else round(now - written, 1),
                 "rows": count, "errors": errors, "fast_last": self.fast_last, "fast_rows": rows,
                 "fast_hz": self.fast_hz, "rails_ok": row.get("v12_v", "") != "",
-                "cpu_temp_ok": row.get("cpu_temp_c", "") != ""}
+                "cpu_temp_ok": row.get("cpu_temp_c", "") != "",
+                # the driver the CPU's and the board's sensors are read through, and the board's sensor chip
+                "driver": winapi.service_state("PawnIO"), "board_chip": self.board.get("now"),
+                "board_chip_before": self.board.get("before"), "portable": self.board.get("portable")}

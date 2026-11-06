@@ -10,6 +10,9 @@
   .\install.ps1 -Uninstall -RemoveData  ...and delete the data too
   -Set "k=v", ...                       settings for a first install's config.json (dashboard.port=9071)
   -NoStart                              install, but start nothing
+  -PawnIO ask|yes|no                    when the PawnIO driver (the CPU and board sensors) is missing: ask (the
+                                        default; with nobody to answer, it's left out), install it with winget, or
+                                        leave it out
 
   What it puts where:
   C:\Program Files\HWBlackbox     the program, with a Python of its own (only admins can change it: the service
@@ -25,7 +28,8 @@ param(
   [switch]$RemoveData,
   [string[]]$Set,
   [switch]$NoStart,
-  [string]$Report
+  [string]$Report,
+  [ValidateSet('ask', 'yes', 'no')][string]$PawnIO = 'ask'
 )
 $ErrorActionPreference = 'Stop'
 $Service = 'HWBlackbox'
@@ -116,6 +120,51 @@ function Initialize-DataFolder([string]$Root) {
   if ($LASTEXITCODE) { Say "setting the permissions of secrets\ failed (icacls $LASTEXITCODE)"; exit 1 }
 }
 
+# The PawnIO driver: LibreHardwareMonitor reads the CPU's and the board's sensors through it. It's someone else's
+# (namazso's, signed, freeware), so it's only installed on a yes. winget runs in this window, so anything it asks
+# (an agreement on a PC that has never used it) is asked here, and answered by whoever is installing.
+$PawnPage = 'https://github.com/namazso/PawnIO.Setup/releases/latest'
+function Get-PawnIO { Get-CimInstance Win32_SystemDriver -Filter "Name='PawnIO'" -ErrorAction SilentlyContinue }
+# a yes or no from whoever is at this window: $true, $false, or $null when nobody can answer (no window to type in,
+# or no key in 2 minutes). Enter is yes.
+function Read-YesNo([string]$q) {
+  try {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return $null }
+    while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }    # (keys pressed earlier aren't the answer)
+    Write-Host ''
+    Write-Host "$q [Y/n] " -ForegroundColor Yellow -NoNewline
+    $until = (Get-Date).AddMinutes(2)
+    while ((Get-Date) -lt $until) {
+      if ([Console]::KeyAvailable) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -eq 'Enter' -or $k.Key -eq 'Y') { Write-Host 'yes'; return $true }
+        if ($k.Key -eq 'N' -or $k.Key -eq 'Escape') { Write-Host 'no'; return $false }
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    Write-Host 'no answer'
+  } catch { }
+  return $null
+}
+function Install-PawnIO {
+  $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+  if (-not $winget) {
+    Say "winget isn't on this PC: opening PawnIO's download page ($PawnPage). Run its installer, then restart the PC"
+    try { Start-Process $PawnPage } catch { Say "  (the page didn't open: $($_.Exception.Message))" }
+    return
+  }
+  Say 'installing PawnIO with winget (namazso.PawnIO)'
+  $old = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $winget.Source install --id namazso.PawnIO --exact --source winget; $code = $LASTEXITCODE }
+  catch { $code = $null; Say "  winget: $($_.Exception.Message)" }
+  finally { $ErrorActionPreference = $old }
+  if ($null -ne $code) { Say ('  winget finished: exit {0} (0x{0:X8})' -f $code) }
+  $d = Get-PawnIO
+  if ($d -and $d.State -ne 'Running') { & sc.exe start PawnIO | Out-Null; $d = Get-PawnIO }
+  if ($d) { Say "PawnIO driver: $($d.State)" }
+}
+
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
            [Security.Principal.WindowsBuiltInRole]::Administrator)
 "HW Blackbox install: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), user $env:USERNAME, from $PSScriptRoot" | Out-File $Report -Encoding utf8
@@ -151,10 +200,21 @@ $manifest = Get-Content (Join-Path $PSScriptRoot 'MANIFEST.json') -Raw | Convert
 Say "HW Blackbox $($manifest.version), built $($manifest.built), $($manifest.files) files"
 if ($PSScriptRoot.TrimEnd('\') -ieq $Dest) { Say 'run the install from the built folder, not from the installed one'; exit 1 }
 # the CPU and motherboard sensors need the PawnIO driver (LibreHardwareMonitor reads them through it)
-$pawn = Get-CimInstance Win32_SystemDriver -Filter "Name='PawnIO'" -ErrorAction SilentlyContinue
-$pawnHint = 'install the PawnIO driver (winget install namazso.PawnIO), then run Install.cmd again'
+$pawn = Get-PawnIO
+$pawnHint = 'install the PawnIO driver (winget install namazso.PawnIO, or run Install.cmd again and answer yes), then restart the PC'
 if ($pawn) { Say "PawnIO driver: $($pawn.State)" }
-else { Warn "the PawnIO driver isn't installed, so there will be no CPU or motherboard sensors (the rails, the CPU temperature): $pawnHint" }
+else {
+  Say "the PawnIO driver isn't installed: without it there are no CPU or motherboard sensors (the CPU temperature and power, the rails)"
+  $yes = if ($PawnIO -eq 'yes') { $true } elseif ($PawnIO -eq 'no') { $false } else {
+    Read-YesNo 'Install PawnIO now? It is a signed driver, freeware by namazso (pawnio.eu), installed with winget'
+  }
+  if ($yes) { Install-PawnIO }
+  elseif ($null -eq $yes) { Say '  (nobody to ask: left out)' }
+  else { Say '  left out' }
+  $pawn = Get-PawnIO
+  if (-not $pawn) { Warn "the PawnIO driver isn't installed, so there will be no CPU or motherboard sensors (the rails, the CPU temperature): $pawnHint" }
+  elseif ($pawn.State -ne 'Running') { Warn "the PawnIO driver is installed but $($pawn.State.ToLower()): restart the PC to start it" }
+}
 
 Say '== 2. Stop a running HW Blackbox (an update)'
 Stop-HWBlackbox

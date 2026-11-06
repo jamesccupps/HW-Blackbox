@@ -445,6 +445,7 @@ const LIMITS = [
   [/\/\+5V|v5_v$/, s => s.unit === "V", null, [4.75, 4.85, 5.15, 5.25]],
   [/\+3\.3V|\+3V Standby|v33_v$/, s => s.unit === "V", null, [3.135, 3.2, 3.4, 3.465]],
   [/CMOS Battery/, s => true, null, [2.7, 2.9, 99, 99]],
+  [/battery_pct$|^Battery[^/]*\/Level\/Charge Level$/, s => true, null, [5, 15, 101, 101]],
   [/ram_pct$/, s => true, [85, 95]],
 ];
 function level(s, v) {
@@ -601,9 +602,11 @@ TABS.overview = {every: 5000, async load() {
         : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It's the Windows service "HW Blackbox": start it in Services (services.msc), or run Install.cmd again.`),
     card(h.sens, "Sensors", h.sensOk ? "Logging" : "Not logging",
       `Last sample ${fmtAgo(a.flight)} · rails ${a.rails != null ? fmtAgo(a.rails) : "–"}<br>` +
-      `${sens.fast_hz ? sens.fast_hz + " rails rows a second · " : ""}${sens.sensors ?? "?"} sensors` +
+      `${sens.fast_hz ? sens.fast_hz + ((sv.attributes || {}).rails === "none on this PC" ? " fast rows a second · " : " rails rows a second · ") : ""}${sens.sensors ?? "?"} sensors` +
       (sens.lhm && sens.lhm !== "ok" ? "<br><span class='bad-t'>LibreHardwareMonitor: " + esc(sens.lhm) + "</span>" : "") +
-      (sens.rails_ok === false && sens.admin ? "<br><span class='bad-t'>No rail voltages: the sensor driver may be gone</span>" : "") +
+      (!sens.admin ? "" : driverOff(sens) ? `<br><span class='bad-t'>The PawnIO driver ${sens.driver === "missing" ? "isn't installed" : "isn't running"}: no CPU temperature</span>`
+        : (sv.attributes || {}).rails === "missing" ? "<br><span class='bad-t'>No rail voltages</span>" : "") +
+      ((sv.attributes || {}).board_note ? `<br><span class="dim">${esc(sv.attributes.board_note)}</span>` : "") +
       ((sv.attributes || {}).rails_note ? `<br><span class="warn-t" title="A busy PC: the rails are still read, only less often. The readings themselves are on the Power tab.">Rails ${esc(sv.attributes.rails_note)}</span>` : "")),
     card(h.ag, "Session agent", h.agents.length ? h.agents.map(x => x.user).join(", ") : (o.agents || []).length ? "Stopped" : "Nobody signed in",
       sessions.length ? sessions.map(s => `Session ${s.session} (${esc(s.user)}, ${esc(s.state)}): ${s.agent === "running" ? "running" : "<span class='warn-t'>" + esc(s.agent) + "</span>"}`).join("<br>")
@@ -623,20 +626,38 @@ TABS.overview = {every: 5000, async load() {
   const lvl = (x, v) => { const l = level(x, v); return l ? l + "-t" : ""; };
   const sp = (col, color) => ovSpark ? spark(ovSpark, col, color) : "";
   const vramTotal = first(pick("Nvml/gpu_vram_total_mb"), find("Gpu", "SmallData", /Memory Total/));
+  const vramUsed = first(pick("Nvml/gpu_vram_mb"), find("Gpu", "SmallData", /Memory Used/), pick("Flight/gpu_vram_mb"));
+  // Without the PawnIO driver LibreHardwareMonitor still lists the CPU's power (and an Intel GPU's), as a made-up 0 W:
+  // the CPU's power only with its temperature, as the logs do, and an Intel GPU's only when it isn't 0
+  const cpuTemp = first(find("Cpu", "Temperature", /Tctl|Tdie|Package|Core Average/, /Distance|TjMax/), pick("Flight/cpu_temp_c"));
+  const real = x => x && x.value ? x : null;
+  const batt = first(find("Battery", "Level", /Charge Level/), pick("Psutil/battery_pct", "Flight/battery_pct"));
+  const onAc = pick("Psutil/on_ac");
+  const laptop = sens.portable || (batt && !find("SuperIO", "Voltage", /./));
+  const boardNote = (sv.attributes || {}).board_note;
   $("#ov-now").innerHTML = [
     `<div class="card"><h3>CPU<span class="right">${esc(dev.Cpu || "")}</span></h3>` +
-      R("Temperature", first(find("Cpu", "Temperature", /Tctl|Tdie|Package|Core Average/), pick("Flight/cpu_temp_c"))) +
-      R("Package power", first(find("Cpu", "Power", /Package/), pick("Flight/cpu_power_w"))) +
+      R("Temperature", cpuTemp) +
+      R("Package power", cpuTemp ? first(find("Cpu", "Power", /Package/), pick("Flight/cpu_power_w")) : null) +
+      (!cpuTemp && sens.admin && driverOff(sens) ? `<div class="dim" style="margin:6px 0">The temperature and power need the PawnIO driver: <a href="#diagnose">how</a></div>` : "") +
       R("Load", first(find("Cpu", "Load", /CPU Total/), pick("Psutil/cpu_load_pct", "Flight/cpu_load_pct"))) +
       R("Clock (average, effective)", find("Cpu", "Clock", /Average Effective/)) +
       sp("cpu_temp_c", COLORS[0]) + `</div>`,
     `<div class="card"><h3>GPU<span class="right">${esc(dev.Nvml || dev.GpuAmd || dev.GpuNvidia || dev.GpuIntel || "")}</span></h3>` +
       R("Temperature", first(pick("Nvml/gpu_temp_c"), find("Gpu", "Temperature", /GPU Core|^GPU$|Core/), pick("Flight/gpu_temp_c"))) +
-      R("Power", first(pick("Nvml/gpu_power_w"), find("Gpu", "Power", /Package|Total|GPU Power|Core/), pick("Flight/gpu_power_w"))) +
+      R("Power", first(pick("Nvml/gpu_power_w"), find("GpuIntel", "Power", /./) ? real(find("GpuIntel", "Power", /./)) : find("Gpu", "Power", /Package|Total|GPU Power|Core/), pick("Flight/gpu_power_w"))) +
       R("Load", first(pick("Nvml/gpu_util_pct"), find("Gpu", "Load", /GPU Core|D3D 3D|Core/), pick("Flight/gpu_util_pct"))) +
       R("Clock", first(pick("Nvml/gpu_clock_mhz"), find("Gpu", "Clock", /GPU Core|Core/))) +
       R("Fan", first(pick("Nvml/gpu_fan_pct"), find("Gpu", "Fan", /./))) +
       sp("gpu_temp_c", COLORS[1]) + `</div>`,
+    laptop ? `<div class="card"><h3>Battery<span class="right">${esc(dev.Battery || "")}</span></h3>` +
+      R("Charge", batt) +
+      (onAc ? `<div class="reading"><span class="l">Power</span><span class="r">${onAc.value ? "plugged in" : "on battery"}</span></div>` : "") +
+      (find("Battery", "Power", /^Charge Rate$/) ? R("Charging at", find("Battery", "Power", /^Charge Rate$/))
+        : find("Battery", "Power", /^Discharge Rate$/) ? R("Draining at", find("Battery", "Power", /^Discharge Rate$/))
+        : R("Charging (+) or draining (−)", find("Battery", "Power", /Charge\/Discharge Rate/))) +
+      R("Wear", find("Battery", "Level", /Degradation/)) +
+      (boardNote ? `<div class="dim" style="margin-top:6px">${esc(boardNote)}</div>` : "") + `</div>` :
     `<div class="card"><h3>Board<span class="right">${esc(dev.Motherboard || "")}</span></h3>` +
       R("+12 V", first(find("SuperIO", "Voltage", /\+12/), pick("Flight/v12_v"))) +
       R("+5 V", first(find("SuperIO", "Voltage", /\+5V/, /VSB|Standby/i), pick("Flight/v5_v"))) +
@@ -644,14 +665,16 @@ TABS.overview = {every: 5000, async load() {
       R("VRM temperature", find("SuperIO", "Temperature", /VRM/)) +
       R("Chipset temperature", find("SuperIO", "Temperature", /Chipset|PCH/)) +
       R("Board temperature", first(find("SuperIO", "Temperature", /System|Motherboard/), pick("Flight/board_temp_c"))) +
-      R("CPU fan", find("SuperIO", "Fan", /CPU/)) + `</div>`,
+      R("CPU fan", find("SuperIO", "Fan", /CPU/)) +
+      (boardNote ? `<div class="dim" style="margin-top:6px">${esc(boardNote)}</div>` : "") + `</div>`,
     `<div class="card"><h3>Memory</h3>` +
       R("Used", pick("Psutil/ram_used_gb", "Flight/ram_used_gb"), pick("Psutil/ram_total_gb") ? " of " + fmtVal(pick("Psutil/ram_total_gb").value, "GB") : "") +
       R("Load", pick("Psutil/ram_pct", "Flight/ram_pct")) +
-      R("GPU memory", first(pick("Nvml/gpu_vram_mb"), find("Gpu", "SmallData", /Memory Used/), pick("Flight/gpu_vram_mb")), vramTotal ? " of " + fmtVal(vramTotal.value, "MB") : "") +
+      // (an Intel GPU has no memory of its own: it borrows the PC's, "shared")
+      R(/Shared/.test((vramUsed || {}).name || "") ? "GPU memory (shared)" : "GPU memory", vramUsed, vramTotal ? " of " + fmtVal(vramTotal.value, "MB") : "") +
       sp("ram_pct", COLORS[2]) + `</div>`,
   ].join("");
-  for (const c of $$("#ov-now .card")) if (!$(".reading", c)) c.insertAdjacentHTML("beforeend", `<div class="dim">No readings${h.sensOk ? " from this part" : " yet"}</div>`);
+  for (const c of $$("#ov-now .card")) if (!$(".reading, .dim", c)) c.insertAdjacentHTML("beforeend", `<div class="dim">No readings${h.sensOk ? " from this part" : " yet"}</div>`);
   // power-offs, disks, this PC
   const po = o.power_offs || [];
   const lastPo = po.filter(p => p.went_down).slice(-1)[0];
@@ -668,7 +691,9 @@ TABS.overview = {every: 5000, async load() {
   $("#ov-more").innerHTML =
     `<div class="card"><h3>Power-offs<span class="right"><a href="#power">details</a></span></h3>` +
       `<div class="reading"><span class="l">Caught${since0 ? " since " + since0 : ""}</span><span class="r">${po.length}</span></div>` +
-      (lastPo ? `<div class="reading"><span class="l">Last</span><span class="r">${fmtDateTime(lastT, true)}</span></div><div class="reading"><span class="l">That was</span><span class="r">${fmtAgo(now - lastT)}</span></div>` : "") +
+      (lastPo ? `<div class="reading"><span class="l">Last</span><span class="r">${fmtDateTime(lastT, true)}</span></div><div class="reading"><span class="l">That was</span><span class="r">${fmtAgo(now - lastT)}</span></div>`
+        // (one with no readings before it, as when it came before HW Blackbox was installed: when the PC came back)
+        : po.length && isoT(po[po.length - 1].boot) ? `<div class="reading"><span class="l">Last</span><span class="r" title="No readings from before it: this is when the PC came back on">before ${fmtDateTime(isoT(po[po.length - 1].boot), true)}</span></div>` : "") +
       since + `</div>` +
     `<div class="card"><h3>Disks<span class="right"><a href="#charts:168:${(o.disks || []).map(diskId).join(",")}">chart</a></span></h3>${disks}</div>` +
     `<div class="card"><h3>This PC</h3>` +
@@ -688,6 +713,8 @@ function latestMilestone(list, now) {
 function note(label, text) {
   return `<div style="padding:6px 0 2px"><div class="l muted" style="font-size:12.5px">${esc(label)}</div><div class="mono" style="font-size:12px;color:var(--text)">${esc(text || "–")}</div></div>`;
 }
+// the PawnIO driver (the CPU's and the board's sensors are read through it) isn't there or isn't running
+const driverOff = s => !!s.driver && !/^(running|starting)$/.test(s.driver);
 function card(st, title, big, sub) {
   return `<div class="card"><h3><span class="dot ${st}"></span>${esc(title)}</h3><div class="big">${esc(big)}</div><div class="sub">${sub}</div></div>`;
 }
@@ -995,6 +1022,7 @@ TABS.power = {every: 5000, async load() {
       ["v12_v", "v5_v", "v33_v", "vcore_v"].map(k => `<td class="num">${r[k] != null ? r[k].toFixed(3) : "–"}</td>`).join("") +
       `<td class="num">${r.cpu_power_w != null ? r.cpu_power_w.toFixed(1) + " W" : "–"}</td><td class="num">${r.cpu_temp_c != null ? r.cpu_temp_c.toFixed(1) + " °C" : "–"}</td>` +
       `<td><a href="#incidents" data-open="power|${esc(p.report)}">${esc(p.report)}</a></td></tr>`);
+    if (p.why || p.battery) rows.push(`<tr><td colspan="10" class="muted" style="white-space:normal;padding-top:0">↳ ${esc([p.why ? p.why[0].toUpperCase() + p.why.slice(1) : "Windows recorded no reason", p.battery ? "battery " + p.battery : ""].filter(Boolean).join(" · "))}</td></tr>`);
   }
   while (mi < marks.length) rows.push(markRow(marks[mi++]));     // (the changes older than every power-off)
   if (!po.length) rows.unshift(`<tr><td colspan="10" class="dim" style="white-space:normal">None caught. When the PC loses power or switches off without shutting down, a row appears here with the readings just before, and a report.</td></tr>`);

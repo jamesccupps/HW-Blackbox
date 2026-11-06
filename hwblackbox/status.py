@@ -67,6 +67,49 @@ HA_KEYS = ("sensors", "rails", "cpu_temperature", "watcher", "session_agent", "b
            "last_shutdown", "last_power_loss", "last_power_loss_died_at", "windows_update")
 
 
+PAWNIO_HOW = ("run Install.cmd again and answer yes to installing it (or, as admin: winget install namazso.PawnIO, "
+              "then restart the PC)")
+
+
+def sensor_problems(sens, a):
+    """The problems with the CPU's and the board's sensors (read elevated), with what's true in a["rails"],
+    a["cpu_temperature"] and a note for the page in a["board_note"].
+    Until 1.0.9 a PC without rails always had the problem "No rail voltages (the sensor driver may be gone)": wrong on
+    a laptop (there are no rails to read), and only a guess on a desktop. Now the driver's state says which it is."""
+    out = []
+    driver = sens.get("driver")                       # PawnIO: "running", "stopped", "missing"; None: can't be told
+    chip, before, portable = sens.get("board_chip"), sens.get("board_chip_before"), sens.get("portable")
+    no_driver = driver is not None and driver not in ("running", "starting")
+    rails_ok, temp_ok = bool(sens.get("rails_ok")), bool(sens.get("cpu_temp_ok"))
+    expected = bool(chip or before) or (driver is None and not portable)    # (unknown driver: as before 1.0.9)
+    a["cpu_temperature"] = "ok" if temp_ok else "missing"
+    a["rails"] = "ok" if rails_ok else "missing" if expected or (no_driver and not portable) else "none on this PC"
+    if no_driver:
+        what = "the CPU's temperature and power" + ("" if portable else ", the rail voltages")
+        out.append("The PawnIO driver %s, so there's no reading of %s: %s" % (
+            "isn't installed" if driver == "missing" else "isn't running (%s)" % driver, what, PAWNIO_HOW))
+    elif not rails_ok and chip:
+        out.append("No rail voltages from the board's sensor chip (%s)" % chip)
+    elif not rails_ok and before:
+        out.append("The board's sensor chip (%s) didn't answer when the service started: no rail voltages. Restart "
+                   "the service, as admin: Restart-Service HWBlackbox" % before)
+    elif not rails_ok and expected:
+        out.append("No rail voltages (the sensor driver, PawnIO, may be gone)")
+    if a["rails"] == "none on this PC":
+        a["board_note"] = ("A laptop: no power supply rails to read" if portable else
+                           "No board sensor chip that LibreHardwareMonitor can read, so no rail voltages")
+    if not temp_ok and not no_driver:
+        held = sens.get("cpu_age_s")
+        if held is not None and held > SLOW_CPU_AGE:
+            out.append("No CPU readings for %d s: reading the CPU's sensors is held up (a core kept busy by another "
+                       "program, or the sensor driver)" % held)
+        elif driver == "running":
+            out.append("No CPU temperature: LibreHardwareMonitor reads none from this CPU")
+        else:
+            out.append("No CPU temperature (the sensor driver, PawnIO, may be gone)")
+    return out
+
+
 def build(svc):
     """(state, problems, attributes) from the service's parts."""
     now = time.time()
@@ -89,17 +132,7 @@ def build(svc):
             problems.append("The sensors aren't logging" + ("" if age is None else " (last sample %d min ago)"
                                                              % (age // 60)))
         if sens.get("admin"):
-            a["rails"] = "ok" if sens.get("rails_ok") else "missing"
-            a["cpu_temperature"] = "ok" if sens.get("cpu_temp_ok") else "missing"
-            if not sens.get("rails_ok"):
-                problems.append("No rail voltages (the sensor driver, PawnIO, may be gone)")
-            if not sens.get("cpu_temp_ok"):
-                held = sens.get("cpu_age_s")
-                if held is not None and held > SLOW_CPU_AGE:
-                    problems.append("No CPU readings for %d s: reading the CPU's sensors is held up (a core kept busy "
-                                    "by another program, or the sensor driver)" % held)
-                else:
-                    problems.append("No CPU temperature (the sensor driver, PawnIO, may be gone)")
+            problems.extend(sensor_problems(sens, a))
         else:
             a["rails"] = a["cpu_temperature"] = "not elevated"
         fast = cfg["sensors"]["rails_interval_s"]

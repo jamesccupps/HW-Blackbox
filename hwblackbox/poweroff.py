@@ -6,6 +6,7 @@ those records, the time the PC really went down (the logs' last row before the g
 half an hour off), the gap, and the last rows of both sensor logs, the 4-a-second rails trace last.
 The service also says goodbye on every clean shutdown ("shutdown" record, phase "services stopping"), so the report
 says whether the last thing it wrote was that goodbye."""
+import csv
 import datetime as dt
 import json
 import os
@@ -42,6 +43,56 @@ def _event_time(query):
         return dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S") if at else None
     except ValueError:
         return None
+
+
+def why_41(data):
+    """What Windows' Kernel-Power 41 record says about how the PC went off, in words ('' when it says nothing: the power
+    was cut, or the PC froze so hard that nothing was recorded)."""
+    data = data or {}
+
+    def num(key):
+        v = str(data.get(key) or "0").strip()
+        for base in (10, 16):
+            try:
+                return int(v, base)
+            except ValueError:
+                continue
+        return 0
+    if num("BugcheckCode"):
+        return "Windows crashed: a blue screen, stop code 0x%08X" % num("BugcheckCode")
+    if str(data.get("LongPowerButtonPressDetected")).lower() == "true" or num("PowerButtonTimestamp"):
+        return "the power button was held down (a forced power-off)"
+    if num("SleepInProgress"):
+        return "it went off going into or coming out of sleep"
+    if str(data.get("ConnectedStandbyInProgress")).lower() == "true":
+        return "it went off while asleep (Modern Standby)"
+    return ""
+
+
+def why_near(boot):
+    """why_41 for the Kernel-Power 41 record of one boot (written from 2 minutes before it to 15 after; boot is local
+    time): for the reports from before 1.0.9, which don't say."""
+    from .events import newest_event
+    lo, hi = [(boot + dt.timedelta(minutes=m)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+              for m in (-2, 15)]
+    at, data = newest_event("System", "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=41) and "
+                                      "TimeCreated[@SystemTime>='%s' and @SystemTime<='%s']]]" % (lo, hi))
+    return why_41(data) if at else ""
+
+
+def battery_before(rows):
+    """'12 %, on battery' from the 5-second log's last row that has the battery (rows as _tail_rows gives them), or
+    ''. The battery's columns are the log's last two, so they're the same place in every version's rows."""
+    from .sensors import COLUMNS
+    i, j = COLUMNS.index("battery_pct"), COLUMNS.index("on_ac")
+    for _t, text in reversed(rows):
+        try:
+            v = next(csv.reader([text.split(": ", 1)[1]]))
+        except (IndexError, StopIteration):
+            continue
+        if len(v) > j and v[i] != "":
+            return "%s %%, %s" % (v[i], {"1": "plugged in", "0": "on battery"}.get(v[j], "power source unknown"))
+    return ""
 
 
 def boot_time():
@@ -178,6 +229,9 @@ def check(boot=None, now=None):
     if existing:
         return "Dirty shutdown before this boot  ->  %s" % existing
     txt_41, txt_6008 = _wevtutil(Q41, 1), _wevtutil(Q6008, 1)      # (the records as text, for the report)
+    from .events import newest_event
+    at41, data41 = newest_event("System", Q41)
+    why = why_41(data41) if at41 and dt.datetime.strptime(at41, "%Y-%m-%d %H:%M:%S") >= boot - margin else ""
     os.makedirs(paths.P.incidents, exist_ok=True)
     name = "incident_%s.txt" % boot.strftime("%Y%m%d_%H%M%S")
     flight = _tail_rows("flight_", boot, 120)
@@ -201,6 +255,11 @@ def check(boot=None, now=None):
         if rec:
             said = "a clean shutdown had begun" if rec.get("kind") == "shutdown" else "no shutdown had begun"
             f.write("Last record:  %s %s (%s)\n" % (rec.get("ts", "?").replace("T", " "), rec.get("kind"), said))
+        if why:
+            f.write("Why:          %s  (Windows' Kernel-Power 41 record)\n" % why)
+        battery = battery_before(flight)
+        if battery:
+            f.write("Battery:      %s  (the last sample before the gap)\n" % battery)
         f.write("\nEVENT 6008 (unexpected shutdown):\n%s\n\n" % txt_6008)
         f.write("EVENT 41 (Kernel-Power, check BugcheckCode):\n%s\n\n" % txt_41)
         f.write("LAST SAMPLES BEFORE THE GAP (last %d rows):\n" % len(flight))

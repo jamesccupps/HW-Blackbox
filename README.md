@@ -23,13 +23,14 @@ switch off, or why did that app close?*
 
 ## Install
 
-1. For the CPU and motherboard sensors, install the PawnIO driver first: `winget install namazso.PawnIO`.
-2. Download **[HWBlackbox-win64.zip](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
+1. Download **[HWBlackbox-win64.zip](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
    and unzip it.
-3. Double-click **`Install.cmd`**. It asks for admin rights, installs the service and the agent, and shows what it
+2. Double-click **`Install.cmd`**. It asks for admin rights, installs the service and the agent, and shows what it
    did. The scripts aren't code-signed, so Windows may show *Windows protected your PC*: click **More info**, then
    **Run anyway**.
-4. Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`.
+   - If the PawnIO driver isn't installed (the CPU and motherboard sensors need it), it asks whether to install it,
+     with winget. Press **Y** (or Enter) to install it, or **N** to go on without it.
+3. Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`.
 
 Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`), and the installer checks every file
 against the release's manifest. More options are under [Install, in detail](#install-in-detail).
@@ -115,9 +116,13 @@ What keeps it reliable:
 
 - **Windows 10 or 11, 64-bit, and an administrator account** to install.
 - **PawnIO** for the CPU and motherboard sensors (temperatures, voltages, fans). It's the signed driver
-  LibreHardwareMonitor uses for low-level hardware access, and it's installed separately:
-  `winget install namazso.PawnIO`. Without it you still get the GPU, the CPU load, memory and everything that isn't
-  a sensor.
+  LibreHardwareMonitor uses for low-level hardware access (freeware, by namazso), installed separately: `Install.cmd`
+  offers to install it with winget when it's missing, or `winget install namazso.PawnIO`. Without it you still get the
+  GPU, the CPU load, memory and everything that isn't a sensor; the page says the driver is missing, and Diagnose says
+  how to install it.
+- **Laptops** work too. A laptop has no power supply rails to read, so the Overview shows its battery instead (charge,
+  plugged in or not, the rate it charges or drains, its wear), the 5-second log records the charge and whether it
+  was plugged in, and a power-off report says what the battery was at just before.
 - **To build:** Python 3.12 (64-bit), and LibreHardwareMonitorLib's DLLs in `lib\` (see [Building](#building)). The
   installed program carries its own Python, so nothing else is needed on the PC.
 
@@ -125,6 +130,7 @@ What keeps it reliable:
 
 `Install.cmd`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), runs
 `install.ps1`:
+- If the PawnIO driver is missing, it asks whether to install it (with winget, in the installer's window).
 - It copies the program to `C:\Program Files\HWBlackbox` and checks every file against the release's manifest.
 - It sets up the data folder.
 - It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu.
@@ -137,6 +143,7 @@ The same from an elevated PowerShell, with options:
 
 ```powershell
 .\install.ps1 -Set "dashboard.port=9071","home_assistant.enabled=false"   # settings for a first install
+.\install.ps1 -PawnIO yes             # install the PawnIO driver if it's missing, without asking (no: never)
 .\install.ps1 -Uninstall              # remove the program, the service, the task and the shortcut; keep the data
 .\install.ps1 -Uninstall -RemoveData  # ...and delete the data too
 ```

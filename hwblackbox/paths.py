@@ -37,6 +37,7 @@ class Paths:
         self.eventpos = os.path.join(self.state, "eventpos.json")
         self.last_incident = os.path.join(self.state, "last_incident.json")
         self.inventory = os.path.join(self.state, "sensor_inventory.json")
+        self.hardware = os.path.join(self.state, "hardware.json")
         self.crash_log = os.path.join(self.data, "crash.log")
 
     def session_dir(self, user):

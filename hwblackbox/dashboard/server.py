@@ -33,7 +33,7 @@ import urllib.request
 
 import psutil
 
-from .. import NAME, VERSION, config, paths, winapi
+from .. import NAME, VERSION, config, paths, poweroff, winapi
 from ..util import age, read_json, tail_lines
 
 APP = "hw-blackbox-dashboard"
@@ -57,6 +57,7 @@ FLIGHT = collections.OrderedDict([
     ("ram_used_gb", ("Memory used", "GB", "Memory")),
     ("ram_pct", ("Memory load", "%", "Memory")),
     ("gpu_vram_mb", ("GPU memory used", "MB", "Memory")),
+    ("battery_pct", ("Battery charge", "%", "Battery")),
 ])
 RAILS = ("v12_v", "v5_v", "v33_v", "vcore_v", "vsoc_v", "cpu_power_w", "cpu_temp_c")
 # records worth a line on the Events page (the rest are bulky or minute-by-minute)
@@ -118,7 +119,7 @@ class FlightCache:
             self.used = time.time()
             c = self.files.get(name)
             if c is None or size < c["size"]:
-                c = self.files[name] = {"size": 0, "pos": 0, "head": None, "t": array.array("d")}
+                c = self.files[name] = {"size": 0, "pos": 0, "head": None, "t": array.array("d"), "cols": []}
             self.files.move_to_end(name)
             while len(self.files) > self.KEEP:
                 self.files.popitem(last=False)
@@ -133,9 +134,13 @@ class FlightCache:
                     if not row:
                         continue
                     if row[0] == "timestamp":
+                        # (the column names again, partway down: an update that added columns. Every column keeps
+                        # a value for every row: a new one starts with blanks for the rows before it)
                         c["head"] = row
                         for col in row[1:]:
-                            c.setdefault(col, array.array("d"))
+                            if col not in c:
+                                c[col] = array.array("d", [math.nan]) * len(c["t"])
+                                c["cols"].append(col)
                         continue
                     t = epoch(row[0])
                     if t is None or c["head"] is None:
@@ -146,6 +151,9 @@ class FlightCache:
                         try:
                             c[col].append(float(v) if v != "" else math.nan)
                         except ValueError:
+                            c[col].append(math.nan)
+                    for col in c["cols"]:
+                        if len(c[col]) < len(c["t"]):                 # (a column the newest names don't have)
                             c[col].append(math.nan)
             c["size"] = size
             return c
@@ -357,8 +365,17 @@ def hold(series, t, seconds=90):
     return series
 
 
+def has_battery():
+    try:
+        return psutil.sensors_battery() is not None
+    except Exception:
+        return False
+
+
 def api_flight_columns(q):
-    return {"cols": [{"id": c, "label": l, "unit": u, "group": g} for c, (l, u, g) in FLIGHT.items()] +
+    battery = cached("battery", 300, has_battery)          # (a desktop's chart list doesn't offer a battery)
+    return {"cols": [{"id": c, "label": l, "unit": u, "group": g} for c, (l, u, g) in FLIGHT.items()
+                     if battery or g != "Battery"] +
                     [dict(disk_meta(d), id=DISK + d) for d in cached("drives", 300, logged_drives)]}
 
 
@@ -689,14 +706,29 @@ def power_offs():
         if not boot:                    # (older reports are named by Windows' 6008 record, written at the boot)
             boot = dt.datetime.strptime(name[9:24], "%Y%m%d_%H%M%S").isoformat()
         est = re.search(r"previous system shutdown at ([\d:]+ [AP]M)", text)
+        # how it went off (Windows' Kernel-Power 41 record): in the report since 1.0.9, looked up once for older ones
+        m = re.search(r"^Why:\s+(.+?)\s+\(Windows'", text, re.MULTILINE)
+        why = m.group(1) if m else WHY_41.get(name)
+        if why is None:
+            try:
+                why = poweroff.why_near(dt.datetime.fromisoformat(boot))
+            except Exception:
+                why = ""
+            WHY_41[name] = why
+        m = re.search(r"^Battery:\s+(.+?)\s+\(the last", text, re.MULTILINE)
+        battery = m.group(1) if m else None
         rails = None
         if last_rails:
             v = last_rails[1].split(",")
             rails = {k: (float(x) if x else None) for k, x in zip(RAILS, v)}
         b, d = epoch(boot), epoch(died) if died else None
         out.append({"report": name, "boot": boot, "went_down": died, "gap_s": round(b - d, 1) if b and d else None,
-                    "windows_estimate": est.group(1) if est else None, "last_rails": rails})
+                    "windows_estimate": est.group(1) if est else None, "last_rails": rails, "why": why or None,
+                    "battery": battery})
     return out
+
+
+WHY_41 = {}             # report -> how it went off, for the reports that don't say (a record that can't change)
 
 
 def journal_files(day):

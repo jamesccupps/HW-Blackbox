@@ -212,6 +212,44 @@ def is_system():
     return token_sid() == "S-1-5-18"
 
 
+# this PC --------------------------------------------------------------------------------------------------------------
+
+def service_state(name):
+    """A service's or driver's state: "running", "stopped" (or "starting", "stopping"...), "missing" when it isn't
+    installed, or None when it can't be told."""
+    import pywintypes
+    import win32service
+    try:
+        scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    except pywintypes.error:
+        return None
+    try:
+        try:
+            h = win32service.OpenService(scm, name, win32service.SERVICE_QUERY_STATUS)
+        except pywintypes.error as e:
+            return "missing" if e.winerror == 1060 else None          # (ERROR_SERVICE_DOES_NOT_EXIST)
+        try:
+            state = win32service.QueryServiceStatus(h)[1]
+        finally:
+            win32service.CloseServiceHandle(h)
+        return {1: "stopped", 2: "starting", 3: "stopping", 4: "running", 5: "continuing", 6: "pausing",
+                7: "paused"}.get(state, "state %d" % state)
+    except pywintypes.error:
+        return None
+    finally:
+        win32service.CloseServiceHandle(scm)
+
+
+def is_portable():
+    """A laptop or a tablet: the power profile its firmware gives (mobile or slate). None if it can't be told."""
+    try:
+        fn = ctypes.windll.powrprof.PowerDeterminePlatformRoleEx
+        fn.argtypes, fn.restype = [wintypes.ULONG], wintypes.ULONG
+        return fn(2) in (2, 8)              # (POWER_PLATFORM_ROLE_V2: PlatformRoleMobile, PlatformRoleSlate)
+    except Exception:
+        return None
+
+
 # priorities --------------------------------------------------------------------------------------------------------
 
 def raise_process_priority():
