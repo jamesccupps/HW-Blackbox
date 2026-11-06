@@ -2,7 +2,8 @@ r"""The apps on the watch list, in every session: when they start and end, with 
 much memory they hold, and an incident report when one crashes or ends badly. Windows' own records too (see events).
 
 Records ("kind"): start, exit, mem (every minute), watching (at start), winevent, and through the ports: ports, port.
-Every program's CPU use, minute by minute, from the same process list: logs\cpu_*.csv (cpulog).
+Every program's CPU, memory and GPU use, minute by minute, from the same process list: logs\programs_*.csv
+(programs).
 Reports: incidents\incident_<time>_<app>.txt with the record, the last 3 minutes of everything (the service's records,
 the session agents' records, the app in front), the screens, the biggest processes and the busiest programs.
 
@@ -21,7 +22,7 @@ import win32event
 import win32process
 
 from . import paths, winapi
-from .cpulog import CpuLog
+from .programs import ProgramLog
 from .events import EventReader, describe_1074, event_app, newest_event, wanted
 from .util import fmt_dur, now_iso, safe_name
 
@@ -110,8 +111,8 @@ class Watcher:
         self.signed_out = {}                                # session -> when Windows said it signed out
         self.notes = {"last_incident": None, "last_shutdown": None, "last_power_loss": None}
         self.logs_mb = None
-        self.cpu = CpuLog(((cfg.get("sensors") or {}).get("keep_days")) or 183)
-        self.cpu_noted = None                               # the CPU log's last error (written to the journal once)
+        self.programs = ProgramLog(((cfg.get("sensors") or {}).get("keep_days")) or 183)
+        self.noted = {}                                     # the program log's last errors (each written once)
 
     # which watched app a process is, if any, and whether it may still become one (a port rule's process that isn't
     # listening yet: a server that has only just started). `listening()` gives {pid: {ports}}, asked only when needed.
@@ -160,7 +161,7 @@ class Watcher:
         snap = winapi.process_snapshot()
         self.snapshot = snap
         try:
-            self.cpu.look(snap)                             # (each program's CPU use: cpulog)
+            self.programs.look(snap)                        # (each program's CPU and memory: programs)
         except Exception:
             pass
         cache = {}
@@ -282,16 +283,20 @@ class Watcher:
         if apps:
             self.jrnl.write("mem", {"private_mb": apps}, hard=False)
 
-    def sample_cpu(self):
-        """The minute's CPU use by program into logs\\cpu_*.csv (cpulog)."""
+    def sample_programs(self):
+        """The minute's use by program into logs\\programs_*.csv (programs)."""
         try:
-            self.cpu.minute()
-            self.cpu_noted = None
+            self.programs.minute()
+            self.note_once("by program", None)
         except Exception as e:
-            msg = ("%s: %s" % (type(e).__name__, e))[:300]
-            if msg != self.cpu_noted:
-                self.cpu_noted = msg
-                self.jrnl.write("error", {"where": "CPU by program", "error": msg})
+            self.note_once("by program", ("%s: %s" % (type(e).__name__, e))[:300])
+        self.note_once("GPU by program", self.programs.gpu.error)
+
+    def note_once(self, where, error):
+        """An error into the journal the first time it's seen (and again only after it has gone away)."""
+        if error and error != self.noted.get(where):
+            self.jrnl.write("error", {"where": where, "error": error})
+        self.noted[where] = error
 
     def label_for(self, pid, port, exe):
         """What a listening process is, for the ports: the watched app's label, else the expected owner's (when it's
@@ -377,7 +382,7 @@ class Watcher:
                 for sid, scr in sorted(self.agents.screens().items()):
                     f.write("The screens now (session %d):\n  %s\n\n" % (sid, "\n  ".join(scr) or "?"))
                 f.write("The biggest processes now (private memory):\n  %s\n\n" % "\n  ".join(self.biggest()))
-                busy = self.cpu.busiest(3)
+                busy = self.programs.busiest(3)
                 if busy:
                     f.write("The busiest programs, the last 3 minutes (CPU):\n  %s\n\n" % "\n  ".join(busy))
                 f.write("The last 3 minutes (everything the service wrote):\n")

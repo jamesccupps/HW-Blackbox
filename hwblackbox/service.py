@@ -2,8 +2,8 @@ r"""The service: the sensors, the watcher, the ports and the status, under one r
 
 Threads: "sensors" (every 5 s), "rails" (4 a second) and "cpu" (the CPU's sensors, once a second) log the sensors;
 "watcher" ticks every second (the watched apps' exits every second, the process list every 2 s, Windows' records and
-the ports every 15 s, the session agents and the status every 30 s, the drives' free space, each program's CPU use
-and Home Assistant every minute); "supervisor" checks every 5 s that the sensors, the rails and the watcher are moving,
+the ports every 15 s, the session agents and the status every 30 s, the drives' free space, each program's use and
+Home Assistant every minute); "gpu-counters" reads Windows' GPU counters once a minute; "supervisor" checks every 5 s that the sensors, the rails and the watcher are moving,
 and only then pushes back the dead man's switch (deadman.py): a part that stops moving gets the process ended within
 3 minutes, and the service manager starts it again.
 
@@ -96,6 +96,7 @@ class Service:
                 self.jrnl.write("error", {"where": "dead man's switch", "error": str(e)})
         threading.Thread(target=self._poweroff_check, name="poweroff-check", daemon=True).start()
         threading.Thread(target=self._sensors_start, name="sensors-open", daemon=True).start()
+        self.watcher.programs.start_gpu(self.stop)        # (Windows' GPU counters, once a minute)
         threading.Thread(target=self._watch_loop, name="watcher", daemon=True).start()
         threading.Thread(target=self._supervise, name="supervisor", daemon=True).start()
         host.stop.wait()
@@ -161,7 +162,7 @@ class Service:
                         w.scan()
                     if tick % 60 == 0:
                         w.sample_memory()
-                        w.sample_cpu()
+                        w.sample_programs()
                     if tick % 15 == 0:
                         w.check_events()
                     if tick % 15 == 4:

@@ -191,6 +191,17 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 
 .bars td.barcell { width: 40%; }
 tr.pick { cursor: pointer; }
+.dot.info { background: var(--accent); }
+/* the Diagnose tab's findings */
+.finding { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 12px; padding: 12px 16px; margin-bottom: 12px; }
+.finding.bad { border-left-color: var(--bad); } .finding.warn { border-left-color: var(--warn); }
+.finding h3 { margin: 0; font-size: 15px; font-weight: 650; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.finding h3 .win { margin-left: auto; color: var(--dim); font-weight: 500; font-size: 12px; }
+.finding .sum { color: var(--muted); margin: 3px 0 4px; }
+.finding .lab { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+  margin: 10px 0 4px; }
+.finding ul, .finding ol { margin: 0; padding-left: 22px; } .finding li { margin: 3px 0; }
 .swd { display: inline-block; width: 11px; height: 11px; border-radius: 3px; border: 2px solid; margin-right: 8px;
   vertical-align: -1px; }
 .hbar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .8; }
@@ -223,6 +234,7 @@ tr.pick { cursor: pointer; }
   </div>
   <nav id="nav" role="tablist">
     <button role="tab" data-tab="overview" aria-controls="tab-overview">Overview</button>
+    <button role="tab" data-tab="diagnose" aria-controls="tab-diagnose">Diagnose</button>
     <button role="tab" data-tab="sensors" aria-controls="tab-sensors">Sensors</button>
     <button role="tab" data-tab="charts" aria-controls="tab-charts">Charts</button>
     <button role="tab" data-tab="power" aria-controls="tab-power">Power</button>
@@ -242,6 +254,15 @@ tr.pick { cursor: pointer; }
     <div class="grid g4" id="ov-now"></div>
     <div class="h2">Power-offs, disks and this PC</div>
     <div class="grid g3" id="ov-more"></div>
+  </section>
+
+  <section id="tab-diagnose" role="tabpanel">
+    <div class="toolbar"><span id="dg-info" class="muted"></span><span class="spacer"></span><button class="btn" id="dg-again">Check again</button></div>
+    <div id="dg-summary"></div>
+    <div id="dg-found"></div>
+    <div class="h2">Looks fine</div>
+    <div class="tablewrap"><table id="dg-ok"><tbody><tr><td class="dim">Checking…</td></tr></tbody></table></div>
+    <div class="foot">HW Blackbox checks what it has recorded: the last day of sensor readings and of each program's use, the last week of crashes and Windows' records, and every power-off. It reads and suggests; it changes nothing. The advice is general: when in doubt about a step, ask someone who knows the PC.</div>
   </section>
 
   <section id="tab-sensors" role="tabpanel">
@@ -322,13 +343,14 @@ tr.pick { cursor: pointer; }
       <div><div class="h2" style="margin-top:0">Using memory</div><div class="tablewrap"><table class="bars" id="pr-mem"><thead><tr><th>Process</th><th class="num">PID</th><th class="num">Private</th><th></th></tr></thead><tbody><tr><td colspan="4" class="dim">Loading…</td></tr></tbody></table></div></div>
     </div>
     <div class="foot" id="pr-foot">CPU is each process's share of the whole processor since the last look, like Task Manager. Memory is private bytes (what it has committed). Session 0 is Windows' services; the signed-in sessions are 1 and up.</div>
-    <div class="h2" id="cpu-history">CPU by program, over time</div>
+    <div class="h2" id="cpu-history">By program, over time</div>
     <div class="toolbar">
+      <div class="seg" id="pc-metric"><button data-m="cpu" class="on">CPU</button><button data-m="mem">Memory</button><button data-m="vram">GPU memory</button><button data-m="gpu">GPU</button></div>
       <div class="seg" id="pc-range"><button data-h="1">1 hour</button><button data-h="6">6 hours</button><button data-h="24" class="on">24 hours</button><button data-h="72">3 days</button><button data-h="168">7 days</button></div>
       <span class="spacer"></span><span class="dim" id="pc-info"></span>
     </div>
     <div class="chart" id="pc-chart"><div class="dim" style="padding:30px 10px">Loading…</div></div>
-    <div class="tablewrap"><table class="bars" id="pc-table"><thead><tr><th>Program</th><th class="num">Average</th><th class="num">Busiest minute</th><th>When</th><th class="num">CPU time</th><th></th></tr></thead><tbody><tr><td colspan="6" class="dim">Loading…</td></tr></tbody></table></div>
+    <div class="tablewrap"><table class="bars" id="pc-table"><thead></thead><tbody><tr><td class="dim">Loading…</td></tr></tbody></table></div>
     <div class="foot" id="pc-foot"></div>
   </section>
 </main>
@@ -454,6 +476,11 @@ function show(tab) {
     cHours = +arg;
     $$("#c-range button").forEach(b => b.classList.toggle("on", +b.dataset.h === cHours));
   }
+  if (tab === "processes" && PM[arg] && arg !== pcMetric) {    // "#processes:mem": memory by program, over time
+    pcMetric = arg; pcAt = 0;
+    $$("#pc-metric button").forEach(b => b.classList.toggle("on", b.dataset.m === arg));
+  }
+  if (tab === "processes" && PM[arg]) pcScroll = true;  // (once the history has drawn: scrolled to it)
   if (tab === "sensors" && arg === "logger") {        // "#sensors:logger": since the service started
     sMode = "logger";
     $$("#s-mode button").forEach(b => b.classList.toggle("on", b.dataset.v === "logger"));
@@ -539,7 +566,7 @@ $("#nv-reload").addEventListener("click", () => location.reload());     // (the 
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px")).observe($("header"));
 
 // Overview -----------------------------------------------------------------------------------------------------
-let ovSpark = null, ovSparkAt = 0, ovDisk = null, ovCpu = null;
+let ovSpark = null, ovSparkAt = 0, ovDisk = null, ovCpu = null, ovDiag = null;
 const diskId = d => "disk:" + d.mount.replace(/\\$/, "");
 TABS.overview = {every: 5000, async load() {
   if (!overview) await header();
@@ -549,7 +576,7 @@ TABS.overview = {every: 5000, async load() {
     ovSpark = await api("/api/history?cols=cpu_temp_c,cpu_power_w,cpu_load_pct,gpu_temp_c,gpu_power_w,gpu_util_pct,ram_pct,v12_v&hours=1&points=120");
     const ids = (o.disks || []).map(diskId);
     ovDisk = ids.length ? await api(`/api/history?cols=${ids.join(",")}&hours=168&points=168`) : null;
-    ovCpu = await api("/api/cpu?hours=1&points=20&n=1");
+    ovCpu = await api("/api/programs?metric=cpu&hours=1&points=20&n=1");
     ovSparkAt = Date.now();
   }
   const h = healthOf(o), a = o.ages, sv = o.service || {}, sens = sv.sensors || {}, now = o.now;
@@ -558,6 +585,9 @@ TABS.overview = {every: 5000, async load() {
   $("#ov-problems").innerHTML = probs.length
     ? `<div class="banner bad"><b>${probs.length === 1 ? "A problem" : probs.length + " problems"}</b>${o.ha.enabled ? " (Home Assistant hears about them every minute)" : ""}<ul>${probs.map(p => "<li>" + esc(p) + "</li>").join("")}</ul></div>`
     : h.svOk ? `<div class="banner info">No problems. The service is watching${o.ha.enabled ? ", and Home Assistant hears from this PC every minute" : ""}.</div>` : "";
+  // what the Diagnose tab found worth a look (beyond the problems above)
+  const found = ((ovDiag && ovDiag.checks) || []).filter(c => (c.level === "warn" || c.level === "bad") && c.id !== "problems");
+  if (found.length) $("#ov-problems").insertAdjacentHTML("beforeend", `<div class="banner warn"><b>Diagnose found ${found.length === 1 ? "something" : found.length + " things"} worth a look:</b> ${found.slice(0, 4).map(c => esc(c.title)).join("; ")}${found.length > 4 ? "…" : ""}. <a href="#diagnose">What to do</a></div>`);
   // health cards
   const sessions = sv.agents || [];
   const ha = sv.ha || {};
@@ -646,7 +676,7 @@ TABS.overview = {every: 5000, async load() {
       (/^waiting/.test(attrs.windows_update || "") ? `<div class="reading"><span class="l">Windows Update</span><span class="r warn-t" style="font-size:13px" title="An update is installed and finishes at the next restart">waiting for a restart since ${fmtDateTime(isoT(attrs.windows_update.replace(/^.* since /, "").replace(" ", "T")))}</span></div>` : "") +
       `<div class="reading"><span class="l">Up since</span><span class="r" style="font-size:13px">${fmtDateTime(o.boot)}</span></div>` +
       `<div class="reading"><span class="l">Uptime</span><span class="r" style="font-size:13px">${fmtDur(now - o.boot)}</span></div>` +
-      (ovCpu && ovCpu.programs && ovCpu.programs[0] ? `<div class="reading"><span class="l">Busiest program, the last hour</span><span class="r" style="font-size:13px"><a href="#processes" title="Every program's CPU use over time: the Processes tab">${esc(ovCpu.programs[0].name)}</a> ${fmtPct(ovCpu.programs[0].avg_pct)}</span></div>` : "") +
+      (ovCpu && ovCpu.programs && ovCpu.programs[0] ? `<div class="reading"><span class="l">Busiest program, the last hour</span><span class="r" style="font-size:13px"><a href="#processes" title="Every program's CPU use over time: the Processes tab">${esc(ovCpu.programs[0].name)}</a> ${fmtPct(ovCpu.programs[0].avg)}</span></div>` : "") +
       note("Last shutdown or restart asked for", attrs.last_shutdown) +
       note("Last app incident", attrs.last_incident) +
     `</div>`;
@@ -1097,60 +1127,123 @@ TABS.processes = {every: 3000, async load() {
     pcAt = Date.now();
     // a point a minute over an hour, 2 min over 6 hours, 5 over a day, 15 over 3 days, half an hour over a week
     const points = {1: 60, 6: 180, 24: 288, 72: 288, 168: 336}[pcHours] || 288;
-    pcData = await api(`/api/cpu?hours=${pcHours}&points=${points}`);
+    pcData = await api(`/api/programs?metric=${pcMetric}&hours=${pcHours}&points=${points}`);
     if (!selecting($("#pc-table"))) renderCpuHistory();
   }
 }};
 
-// CPU by program, over time: the service's minute-by-minute log (Windows keeps no such history)
-let pcHours = 24, pcData = null, pcAt = 0, pcSel = null;     // pcSel: the programs on the chart (null: the busiest five)
+// By program, over time: the service's minute-by-minute log (Windows keeps no such history)
+let pcHours = 24, pcMetric = "cpu", pcData = null, pcAt = 0, pcSel = {}, pcScroll = false;   // pcSel[metric]: the programs charted (else the leading five)
 segment($("#pc-range"), b => { pcHours = +b.dataset.h; pcAt = 0; TABS.processes.load().catch(offline); });
+segment($("#pc-metric"), b => { pcMetric = b.dataset.m; pcAt = 0; TABS.processes.load().catch(offline); });
 const fmtPct = p => (p >= 10 ? p.toFixed(0) : p >= 1 ? p.toFixed(1) : p.toFixed(2)) + " %";
 // a share in cores too: "1.0 core", "2.3 cores", "45 % of a core"
 const fmtCores = c => c >= 0.95 ? c.toFixed(1) + (c < 1.05 ? " core" : " cores") : Math.round(c * 100) + " % of a core";
 const share = (pct, c) => pct == null ? "–" : `${fmtPct(pct)} <span class="dim">· ${fmtCores(c)}</span>`;
+const fmtMB = v => v == null ? "–" : Math.abs(v) >= 1024 ? (v / 1024).toFixed(1) + " GB" : Math.round(v) + " MB";
+// what each one shows: the chart's title and unit, the table's columns (after the program's name) and their cells
+const PM = {
+  cpu: {title: "Share of the CPU", unit: "%", total: true, lead: "Busiest then", bar: p => p.avg,
+        cols: ["Average", "Busiest minute", "When", "CPU time"],
+        cells: (p, w) => [share(p.avg, p.avg_cores), share(p.peak, p.peak_cores), w, fmtDur(p.cpu_s)]},
+  gpu: {title: "Share of the GPU (its busiest engine)", unit: "%", total: true, lead: "Busiest then", bar: p => p.avg,
+        cols: ["Average", "Busiest minute", "When"], cells: (p, w) => [p.avg == null ? "–" : fmtPct(p.avg), fmtPct(p.peak), w]},
+  mem: {title: "Private memory", unit: "GB", conv: v => v == null ? null : v / 1024, total: false, lead: "Biggest then", bar: p => p.peak,
+        cols: ["Now", "Average", "Most", "When", "Change"], cells: (p, w) => [fmtMB(p.now), fmtMB(p.avg), fmtMB(p.peak), w, change(p)]},
+  vram: {title: "Dedicated GPU memory", unit: "MB", total: true, lead: "Biggest then", bar: p => p.peak,
+         cols: ["Now", "Average", "Most", "When", "Change"], cells: (p, w) => [fmtMB(p.now), fmtMB(p.avg), fmtMB(p.peak), w, change(p)]},
+};
+// how much it grew over the range; a gigabyte or more that it still holds stands out (a leak looks like that)
+const change = p => { const v = p.change; return v == null ? "–" : Math.abs(v) < 1 ? "none" : `<span class="${v >= 1024 && p.now != null && p.now >= 0.9 * p.peak ? "warn-t" : ""}">${v > 0 ? "+" : "−"}${fmtMB(Math.abs(v))}</span>`; };
 function renderCpuHistory() {
   const d = pcData; if (!d) return;
+  const m = PM[d.metric] || PM.cpu, conv = m.conv || (v => v), fmt = v => m.unit === "%" ? fmtPct(v) : m.unit === "GB" ? fmtMB(v * 1024) : fmtMB(v);
   const progs = d.programs || [];
   const color = name => COLORS[Math.max(0, progs.findIndex(p => p.name === name)) % COLORS.length];
-  const sel = (pcSel || progs.slice(0, 5).map(p => p.name)).filter(n => d.series[n]);
+  const sel = (pcSel[d.metric] || progs.slice(0, 5).map(p => p.name)).filter(n => d.series[n]);
   const host = $("#pc-chart");
   $("#tip").style.display = "none";
   if (!d.logged_s) {
-    host.innerHTML = `<div class="dim" style="padding:30px 10px">Nothing logged in this range. The service writes each busy program's CPU use every minute (since HW Blackbox 1.0.7).</div>`;
+    host.innerHTML = `<div class="dim" style="padding:30px 10px">Nothing logged in this range. The service writes each program's use every minute: the CPU since HW Blackbox 1.0.7, memory and the GPU since 1.0.8` +
+      (d.metric === "vram" || d.metric === "gpu" ? ` (and only where Windows' GPU counters can be read)` : "") + `.</div>`;
   } else {
-    const series = [{name: "All programs", color: "#8d96a7", unit: "%", t: d.t, avg: d.total}]
-      .concat(sel.map(n => ({name: n, color: color(n), unit: "%", t: d.t, avg: d.series[n]})));
-    // the tooltip names the busiest programs at that moment, charted or not: "what was it, at 3 in the morning?"
+    const series = (m.total ? [{name: "All programs", color: "#8d96a7", unit: m.unit, t: d.t, avg: d.total.map(conv)}] : [])
+      .concat(sel.map(n => ({name: n, color: color(n), unit: m.unit, t: d.t, avg: d.series[n].map(conv)})));
+    // the tooltip names the leaders at that moment, charted or not: "what was it, at 3 in the morning?"
     const tipExtra = i => {
       const top = progs.map(p => [p.name, d.series[p.name][i]]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
-      return top.length ? `<div class="t" style="margin-top:6px">Busiest then</div>` + top.map(([n, v]) => `<div class="row"><span>${esc(n)}</span><span>${fmtPct(v)}</span></div>`).join("") : "";
+      return top.length ? `<div class="t" style="margin-top:6px">${m.lead}</div>` + top.map(([n, v]) => `<div class="row"><span>${esc(n)}</span><span>${fmt(conv(v))}</span></div>`).join("") : "";
     };
-    drawChart(host, {series, t0: d.start, t1: d.end, unit: "%", band: false, height: innerWidth < 640 ? 220 : 280, floor: 0, tipExtra,
-      title: `<b>Share of the CPU</b>`});
+    drawChart(host, {series, t0: d.start, t1: d.end, unit: m.unit, band: false, height: innerWidth < 640 ? 220 : 280, floor: 0, tipExtra,
+      title: `<b>${m.title}</b>`});
   }
-  const maxAvg = Math.max(1e-6, ...progs.map(p => p.avg_pct || 0));
+  $("#pc-table thead").innerHTML = `<tr><th>Program</th>${m.cols.map(c => `<th${c === "When" ? "" : ' class="num"'}>${c}</th>`).join("")}<th></th></tr>`;
+  const maxBar = Math.max(1e-6, ...progs.map(p => m.bar(p) || 0));
   redraw($("#pc-table tbody"), progs.map(p => {
     const on = sel.includes(p.name), c = color(p.name);
+    const w = `<span class="mono dim">${p.peak_at ? (d.end - d.start > 86400 ? fmtDateTime(p.peak_at) : fmtTime(p.peak_at, false)) : "–"}</span>`;
     return `<tr data-prog="${esc(p.name)}" tabindex="0" aria-pressed="${on}" class="pick" title="${on ? "On the chart: click to take it off" : "Click to put it on the chart"}">` +
       `<td><span class="swd" style="border-color:${c};background:${on ? c : "transparent"}"></span>${esc(p.name)}</td>` +
-      `<td class="num">${share(p.avg_pct, p.avg_cores)}</td><td class="num">${share(p.peak_pct, p.peak_cores)}</td>` +
-      `<td class="mono dim">${p.peak_at ? (d.end - d.start > 86400 ? fmtDateTime(p.peak_at) : fmtTime(p.peak_at, false)) : "–"}</td>` +
-      `<td class="num">${fmtDur(p.cpu_s)}</td><td class="barcell"><div class="hbar" style="width:${((p.avg_pct || 0) / maxAvg * 100).toFixed(1)}%"></div></td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="dim" style="white-space:normal">No programs logged in this range yet.</td></tr>`, "data-prog");
+      m.cells(p, w).map((x, i) => `<td${m.cols[i] === "When" ? "" : ' class="num"'}>${x}</td>`).join("") +
+      `<td class="barcell"><div class="hbar" style="width:${((m.bar(p) || 0) / maxBar * 100).toFixed(1)}%${d.metric === "mem" || d.metric === "vram" ? ";background:var(--violet)" : ""}"></div></td></tr>`;
+  }).join("") || `<tr><td colspan="${m.cols.length + 2}" class="dim" style="white-space:normal">No programs logged in this range yet.</td></tr>`, "data-prog");
   const span = d.end - d.start;
   $("#pc-info").textContent = (d.logged_s ? `one point per ${fmtDur(d.step)}` + (d.logged_s < span * 0.95 ? ` · logged ${fmtDur(d.logged_s)} of the ${fmtDur(span)}` : "") : "");
-  $("#pc-foot").textContent = `Every program's CPU use, minute by minute, from the service: all of a program's processes together (a browser's dozens are one row). ` +
-    `100 % is the whole processor, as in Task Manager: on this PC (${d.threads} logical processors) one core flat out is ${fmtPct(100 / d.threads)}. ` +
-    `A program under 1 % of one core in a minute isn't recorded for that minute. System interrupts: the processors' time on drivers' interrupts, which Windows charges to no program. ` +
-    `Click a program to put it on the chart or take it off; the grey line is all programs together.`;
+  const all = "All of a program's processes together (a browser's dozens are one row), minute by minute, from the service. ";
+  $("#pc-foot").textContent = all + {
+    cpu: `100 % is the whole processor, as in Task Manager: on this PC (${d.threads} logical processors) one core flat out is ${fmtPct(100 / d.threads)}. System interrupts: the processors' time on drivers' interrupts, which Windows charges to no program. `,
+    gpu: "The share of the GPU's busiest engine (3D, video, copy...), as in Task Manager's GPU column. ",
+    mem: "Private memory: what the program has committed, as Task Manager's \"commit size\" (more than its working set when some is paged out). A program that grows by gigabytes and never gives it back is leaking. ",
+    vram: "Dedicated graphics memory, from Windows' GPU counters (Task Manager's \"dedicated GPU memory\"). ",
+  }[d.metric] + "A program is recorded for a minute when it's among the busiest or biggest. Click a program to put it on the chart or take it off" + (m.total ? "; the grey line is all programs together." : ".");
+  if (pcScroll) {                                     // (a link to a measure: "#processes:mem")
+    pcScroll = false;
+    scrollTo(0, $("#cpu-history").getBoundingClientRect().top + scrollY - $("header").offsetHeight - 8);
+  }
 }
 $("#pc-table").addEventListener("click", e => {
   const tr = e.target.closest("tr[data-prog]"); if (!tr || !pcData) return;
-  const cur = (pcSel || pcData.programs.slice(0, 5).map(p => p.name)), n = tr.dataset.prog;
-  pcSel = cur.includes(n) ? cur.filter(x => x !== n) : cur.concat([n]);
+  const cur = (pcSel[pcData.metric] || pcData.programs.slice(0, 5).map(p => p.name)), n = tr.dataset.prog;
+  pcSel[pcData.metric] = cur.includes(n) ? cur.filter(x => x !== n) : cur.concat([n]);
   renderCpuHistory();
 });
+
+// Diagnose -----------------------------------------------------------------------------------------------------
+let dgData = null;
+TABS.diagnose = {every: 60000, async load(fresh) {
+  dgData = ovDiag = await api("/api/diagnose" + (fresh ? "?fresh=1" : ""));
+  badge();
+  this.render();
+}, render() {
+  const d = dgData; if (!d) return;
+  const found = d.checks.filter(c => c.level !== "ok"), ok = d.checks.filter(c => c.level === "ok");
+  const need = found.filter(c => c.level === "bad" || c.level === "warn").length;
+  $("#dg-info").textContent = `${d.checks.length} checks · last run ${fmtTime(d.at)}`;
+  $("#dg-summary").innerHTML = need
+    ? `<div class="banner warn"><b>${need === 1 ? "One thing needs" : need + " things need"} a look.</b> Each says what HW Blackbox saw and what to do about it.</div>`
+    : `<div class="banner info"><b>Nothing needs a look.</b> ${found.length ? "There are notes below; everything else" : "Everything"} checked out.</div>`;
+  const level = {bad: "Needs attention", warn: "Worth a look", info: "A note"};
+  $("#dg-found").innerHTML = found.map(c => `<div class="finding ${c.level}"><h3><span class="dot ${c.level}" title="${level[c.level] || ""}"></span>${esc(c.title)}<span class="win">${esc(c.window)}</span></h3>` +
+    `<div class="sum">${esc(c.summary)}</div>` +
+    (c.seen.length ? `<div class="lab">What HW Blackbox saw</div><ul>${c.seen.map(s => "<li>" + esc(s) + "</li>").join("")}</ul>` : "") +
+    (c.advice.length ? `<div class="lab">What to do</div><ol>${c.advice.map(s => "<li>" + esc(s) + "</li>").join("")}</ol>` : "") +
+    (c.link ? `<div style="margin-top:10px"><a href="${esc(c.link)}">Show me</a></div>` : "") + `</div>`).join("");
+  $("#dg-ok tbody").innerHTML = ok.map(c => `<tr><td style="width:22px"><span class="dot good"></span></td><td>${esc(c.title)}</td>` +
+    `<td class="muted" style="white-space:normal">${esc(c.summary)}</td><td class="dim">${esc(c.window)}</td>` +
+    `<td>${c.link ? `<a href="${esc(c.link)}">look</a>` : ""}</td></tr>`).join("") || `<tr><td class="dim">Nothing here: see above.</td></tr>`;
+}};
+$("#dg-again").addEventListener("click", e => { e.target.disabled = true; TABS.diagnose.load(true).catch(offline).finally(() => { e.target.disabled = false; }); });
+// the Diagnose tab's count of things that need a look, in the tab list whatever the tab (every minute)
+let dgAt = 0;
+function badge() {
+  const n = ((ovDiag && ovDiag.checks) || []).filter(c => c.level === "bad" || c.level === "warn").length;
+  $('nav button[data-tab="diagnose"]').innerHTML = "Diagnose" + (n ? `<span class="count" style="background:var(--warn);color:#111">${n}</span>` : "");
+}
+setInterval(async () => {
+  if (document.hidden || Date.now() - dgAt < 60000) return;
+  dgAt = Date.now();
+  try { ovDiag = await api("/api/diagnose"); badge(); } catch (_) {}
+}, 5000);
 
 // go
 header().then(() => show(location.hash.slice(1) || "overview"));

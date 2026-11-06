@@ -228,6 +228,9 @@ def run(agent):
         user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))     # per-monitor v2: real sizes and scaling
     except Exception:
         pass
+    # The screens again, now with their real sizes and scaling: read before (in Agent()), they came out scaled down to
+    # 100 %, and the first check after the start wrote a "display" record for a change that never happened.
+    agent.screens = screens()
     try:
         # among the first asked when Windows ends the session (0x3FF: the top of the apps' range), and if it ever has
         # to wait for us, end us without a "this app is preventing shutdown" screen

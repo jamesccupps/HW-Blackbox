@@ -417,35 +417,58 @@ def logged_drives():
     return sorted(seen)
 
 
-# each program's CPU use (logs\cpu_YYYYMMDD.csv, a row per busy program a minute: cpulog) -----------------------------
+# each program's use (logs\programs_YYYYMMDD.csv, and 1.0.7's cpu_YYYYMMDD.csv: programs) -----------------------------
 
-_cpu_files = {}                 # name -> (size, rows)
-_cpu_lock = threading.Lock()
+_prog_files = {}                # name -> (size, rows)
+_prog_lock = threading.Lock()
 
 
-def cpu_rows(day):
-    """A day's rows [(epoch, seconds, program, cpu_s, processes, pid)], parsed again only when the file has grown."""
-    from ..cpulog import path_for, read_rows
-    path = path_for(day)
+def _rows_of(path):
+    """A log's rows, parsed again only when the file has grown."""
+    from ..programs import read_rows
     try:
         size = os.path.getsize(path)
     except OSError:
         return []
     name = os.path.basename(path)
-    with _cpu_lock:
-        hit = _cpu_files.get(name)
+    with _prog_lock:
+        hit = _prog_files.get(name)
         if not hit or hit[0] != size:
-            hit = _cpu_files[name] = (size, read_rows(path))
-            while len(_cpu_files) > 10:
-                _cpu_files.pop(next(iter(_cpu_files)))
+            hit = _prog_files[name] = (size, read_rows(path))
+            while len(_prog_files) > 20:
+                _prog_files.pop(next(iter(_prog_files)))
         return hit[1]
 
 
-def api_cpu(q):
-    """Each program's CPU use over the last hours: the busiest programs (average, busiest minute, CPU time) and, for
-    each, its share of the CPU per time bucket. A share is of the whole processor, as Task Manager's: 100 % is every
-    logical processor flat out (one core flat out is 100 / threads)."""
-    from ..cpulog import ALL
+def program_rows(start, end):
+    """[(epoch, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid)] for start <= t <= end."""
+    from ..programs import OLD_PREFIX, PREFIX, path_for
+    rows = []
+    d = dt.date.fromtimestamp(start)
+    while d <= dt.date.fromtimestamp(end):
+        for prefix in (OLD_PREFIX, PREFIX):
+            rows.extend(r for r in _rows_of(path_for(d, prefix)) if start <= r[0] <= end)
+        d += dt.timedelta(days=1)
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+METRICS = {"cpu": (3, "%"), "mem": (4, "MB"), "vram": (5, "MB"), "gpu": (6, "%")}    # (the row's field, the unit)
+
+
+def api_programs(q):
+    """Each program's use over the last hours, of one thing ("metric": cpu, mem, vram or gpu): the leading programs
+    and, for each, its value per time bucket.
+      cpu    a share of the whole processor, as Task Manager's: 100 % is every logical processor flat out (one core flat
+             out is 100 / threads); the busiest programs by CPU time
+      gpu    a share of the busiest GPU engine, as Task Manager's GPU column; by GPU time
+      mem    private memory, MB; vram: dedicated graphics memory, MB. Levels, not rates: a bucket's value is the
+             average of its minutes, and the leaders are the biggest at their peak. "change" is the last minute's
+             value less the first's: how much it grew."""
+    from ..programs import ALL
+    metric = q.get("metric") if q.get("metric") in METRICS else "cpu"
+    col, unit = METRICS[metric]
+    rate = metric in ("cpu", "gpu")
     hours = min(24 * 7, max(0.25, float(q.get("hours") or 6)))
     points = min(1000, max(20, int(q.get("points") or 240)))
     n = min(40, max(1, int(q.get("n") or 15)))
@@ -453,42 +476,149 @@ def api_cpu(q):
     start = end - hours * 3600
     st = read_json(paths.P.status) or {}
     threads = ((st.get("pc") or {}).get("threads")) or psutil.cpu_count() or 1
-    rows = []
-    d = dt.date.fromtimestamp(start)
-    while d <= dt.date.fromtimestamp(end):
-        rows.extend(r for r in cpu_rows(d) if start <= r[0] <= end)
-        d += dt.timedelta(days=1)
+    rows = program_rows(start, end)
     step = max(60.0, (end - start) / points)
     nb = int(math.ceil((end - start) / step))
-    covered = [0.0] * nb                         # the seconds logged in each bucket (from the "(all)" rows)
+    covered = [0.0] * nb                         # seconds logged in each bucket with this metric (the "(all)" rows)
+    minutes = [0] * nb
     total = [0.0] * nb
     per = collections.defaultdict(lambda: [0.0] * nb)
-    stats = {}                                   # program -> [CPU s, busiest minute's cores, its time, minutes]
-    for t, secs, prog, cpu_s, _k, _pid in rows:
+    cnt = collections.defaultdict(lambda: [0] * nb)
+    stats = {}
+    last_minute = None
+    # a minute's amount, to add up: CPU seconds; GPU percent-seconds; MB as they are
+    amount = (lambda v, secs: v) if metric == "cpu" else (lambda v, secs: v * secs) if metric == "gpu" else \
+        (lambda v, secs: v)
+    level = (lambda v, secs: v / secs) if metric == "cpu" else (lambda v, secs: v)    # cores, %, MB
+    for r in rows:
+        t, secs, prog, v = r[0], r[1], r[2], r[col]
+        if v is None or secs <= 0:
+            continue
         b = min(nb - 1, int((t - start) / step))
         if prog == ALL:
             covered[b] += secs
-            total[b] += cpu_s
+            minutes[b] += 1
+            total[b] += amount(v, secs)
+            last_minute = t
             continue
-        per[prog][b] += cpu_s
-        s = stats.setdefault(prog, [0.0, 0.0, None, 0])
-        s[0] += cpu_s
-        s[3] += 1
-        if secs > 0 and cpu_s / secs > s[1]:
-            s[1], s[2] = cpu_s / secs, t
+        per[prog][b] += amount(v, secs)
+        cnt[prog][b] += 1
+        s = stats.setdefault(prog, {"sum": 0.0, "peak": -1.0, "peak_at": None, "minutes": 0, "first": None,
+                                    "last": None, "last_t": None})
+        s["sum"] += amount(v, secs)
+        s["minutes"] += 1
+        if level(v, secs) > s["peak"]:
+            s["peak"], s["peak_at"] = level(v, secs), t
+        if s["first"] is None:
+            s["first"] = v
+        s["last"], s["last_t"] = v, t
     logged = sum(covered)
-    pct = lambda cpu_s, secs: round(100.0 * cpu_s / (secs * threads), 2) if secs > 0 else None   # noqa: E731
-    top = sorted(stats.items(), key=lambda kv: -kv[1][0])[:n]
-    programs = [{"name": p, "cpu_s": round(s[0], 1), "avg_pct": pct(s[0], logged),
-                 "avg_cores": round(s[0] / logged, 3) if logged else None,
-                 "peak_pct": round(100.0 * s[1] / threads, 2), "peak_cores": round(s[1], 3), "peak_at": s[2],
-                 "minutes": s[3]} for p, s in top]
-    series = {p["name"]: [pct(per[p["name"]][b], covered[b]) for b in range(nb)] for p in programs}
-    listed = [sum(per[p["name"]][b] for p in programs) for b in range(nb)]
-    return {"start": start, "end": end, "step": step, "threads": threads, "logged_s": round(logged),
-            "t": [round(start + (b + 0.5) * step, 1) for b in range(nb)], "programs": programs, "series": series,
-            "total": [pct(total[b], covered[b]) for b in range(nb)],
-            "other": [pct(max(0.0, total[b] - listed[b]), covered[b]) for b in range(nb)]}
+
+    def show(x, cpu_cores=False):              # cores into a share of the CPU; the rest as they are
+        if x is None:
+            return None
+        return round(100.0 * x / threads, 2) if cpu_cores else round(x, 2)
+    out = []
+    for p, s in stats.items():
+        e = {"name": p, "minutes": s["minutes"], "peak_at": s["peak_at"]}
+        if rate:
+            e["avg"] = show(s["sum"] / logged, metric == "cpu") if logged else None
+            e["peak"] = show(s["peak"], metric == "cpu")
+            e["key"] = s["sum"]
+        else:
+            e["avg"], e["peak"], e["key"] = show(s["sum"] / s["minutes"]), show(s["peak"]), s["peak"]
+            e["now"] = show(s["last"]) if last_minute is not None and s["last_t"] >= last_minute - 1 else None
+            e["change"] = show(s["last"] - s["first"])
+        if metric == "cpu":
+            e.update(cpu_s=round(s["sum"], 1), avg_cores=round(s["sum"] / logged, 3) if logged else None,
+                     peak_cores=round(s["peak"], 3))
+        out.append(e)
+    out.sort(key=lambda e: -e.pop("key"))
+    programs = out[:n]
+
+    def bucket(sum_, k, b):                    # a bucket's value, None where nothing was logged
+        if not covered[b]:
+            return None
+        if metric == "cpu":
+            return round(100.0 * sum_ / (covered[b] * threads), 2)
+        if metric == "gpu":
+            return round(sum_ / covered[b], 2)
+        return round(sum_ / k, 1) if k else None
+    series = {p["name"]: [bucket(per[p["name"]][b], cnt[p["name"]][b], b) for b in range(nb)] for p in programs}
+    return {"metric": metric, "unit": unit, "start": start, "end": end, "step": step, "threads": threads,
+            "logged_s": round(logged), "t": [round(start + (b + 0.5) * step, 1) for b in range(nb)],
+            "programs": programs, "series": series,
+            "total": [bucket(total[b], minutes[b], b) for b in range(nb)]}
+
+
+# the Diagnose tab: diagnose.py judges, this gathers --------------------------------------------------------------------
+
+DIAG_COLS = ("cpu_temp_c", "gpu_temp_c", "v12_v", "v5_v", "v33_v", "ram_pct", "gpu_vram_mb")
+
+
+def diagnose_inputs(now=None):
+    """What the checks look at: the status, the last day of the 5-second log and of the programs log, the last week of
+    the service's exits and Windows' records, every power-off, and the last day's screen changes."""
+    now = now or time.time()
+    day = now - 86400
+    ts, flight = FLIGHT_CACHE.rows_between(day, now, list(DIAG_COLS))
+    sens = read_json(paths.P.sensors) or {}
+    records, displays, watched = [], [], {}
+    d = dt.date.fromtimestamp(now - 7 * 86400)
+    while d <= dt.date.fromtimestamp(now):
+        for i, (_src, path) in enumerate(journal_files(d)):
+            agent = i > 0                                # (the first is the service's own)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if agent:
+                            if '"kind": "display"' not in line:
+                                continue
+                        elif '"kind": "mem"' in line:
+                            # the watched apps' memory every minute (older than the programs log, so a leak that
+                            # began before the update still shows): {exe: [(t, MB)]}
+                            try:
+                                rec = json.loads(line)
+                                t = epoch(rec.get("ts"))
+                                if t is None or t < day or t > now + 300:
+                                    continue
+                                by = collections.Counter()
+                                for key, v in (rec.get("private_mb") or {}).items():
+                                    by[str(key).rpartition("/")[0]] += float(v)
+                                for exe, v in by.items():
+                                    watched.setdefault(exe, []).append((t, v))
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+                            continue
+                        elif '"kind": "exit"' not in line and '"kind": "winevent"' not in line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(rec, dict):
+                            continue
+                        t = (epoch(rec.get("at")) if rec.get("kind") == "winevent" else None) or epoch(rec.get("ts"))
+                        if t is None or t > now + 300:
+                            continue
+                        if agent and rec.get("kind") == "display" and t >= day:
+                            displays.append(t)
+                        elif not agent and rec.get("kind") in ("exit", "winevent"):
+                            rec["t"] = t
+                            records.append(rec)
+            except OSError:
+                continue
+        d += dt.timedelta(days=1)
+    return {"now": now, "status": read_json(paths.P.status) or {}, "status_age": age(paths.P.status),
+            "cfg": settings(), "sensors": sens.get("sensors") or [], "flight_t": list(ts),
+            "flight": {c: [None if v != v else v for v in vals] for c, vals in flight.items()},
+            "programs": program_rows(day, now), "power_offs": power_offs(), "records": records,
+            "displays": displays, "watched_mem": watched}
+
+
+def diagnose_now():
+    from .. import diagnose
+    return diagnose.run(diagnose_inputs())
 
 
 def api_rails(q):
@@ -871,7 +1001,9 @@ def page():
 ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/history": api_history,
           "/api/flight_columns": api_flight_columns, "/api/rails": api_rails, "/api/events": api_events,
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
-          "/api/processes": lambda q: PROCESSES.sample(), "/api/cpu": api_cpu, "/api/config": api_config,
+          "/api/processes": lambda q: PROCESSES.sample(), "/api/programs": api_programs,
+          "/api/diagnose": lambda q: cached("diagnose", 0 if q.get("fresh") else 60, diagnose_now),
+          "/api/config": api_config,
           "/api/ping": lambda q: {"app": APP, "version": VERSION, "pid": os.getpid(), "user": winapi.user_name()}}
 
 

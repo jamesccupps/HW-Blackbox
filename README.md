@@ -15,6 +15,8 @@ switch off, or why did that app close?*
 - **Writes the report for you.** After a power-off: when the PC really went down (not Windows' guess), for how long,
   and the last two minutes of readings. After an app crash: the exit code in words, and the last three minutes of
   everything.
+- **Tells you what's wrong, and what to do.** The Diagnose tab checks what it has recorded (power-offs, crashes,
+  heat, the rails, a program stuck busy or growing without end, memory, disk space) and says what to do about each.
 - **Runs from boot, as a Windows service,** whether or not anyone signs in. Windows restarts it if it ever fails.
 - **Stays on your PC.** A local dashboard on `127.0.0.1`; optionally a status for your own Home Assistant, with
   alerts for a problem, a power loss or a PC that has gone quiet.
@@ -69,9 +71,11 @@ against the release's manifest. More options are under [Install, in detail](#ins
   that should always be listening but isn't.
 - **Sessions.** Sign-ins, locks and sign-outs; sleep and resume; screen changes (resolution, position, scaling); the
   taskbar coming back after Explorer restarts; the clock being changed.
-- **CPU by program.** Every program's share of the CPU, minute by minute, all its processes together, plus the time
-  the processors spent on drivers' interrupts. Windows keeps no such history: Task Manager only shows now. So when
-  the CPU was busy at 3 in the morning, the Processes tab says which program it was.
+- **Programs.** Every program's CPU, memory, graphics memory and GPU use, minute by minute, all its processes
+  together, plus the time the processors spent on drivers' interrupts. Windows keeps no such history: Task Manager
+  only shows now. So when the CPU was busy at 3 in the morning, or a program grew by gigabytes overnight, the
+  Processes tab says which program it was. The GPU's figures come from Windows' own GPU counters (the ones Task
+  Manager uses), so they work for any make of GPU.
 - **Disk space.** Every fixed drive's free space, once a minute, to chart over days. The Windows drive is a problem
   when it gets low or fills up fast (an update unpacking, a download, a runaway log). It also notes a Windows update
   that's waiting for a restart.
@@ -103,7 +107,9 @@ What keeps it reliable:
   not the connection table's state field, which is garbage on some Windows builds (netstat and
   `Get-NetTCPConnection` list the wrong ports there).
 - **Every process in one call** (`NtQuerySystemInformation`), about 10 ms, rather than seconds of asking process by
-  process.
+  process. It brings every process's CPU time and memory with it.
+- **Windows' GPU counters once a minute**, on a thread of their own (`GPU Process Memory` and `GPU Engine`, through
+  PDH): NVIDIA's own interface can't tell programs' graphics memory apart on Windows.
 
 ## Requirements
 
@@ -142,13 +148,14 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 | Tab | Shows |
 |---|---|
 | **Overview** | the service and the agents, any problems, the key readings now, power-offs, disks (with their last week) |
+| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, crashes, display driver resets, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, disk space, a waiting update, uptime |
 | **Sensors** | every sensor: current, minimum, maximum and average, since the page opened or since the service started |
 | **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
 | **Power** | the 4-a-second rails over the last minutes, and every power-off caught |
 | **Events** | the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' records |
 | **Ports** | who listens where, and port problems |
 | **Incidents** | the power-off and crash reports |
-| **Processes** | what's using the CPU and memory right now, and every program's CPU use over the last week (pick the programs to chart) |
+| **Processes** | what's using the CPU and memory right now, and every program's CPU, memory, graphics memory and GPU use over the last week (pick the programs to chart) |
 
 The header shows the page's version. After an update, a page that was already open says so and offers a reload.
 
@@ -259,7 +266,7 @@ triggers:
 | `config.json` | the settings |
 | `logs\flight_YYYYMMDD.csv` | every 5 s: the key readings (kept 183 days, about 2.5 MB a day) |
 | `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
-| `logs\cpu_YYYYMMDD.csv` | every minute: each busy program's CPU time, a row per program (kept 183 days, about 1 MB a day) |
+| `logs\programs_YYYYMMDD.csv` | every minute: each busy or big program's CPU time, memory, graphics memory and GPU share, a row per program (kept 183 days, about 1.5 MB a day). 1.0.7 wrote `cpu_YYYYMMDD.csv` (the CPU alone); it's still read |
 | `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
 | `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line |
 | `state\status.json` | the status, every 30 s |
@@ -279,7 +286,8 @@ $hwb = "C:\Program Files\HWBlackbox\python\python.exe"
 ```
 
 The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings, the last 72 hours),
-`#charts:168:disk:C:` (C:'s free space, the last week), `#sensors:logger`, `#incidents:<report file>`.
+`#charts:168:disk:C:` (C:'s free space, the last week), `#processes:mem` (memory by program; also `cpu`, `vram`,
+`gpu`), `#diagnose`, `#sensors:logger`, `#incidents:<report file>`.
 
 ## Limitations
 
@@ -300,8 +308,8 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 - **The app in front is kept for the last 3 minutes only**, as a rolling window. It's copied into a record when
   Windows shuts down or restarts, and into an app's incident report; those are kept (records 183 days, app reports
   the same, power-off reports until you delete them).
-- **The CPU history names programs:** each minute, the programs that used at least 1 % of a core, by exe name
-  (`chrome.exe`, `game.exe`), kept 183 days. It doesn't say which account ran them, or what they had open.
+- **The program history names programs:** each minute, the busiest and biggest programs by exe name (`chrome.exe`,
+  `game.exe`), kept 183 days. It doesn't say which account ran them, or what they had open.
 - **On a PC with several accounts, everyone signed in sees the same dashboard:** every account's sessions, the app
   in front included, and every listening program's command line (with password-like values hidden as `***`).
 - **The program can only be changed by admins:** Program Files, with a Python of its own. The service runs as

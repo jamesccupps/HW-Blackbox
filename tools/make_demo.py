@@ -20,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hwblackbox import VERSION  # noqa: E402
-from hwblackbox.cpulog import COLUMNS as CPU_COLUMNS  # noqa: E402
+from hwblackbox.programs import COLUMNS as PROGRAM_COLUMNS  # noqa: E402
 from hwblackbox.disks import COLUMNS as DISK_COLUMNS  # noqa: E402
 from hwblackbox.sensors import COLUMNS, FAST_COLUMNS  # noqa: E402
 
@@ -195,36 +195,55 @@ def main():
         t += dt.timedelta(minutes=1)
     for day, rows_ in disk_rows.items():
         write_csv(os.path.join(logs, "disks_%s.csv" % day), DISK_COLUMNS, rows_)
-    # each program's CPU use, a minute at a time (16 logical processors: 60 s of CPU in a minute is one of them): the
-    # browser and an editor by day, a game and OBS in the evening, and a virus scan at 2 every night
-    cpu_rows, t = {}, start
+    # each program's use, a minute at a time (16 logical processors: 60 s of CPU in a minute is one of them): the
+    # browser and an editor by day, a game and OBS in the evening, a virus scan at 2 every night, and Explorer jumping
+    # from 0.4 to 2.2 GB when a remote session ends 7 hours ago (the screens change: the Diagnose tab notices)
+    jump = now - dt.timedelta(hours=7)
+    agent.add(jump - dt.timedelta(seconds=40), "display", before=["\\\\.\\DISPLAY33 0,0 2560x1440 at 125%"],
+              after=["\\\\.\\DISPLAY1 0,0 2560x1440 at 100%"])
+    prog_rows, t = {}, start
     while t <= now:
         if not (off_at < t < back_at + dt.timedelta(seconds=40) or restart_at < t < restart_back + dt.timedelta(seconds=35)):
             st, h = m.state(t), t.hour + t.minute / 60
             w = 1 + 0.35 * math.sin(t.timestamp() / 410) + rnd.uniform(-0.15, 0.15)
-            progs = {"dwm.exe": 1.2 + {"idle": 0, "use": 2.5, "game": 9}[st], "System interrupts": 0.9,
-                     "System": 0.7, "explorer.exe": 0.4 + (st == "use") * 1.2}
+            ex_mem = 380 + (t - start).total_seconds() / 3600 * 2 if t < jump else 2210 + (t - jump).total_seconds() / 3600 * 4
+            # program: [CPU s, memory MB, GPU memory MB, GPU %]
+            progs = {"dwm.exe": [1.2 + {"idle": 0, "use": 2.5, "game": 9}[st], 310, 620, {"idle": 0.5, "use": 4, "game": 6}[st]],
+                     "System interrupts": [0.9, None, None, None], "System": [0.7, 0, 0, 0],
+                     "explorer.exe": [0.4 + (st == "use") * 1.2, ex_mem, 150, 0.3],
+                     "Memory Compression": [0.1, 640, 0, 0], "MsMpEng.exe": [0.3, 280, 0, 0]}
             if st == "use":
-                progs.update({"chrome.exe": 14 * w, "Code.exe": 5 * w, "Discord.exe": 1.6})
+                progs.update({"chrome.exe": [14 * w, 2400 * w, 350, 3 * w], "Code.exe": [5 * w, 900, 120, 0.5],
+                              "Discord.exe": [1.6, 450, 180, 1.2]})
             elif st == "game":
-                progs.update({"Game.exe": 240 * w, "obs64.exe": 38 * w, "Discord.exe": 2.4, "chrome.exe": 3})
+                progs.update({"Game.exe": [240 * w, 6200 + 300 * w, 7100 + 200 * w, 93 * w], "obs64.exe": [38 * w, 700, 420, 8 * w],
+                              "Discord.exe": [2.4, 480, 190, 1.5], "chrome.exe": [3, 1500, 300, 0.4]})
             if 2 <= h < 2.75:                                       # the nightly scan
-                progs["MsMpEng.exe"] = 52 * w
+                progs["MsMpEng.exe"][0] = 52 * w
             if t.minute % 15 == 0:
-                progs["SearchIndexer.exe"] = 3.5
-            rows_ = [(p, round(v * rnd.uniform(0.9, 1.1), 2)) for p, v in progs.items()]
-            rows_ = sorted((r for r in rows_ if r[1] >= 0.6 or r[0] == "System interrupts"), key=lambda r: -r[1])
+                progs["SearchIndexer.exe"] = [3.5, 120, 0, 0]
+            rows_ = []
+            for p, (c, mem, vram, gpu) in progs.items():
+                c = round(c * rnd.uniform(0.9, 1.1), 2)
+                if p != "System interrupts" and c < 0.6 and (mem or 0) < 200 and (vram or 0) < 64 and (gpu or 0) < 1:
+                    continue
+                rows_.append({"program": p, "cpu_s": c, "mem_mb": "" if mem is None else round(mem, 1),
+                              "vram_mb": "" if vram is None else round(vram, 1), "gpu_pct": "" if gpu is None else round(min(100, gpu), 1),
+                              "processes": {"chrome.exe": 23, "Discord.exe": 6, "Code.exe": 9}.get(p, 0 if p == "System interrupts" else 1),
+                              "pid": "" if p == "System interrupts" else 1000 + sum(map(ord, p))})
+            rows_.sort(key=lambda r: -r["cpu_s"])
             ts = t.isoformat(timespec="seconds")
-            day = cpu_rows.setdefault(t.strftime("%Y%m%d"), [])
-            for p, v in rows_:
-                day.append({"timestamp": ts, "seconds": 60.0, "program": p, "cpu_s": v,
-                            "processes": {"chrome.exe": 23, "Discord.exe": 6, "Code.exe": 9, "System": 1}.get(p, 0 if p == "System interrupts" else 1),
-                            "pid": "" if p == "System interrupts" else 1000 + sum(map(ord, p))})
-            day.append({"timestamp": ts, "seconds": 60.0, "program": "(all)", "cpu_s": round(sum(v for _, v in rows_) + 2.1, 2),
-                        "processes": 287, "pid": ""})
+            day = prog_rows.setdefault(t.strftime("%Y%m%d"), [])
+            for r in rows_:
+                day.append(dict(r, timestamp=ts, seconds=60.0))
+            num = lambda r, k: r[k] if r[k] != "" else 0                      # noqa: E731
+            day.append({"timestamp": ts, "seconds": 60.0, "program": "(all)", "cpu_s": round(sum(r["cpu_s"] for r in rows_) + 2.1, 2),
+                        "mem_mb": round(sum(num(r, "mem_mb") for r in rows_) + 3100, 1),
+                        "vram_mb": round(sum(num(r, "vram_mb") for r in rows_) + 160, 1),
+                        "gpu_pct": round(min(100, max([num(r, "gpu_pct") for r in rows_] + [0]) + 1), 1), "processes": 287, "pid": ""})
         t += dt.timedelta(minutes=1)
-    for day, rows_ in cpu_rows.items():
-        write_csv(os.path.join(logs, "cpu_%s.csv" % day), CPU_COLUMNS, rows_)
+    for day, rows_ in prog_rows.items():
+        write_csv(os.path.join(logs, "programs_%s.csv" % day), PROGRAM_COLUMNS, rows_)
 
     # the records
     def boot(at, clean, prev_kind):

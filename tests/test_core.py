@@ -833,62 +833,97 @@ class RailsLaneTest(TempData):
         self.assertEqual(problems, ["No CPU temperature (the sensor driver, PawnIO, may be gone)"])
 
 
-class CpuLogTest(TempData):
-    """Each program's CPU use, minute by minute: Windows keeps no such history."""
+MB = 2 ** 20
+
+
+class ProgramLogTest(TempData):
+    """Each program's CPU, memory and GPU use, minute by minute: Windows keeps no such history."""
 
     def snap(self, procs):
         from hwblackbox.winapi import Proc
-        return {pid: Proc(name, 1, 1, created, int(cpu_s * 1e7), 0) for pid, (name, created, cpu_s) in procs.items()}
+        return {pid: Proc(name, 1, 1, created, int(cpu_s * 1e7), int(mem_mb * MB))
+                for pid, (name, created, cpu_s, mem_mb) in procs.items()}
 
     def test_a_minute_by_program(self):
         from unittest import mock
-        from hwblackbox import cpulog
-        log = cpulog.CpuLog(183)
+        from hwblackbox import programs
+        log = programs.ProgramLog(183)
         t0 = time.time()
         old = t0 - 3600
-        with mock.patch.object(cpulog, "interrupt_seconds", side_effect=[100.0, 100.9]):
-            log.look(self.snap({1752: ("dwm.exe", old, 500.0), 10: ("chrome.exe", old, 30.0),
-                                11: ("chrome.exe", old, 20.0), 77: ("python.exe", old, 9.0),
-                                88: ("idle.exe", old, 1.0)}), now=0, wall=t0)
-            log.look(self.snap({1752: ("dwm.exe", old, 559.0),                 # a core flat out
-                                10: ("chrome.exe", old, 33.0), 11: ("chrome.exe", old, 21.5),
-                                77: ("python.exe", t0 + 30, 2.0),              # pid 77 again: a new process
-                                90: ("build.exe", t0 + 40, 4.0),               # started since the last look
-                                91: ("old.exe", old, 50.0),                    # (missing from the last look: not counted)
-                                88: ("idle.exe", old, 1.1)}), now=60, wall=t0 + 60)
+        eng = "luid_0x00000000_0x000124D4_phys_0_eng_0"
+        with mock.patch.object(programs, "interrupt_seconds", side_effect=[100.0, 100.9]):
+            log.look(self.snap({1752: ("dwm.exe", old, 500.0, 300), 10: ("chrome.exe", old, 30.0, 400),
+                                11: ("chrome.exe", old, 20.0, 300), 77: ("python.exe", old, 9.0, 50),
+                                88: ("idle.exe", old, 1.0, 20), 99: ("big.exe", old, 0.0, 900)}), now=0, wall=t0)
+            log.look(self.snap({1752: ("dwm.exe", old, 559.0, 310),                 # a core flat out
+                                10: ("chrome.exe", old, 33.0, 500), 11: ("chrome.exe", old, 21.5, 300),
+                                77: ("python.exe", t0 + 30, 2.0, 40),               # pid 77 again: a new process
+                                90: ("build.exe", t0 + 40, 4.0, 60),                # started since the last look
+                                91: ("old.exe", old, 50.0, 10),                     # (missing from the last look)
+                                88: ("idle.exe", old, 1.1, 20), 99: ("big.exe", old, 0.0, 700)}),
+                     now=60, wall=t0 + 60)
+            # Windows' GPU counters: dwm 1.3 GB and 12 % of the 3D engine, chrome 4 % + 3 % on the same engine
+            log.gpu.latest = (time.monotonic(), {1752: 1300 * MB, 10: 200 * MB, 4242: 50 * MB},
+                              {1752: {eng: 12.0}, 10: {eng: 4.0}, 11: {eng: 3.0}})
             rows = log.minute()
-        got = {r[0]: (round(r[1], 2), r[2], r[3]) for r in rows}
-        self.assertEqual(got["dwm.exe"], (59.0, 1, 1752))
-        self.assertEqual(got["chrome.exe"], (4.5, 2, 10))
-        self.assertEqual(got["build.exe"], (4.0, 1, 90))
-        self.assertEqual(got["python.exe"], (2.0, 1, 77))
-        self.assertNotIn("idle.exe", got)                                  # 0.1 s: under 1 % of a core
+        got = {r[0]: (round(r[1], 2), r[2], r[3], r[4], r[5], r[6]) for r in rows}
+        self.assertEqual(got["dwm.exe"], (59.0, 310.0, 1300.0, 12.0, 1, 1752))
+        self.assertEqual(got["chrome.exe"], (4.5, 800.0, 200.0, 7.0, 2, 10))        # (its processes summed)
+        self.assertEqual(got["big.exe"][:2], (0.0, 900.0))                         # memory alone: the most it held
+        self.assertEqual(got["build.exe"][0], 4.0)
+        self.assertEqual(got["python.exe"][0], 2.0)
+        self.assertNotIn("idle.exe", got)                                        # small in everything
         self.assertNotIn("old.exe", got)
-        self.assertEqual(got[cpulog.INTERRUPTS][0], 0.9)
-        self.assertEqual(got[cpulog.ALL][0], round(59 + 4.5 + 4 + 2 + 0.1 + 0.9, 2))
-        self.assertEqual([r[0] for r in rows][:4], ["dwm.exe", "chrome.exe", "build.exe", "python.exe"])
-        on_disk = cpulog.read_rows(cpulog.path_for(dt.date.today()))
-        self.assertEqual([(r[2], r[3]) for r in on_disk][0], ("dwm.exe", 59.0))
-        self.assertEqual(on_disk[0][1], 60.0)
+        self.assertEqual(got[programs.INTERRUPTS][0], 0.9)
+        self.assertEqual(got[programs.ALL][0], round(59 + 4.5 + 4 + 2 + 0.1 + 0.9, 2))
+        self.assertEqual(got[programs.ALL][2:4], (1550.0, 19.0))                  # all VRAM; the engine's total
+        on_disk = programs.read_rows(programs.path_for(dt.date.today()))
+        self.assertEqual(on_disk[0][2:7], ("dwm.exe", 59.0, 310.0, 1300.0, 12.0))
         self.assertTrue(log.busiest()[0].startswith("dwm.exe: 98 % of one core (1 process, the busiest pid 1752)"))
 
-    def test_the_page(self):
-        from hwblackbox import cpulog
+    def test_without_the_gpu_counters(self):
+        from hwblackbox import programs
+        log = programs.ProgramLog(183)
+        log.look(self.snap({5: ("a.exe", time.time() - 99, 1.0, 300)}), now=0)
+        log.look(self.snap({5: ("a.exe", time.time() - 99, 31.0, 300)}), now=60)
+        rows = log.minute()
+        self.assertEqual(rows[0][:5], ("a.exe", 30.0, 300.0, None, None))       # (blank, not 0)
+
+    def test_the_counters_names(self):
+        from hwblackbox.programs import gpu_by_pid
+        vram, eng = gpu_by_pid({"pid_1752_luid_0x00000000_0x000124D4_phys_0": 100,
+                                "pid_1752_luid_0x00000000_0x0000AAAA_phys_0": 20, "junk": 5},
+                               {"pid_1752_luid_0x00000000_0x000124D4_phys_0_eng_0_engtype_3D": 10.5,
+                                "pid_1752_luid_0x00000000_0x000124D4_phys_0_eng_3_engtype_VideoDecode": 0.0,
+                                "pid_9_luid_0x00000000_0x000124D4_phys_0_eng_0_engtype_3D": 2.0})
+        self.assertEqual(vram, {1752: 120})
+        self.assertEqual(eng, {1752: {"luid_0x00000000_0x000124D4_phys_0_eng_0": 10.5},
+                               9: {"luid_0x00000000_0x000124D4_phys_0_eng_0": 2.0}})
+
+    def write_minutes(self, prefix, rows, now):
+        """rows(k, t) -> CSV lines for the minute k minutes ago."""
+        from hwblackbox import programs
+        cols = programs.COLUMNS if prefix == programs.PREFIX else programs.OLD_COLUMNS
+        with open(programs.path_for(dt.date.today(), prefix), "w", encoding="utf-8") as f:
+            f.write(",".join(cols) + "\n")
+            for k in range(30, 0, -1):
+                f.write(rows(k, dt.datetime.fromtimestamp(now - k * 60).isoformat(timespec="seconds")))
+
+    def test_the_page_reads_1_0_7s_cpu_log(self):
+        from hwblackbox import programs
         from hwblackbox.dashboard import server
         now = time.time()
-        with open(cpulog.path_for(dt.date.today()), "w", encoding="utf-8") as f:
-            f.write(",".join(cpulog.COLUMNS) + "\n")
-            for k in range(30, 0, -1):                       # the last half hour: dwm.exe a core flat out
-                t = dt.datetime.fromtimestamp(now - k * 60).isoformat(timespec="seconds")
-                f.write("%s,60.0,dwm.exe,60.0,1,1752\n%s,60.0,chrome.exe,%.1f,9,10\n%s,60.0,System interrupts,0.6,0,\n"
-                        "%s,60.0,(all),%.1f,250,\n" % (t, t, 3 + (k == 10) * 30, t, t, 63.6 + (k == 10) * 30))
+        # the last half hour in 1.0.7's log: dwm.exe a core flat out
+        self.write_minutes(programs.OLD_PREFIX, lambda k, t: (
+            "%s,60.0,dwm.exe,60.0,1,1752\n%s,60.0,chrome.exe,%.1f,9,10\n%s,60.0,System interrupts,0.6,0,\n"
+            "%s,60.0,(all),%.1f,250,\n" % (t, t, 3 + (k == 10) * 30, t, t, 63.6 + (k == 10) * 30)), now)
         with open(paths.P.status, "w", encoding="utf-8") as f:
             json.dump({"pc": {"threads": 12}}, f)
-        server._cpu_files.clear()
-        d = server.api_cpu({"hours": "1", "points": "60"})
+        server._prog_files.clear()
+        d = server.api_programs({"metric": "cpu", "hours": "1", "points": "60"})
         self.assertEqual([p["name"] for p in d["programs"]], ["dwm.exe", "chrome.exe", "System interrupts"])
         dwm, chrome = d["programs"][0], d["programs"][1]
-        self.assertEqual((dwm["avg_cores"], dwm["peak_cores"], dwm["avg_pct"]), (1.0, 1.0, 8.33))
+        self.assertEqual((dwm["avg_cores"], dwm["peak_cores"], dwm["avg"]), (1.0, 1.0, 8.33))
         self.assertEqual(chrome["peak_cores"], 0.55)
         self.assertAlmostEqual(chrome["peak_at"], now - 600, delta=1.5)
         self.assertEqual(d["logged_s"], 1800)
@@ -896,7 +931,116 @@ class CpuLogTest(TempData):
         self.assertTrue(all(v is None for v in dw[:25]))                   # before the log: a gap, not 0
         self.assertEqual([v for v in dw if v is not None], [8.33] * 30)
         self.assertEqual([v for v in d["total"] if v is not None][-1], 8.83)
-        self.assertEqual([v for v in d["other"] if v is not None][-1], 0.0)
+        self.assertEqual(server.api_programs({"metric": "mem", "hours": "1"})["logged_s"], 0)   # (1.0.7: no memory)
+
+    def test_memory_and_the_gpu_on_the_page(self):
+        from hwblackbox import programs
+        from hwblackbox.dashboard import server
+        now = time.time()
+        # explorer.exe grows from 350 MB to 2.9 GB; chrome.exe holds 1.5 GB and the GPU's 3D engine at 20 %
+        self.write_minutes(programs.PREFIX, lambda k, t: (
+            "%s,60.0,explorer.exe,0.5,%d,180,0,1,7060\n%s,60.0,chrome.exe,3.0,1536,300,20,9,10\n"
+            "%s,60.0,(all),3.5,%d,480,20,250,\n" % (t, 350 if k > 20 else 1976 if k > 5 else 2900, t, t,
+                                                   (350 if k > 20 else 1976 if k > 5 else 2900) + 1536)), now)
+        server._prog_files.clear()
+        d = server.api_programs({"metric": "mem", "hours": "1", "points": "60"})
+        ex = next(p for p in d["programs"] if p["name"] == "explorer.exe")
+        self.assertEqual([p["name"] for p in d["programs"]], ["explorer.exe", "chrome.exe"])   # by the most held
+        self.assertEqual((ex["now"], ex["peak"], ex["change"]), (2900, 2900, 2550))
+        self.assertEqual(d["unit"], "MB")
+        g = server.api_programs({"metric": "gpu", "hours": "1", "points": "60"})
+        self.assertEqual((g["programs"][0]["name"], g["programs"][0]["avg"]), ("chrome.exe", 20.0))
+        self.assertEqual([v for v in g["total"] if v is not None][-1], 20.0)
+        v = server.api_programs({"metric": "vram", "hours": "1", "points": "60"})
+        self.assertEqual(v["programs"][0]["now"], 300)
+
+
+class DiagnoseTest(unittest.TestCase):
+    """The Diagnose tab's rules, on made-up records."""
+
+    def inputs(self, **kw):
+        now = time.time()
+        d = {"now": now, "status": {"problems": [], "pc": {"boot_epoch": now - 3 * 86400, "disks": [
+            {"mount": "C:\\", "total_gb": 465, "free_gb": 120}]}, "attributes": {"windows_update": "no restart waiting"}},
+             "status_age": 10, "cfg": {"disk_warn_gb": 10}, "sensors": [], "flight_t": [], "flight": {},
+             "programs": [], "power_offs": [], "records": [], "displays": []}
+        d.update(kw)
+        return d
+
+    def run_(self, **kw):
+        from hwblackbox import diagnose
+        out = diagnose.run(self.inputs(**kw))
+        return {c["id"]: c for c in out["checks"]}
+
+    def test_a_busy_windows_program_and_a_leak(self):
+        now = time.time()
+        rows, shown = [], now - 6 * 3600
+        for k in range(600, 0, -1):                          # the last 10 hours, a row a minute
+            t = now - k * 60
+            rows.append((t, 60.0, "dwm.exe", 59.0 if k > 120 else 1.0, 300.0, 1300.0, 2.0, 1, 1752))
+            rows.append((t, 60.0, "Game.exe", 60.0 if k < 60 else 0.0, 4000.0, 2000.0, 90.0, 1, 4444))
+            mem = 350.0 if t < shown + 60 else 1976.0
+            rows.append((t, 60.0, "explorer.exe", 0.4, mem, 180.0, 0.0, 1, 7060))
+            rows.append((t, 60.0, "(all)", 70.0, 8000.0, 3500.0, 90.0, 250, None))
+        c = self.run_(programs=rows, displays=[shown])
+        dwm = c["busy:dwm.exe"]
+        self.assertEqual(dwm["level"], "warn")
+        self.assertIn("Desktop Window Manager", dwm["seen"][0])
+        self.assertTrue(any("graphics driver" in a for a in dwm["advice"]))
+        self.assertNotIn("busy:Game.exe", c)                  # an hour of a game: what games do
+        ex = c["memory:explorer.exe"]
+        self.assertEqual(ex["level"], "warn")
+        self.assertTrue(any("right after the screens changed" in s for s in ex["seen"]))
+        self.assertTrue(ex["advice"][0].startswith("Restart it: Task Manager"))
+        for ok in ("problems", "power", "crashes", "display", "disk", "update", "uptime"):
+            self.assertEqual(c[ok]["level"], "ok", ok)
+
+    def test_a_leak_from_before_the_programs_log(self):
+        # (just after an update to 1.0.8 there's no programs log yet: the watched apps' own minute records show it)
+        now = time.time()
+        jump = now - 5 * 3600
+        w = [(now - k * 60, 350.0 if now - k * 60 < jump else 1976.0) for k in range(900, 0, -1)]
+        c = self.run_(watched_mem={"explorer.exe": w}, displays=[jump - 40])
+        self.assertIn("memory:explorer.exe", c)
+        self.assertTrue(any("right after the screens changed" in s for s in c["memory:explorer.exe"]["seen"]))
+        self.assertNotIn("memory:explorer.exe", self.run_(watched_mem={"explorer.exe": [(t, 350.0) for t, _v in w]}))
+        # (2026-11-06: just after the update, the watch list's record of claude.exe's main process (500 MB) ran into
+        # the programs log's all-of-its-processes (7 GB), and read as a leak of 6.5 GB)
+        rows = [(now - k * 60, 60.0, "claude.exe", 10.0, 7000.0, 200.0, 1.0, 26, 1) for k in range(40, 0, -1)]
+        rows += [(now - k * 60, 60.0, "(all)", 50.0, 30000.0, 3000.0, 10.0, 400, None) for k in range(40, 0, -1)]
+        early = [(now - k * 60, 500.0) for k in range(900, 41, -1)]
+        self.assertNotIn("memory:claude.exe", self.run_(programs=rows, watched_mem={"claude.exe": early}))
+        joined = [(now - k * 60, 350.0) for k in range(900, 300, -1)] + [(now - k * 60, 2000.0) for k in range(300, 41, -1)]
+        ex = [(t, 60.0, "explorer.exe", 0.2, 2000.0, 180.0, 0.0, 1, 7060) for t, *_ in rows[:40]]
+        self.assertIn("memory:explorer.exe", self.run_(programs=rows + ex, watched_mem={"explorer.exe": joined}))
+
+    def test_crashes_in_several_programs_point_at_the_memory(self):
+        now = time.time()
+        recs = [{"kind": "winevent", "source": "Application Error", "id": 1000, "t": now - k * 3600,
+                 "inserts": [app, "1.0", "x", "ntdll.dll", "1.0", "y", "0xc0000005"]}
+                for k, app in enumerate(("a.exe", "b.exe", "c.exe"), start=1)]
+        recs.append({"kind": "exit", "t": now - 100, "app": "Blender", "exe": "blender.exe", "code": "0xC0000005",
+                     "meaning": "crash: access violation"})
+        recs.append({"kind": "winevent", "source": "Application Error", "id": 1000, "t": now - 95,  # (the same crash)
+                     "inserts": ["blender.exe", "4.2", "x", "y", "1", "z", "0xc0000005"]})
+        c = self.run_(records=recs)["crashes"]
+        self.assertEqual((c["level"], c["summary"]), ("warn", "4 crashes in the last 7 days, 4 programs"))
+        self.assertIn("test the memory", c["advice"][0])
+
+    def test_heat_and_a_rail_out_of_bounds(self):
+        now = time.time()
+        ts = [now - 3600 + 5 * k for k in range(600)]
+        c = self.run_(flight_t=ts, flight={"cpu_temp_c": [60.0] * 599 + [96.0], "v12_v": [12.1] * 599 + [11.2],
+                                           "v5_v": [5.04] * 600, "v33_v": [3.34] * 600})
+        self.assertEqual(c["cpu_temp_c"]["level"], "bad")
+        self.assertEqual(c["rails"]["level"], "bad")
+        self.assertTrue(any("+12 V" in s and "outside the ATX limit" in s for s in c["rails"]["seen"]))
+
+    def test_the_service_not_reporting_and_a_check_that_breaks(self):
+        c = self.run_(status_age=None, power_offs=[None])
+        self.assertEqual(c["problems"]["level"], "bad")
+        self.assertEqual(c["error"]["title"], "A check couldn't run")          # (the rest still ran)
+        self.assertIn("disk", c)
 
 
 if __name__ == "__main__":
