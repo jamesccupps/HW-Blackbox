@@ -133,11 +133,22 @@ What keeps it reliable:
 - If the PawnIO driver is missing, it asks whether to install it (with winget, in the installer's window).
 - It copies the program to `C:\Program Files\HWBlackbox` and checks every file against the release's manifest.
 - It sets up the data folder.
-- It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu.
+- It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu and to
+  **Settings → Apps → Installed apps**.
 - It checks that everything reports.
 
 Its log is `%TEMP%\hwblackbox-install.txt`. Running it again updates an installed HW Blackbox and keeps the settings
-and the history. **`Uninstall.cmd`** removes it and keeps the data.
+and the history.
+
+### Uninstall
+
+**Settings → Apps → Installed apps → HW Blackbox → Uninstall** (from 1.0.11), or **`Uninstall.cmd`** (in the unzipped
+release, or in `C:\Program Files\HWBlackbox`). Either asks Windows for an admin, then removes the service, the agent's
+task, the program, the shortcut and the Installed apps entry, and shows what it did.
+
+The data stays in `C:\ProgramData\HWBlackbox` (logs, reports, settings), so a reinstall carries on where it left off.
+To remove it too, delete that folder, or from an elevated PowerShell in the release folder:
+`.\install.ps1 -Uninstall -RemoveData`. The PawnIO driver is separate: it has its own Installed apps entry.
 
 ### Updates
 

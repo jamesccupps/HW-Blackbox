@@ -13,6 +13,12 @@
   -PawnIO ask|yes|no                    when the PawnIO driver (the CPU and board sensors) is missing: ask (the
                                         default; with nobody to answer, it's left out), install it with winget, or
                                         leave it out
+  -Pause                                at the end, keep the window open 15 seconds (or until a key): for Settings ->
+                                        Apps -> Installed apps, whose Uninstall runs this
+
+  HW Blackbox is listed in Settings -> Apps -> Installed apps; its Uninstall runs this script from the program's folder
+  with -Uninstall -Pause. Unelevated, -Uninstall asks Windows for an admin itself (for this same script, in Program
+  Files, which only admins can change).
 
   What it puts where:
   C:\Program Files\HWBlackbox     the program, with a Python of its own (only admins can change it: the service
@@ -29,9 +35,27 @@ param(
   [string[]]$Set,
   [switch]$NoStart,
   [string]$Report,
-  [ValidateSet('ask', 'yes', 'no')][string]$PawnIO = 'ask'
+  [ValidateSet('ask', 'yes', 'no')][string]$PawnIO = 'ask',
+  [switch]$Pause
 )
 $ErrorActionPreference = 'Stop'
+# Windows' QuickEdit: a click in a console window starts selecting text, and while it selects, whatever writes to the
+# window waits. 2026-11-06: an update's window sat at "== 9. Check" (its title "Select ...") until it was closed. Off
+# for this window, so a click can't hold the install up.
+try {
+  Add-Type -Namespace HWB -Name Console -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+  $conIn = [HWB.Console]::GetStdHandle(-10)
+  $conMode = [uint32]0
+  if ([HWB.Console]::GetConsoleMode($conIn, [ref]$conMode)) {
+    $conMode = $conMode -bor 0x80                                  # ENABLE_EXTENDED_FLAGS (needed to change QuickEdit)
+    if ($conMode -band 0x40) { $conMode -= 0x40 }                 # ENABLE_QUICK_EDIT_MODE off
+    [void][HWB.Console]::SetConsoleMode($conIn, [uint32]$conMode)
+  }
+} catch { }
 $Service = 'HWBlackbox'
 $TaskName = 'HWBlackboxAgent'
 $Dest = Join-Path $env:ProgramFiles 'HWBlackbox'
@@ -39,6 +63,7 @@ $Data = Join-Path $env:ProgramData 'HWBlackbox'
 $Py = Join-Path $Dest 'python\pythonw.exe'
 $PyCon = Join-Path $Dest 'python\python.exe'
 $StartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\HW Blackbox.lnk'
+$AppsKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HWBlackbox'     # (Installed apps' entry)
 if (-not $Report) { $Report = Join-Path $env:TEMP 'hwblackbox-install.txt' }
 $script:failed = @()
 $script:warned = @()
@@ -57,6 +82,19 @@ function Say($m) {
   Write-Host $line
 }
 function Fail($m) { $script:failed += $m; Say "FAILED: $m" }
+# -Pause: the window stays a while at the end, so whoever started it (Installed apps' Uninstall) sees how it went:
+# 15 seconds, or until a key; with warnings or failures, 2 minutes.
+function Wait-End {
+  if (-not $Pause) { return }
+  try {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return }
+    $long = $script:warned -or $script:failed
+    Write-Host ''
+    Write-Host $(if ($long) { 'Press a key to close this window.' } else { 'This window closes in 15 seconds, or press a key.' })
+    $until = (Get-Date).AddSeconds($(if ($long) { 120 } else { 15 }))
+    while ((Get-Date) -lt $until -and -not [Console]::KeyAvailable) { Start-Sleep -Milliseconds 100 }
+  } catch { }
+}
 
 function Stop-HWBlackbox {
   $svc = Get-Service -Name $Service -ErrorAction SilentlyContinue
@@ -167,27 +205,59 @@ function Install-PawnIO {
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
            [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin -and $Uninstall) {
+  # Installed apps' Uninstall starts this unelevated: Windows asks for an admin, for this same script (in Program
+  # Files, where only admins can change it), in a window of its own; this one waits for it.
+  Write-Host 'HW Blackbox: removing it needs admin rights. Windows asks for them now.'
+  $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Uninstall')
+  if ($RemoveData) { $a += '-RemoveData' }
+  if ($Pause) { $a += '-Pause' }
+  if ($Report -ne (Join-Path $env:TEMP 'hwblackbox-install.txt')) { $a += @('-Report', "`"$Report`"") }
+  try { $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $a; exit $p.ExitCode }
+  catch {
+    Write-Host "HW Blackbox was not removed: Windows didn't get admin rights. Try again, and choose Yes when it asks."
+    $script:failed += 'no admin rights'
+    Wait-End
+    exit 1
+  }
+}
 "HW Blackbox install: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), user $env:USERNAME, from $PSScriptRoot" | Out-File $Report -Encoding utf8
 if (-not $admin) { Say 'NOT elevated: run this in an elevated PowerShell'; exit 1 }
 if (-not [Environment]::Is64BitOperatingSystem) { Say 'HW Blackbox needs 64-bit Windows'; exit 1 }
 
 # ---------------------------------------------------------------------------------------------------------------------
 if ($Uninstall) {
+  # (out of the program's folder first: this script may be running from it, and a process's current folder can't be
+  # removed. Set-Location only moves PowerShell's own idea of it; the process's is CurrentDirectory. PowerShell has
+  # read the whole script already, so removing the file itself is fine.)
+  Set-Location $env:SystemRoot
+  [Environment]::CurrentDirectory = $env:SystemRoot
   Stop-HWBlackbox
   if (Get-Service -Name $Service -ErrorAction SilentlyContinue) { sc.exe delete $Service | Out-Null; Say 'removed the service' }
   if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Say 'removed the agent task'
   }
   if (Test-Path $StartMenu) { Remove-Item $StartMenu -Force; Say 'removed the Start menu shortcut' }
-  if (Test-Path $Dest) { Remove-Item $Dest -Recurse -Force; Say "removed $Dest" }
+  if (Test-Path $AppsKey) { Remove-Item $AppsKey -Recurse -Force; Say 'removed it from Installed apps' }
+  if (Test-Path $Dest) {
+    # (a moment for the processes just ended to let go of their files, then once more)
+    $gone = $false
+    foreach ($try in 1..3) {
+      try { Remove-Item $Dest -Recurse -Force -ErrorAction Stop; $gone = $true; break }
+      catch { $why = $_.Exception.Message; Start-Sleep -Seconds 2 }
+    }
+    if ($gone) { Say "removed $Dest" }
+    else { Warn "$Dest couldn't all be removed ($why): delete what's left after a restart" }
+  }
   if ($RemoveData -and (Get-OwnAttributes $Data)) {
     # (rmdir removes a link it meets without going into it; Windows PowerShell's Remove-Item -Recurse can follow one)
     if ((Get-OwnAttributes $Data) -band [IO.FileAttributes]::ReparsePoint) { & cmd.exe /c rmdir "$Data" }
     else { & cmd.exe /c rmdir /s /q "$Data" }
     Say "removed $Data"
   }
-  elseif (Test-Path $Data) { Say "kept the data in $Data" }
-  Say 'DONE (uninstalled)'
+  elseif (Test-Path $Data) { Say "kept the data in $Data (its logs, reports and settings; delete the folder to remove them)" }
+  Say $(if ($script:warned) { "DONE (uninstalled) WITH WARNINGS: $($script:warned -join '; ')" } else { 'DONE (uninstalled)' })
+  Wait-End
   exit 0
 }
 
@@ -272,7 +342,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Pr
   -Description 'HW Blackbox''s session agent: the screens, the app in front, sign-outs, and the dashboard.' -Force | Out-Null
 Say "registered $TaskName (group $users)"
 
-Say '== 7. The Start menu shortcut'
+Say '== 7. The Start menu shortcut, and Installed apps'
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($StartMenu)
 $lnk.TargetPath = $Py
@@ -282,6 +352,28 @@ $lnk.IconLocation = "$env:SystemRoot\System32\perfmon.exe,0"
 $lnk.Description = 'HW Blackbox: the dashboard'
 $lnk.Save()
 Say "made $StartMenu"
+# Settings -> Apps -> Installed apps: its Uninstall runs the installed copy of this script (which asks for an admin).
+# Nice to have, so never a reason to stop: a failure here is a warning, and the install carries on to start it.
+# (Not "$uninstall": PowerShell's names ignore case, and that's this script's -Uninstall switch. The first 1.0.11
+# build stopped here, before starting the service.)
+try {
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $appsUninstall = "`"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Dest 'install.ps1')`" -Uninstall -Pause"
+  New-Item -Path $AppsKey -Force | Out-Null
+  $entry = [ordered]@{
+    DisplayName = 'HW Blackbox'; DisplayVersion = [string]$manifest.version; Publisher = 'James Cupps'
+    Comments = 'A hardware monitor and black box for Windows'; InstallLocation = $Dest
+    DisplayIcon = "$env:SystemRoot\System32\perfmon.exe,0"; UninstallString = $appsUninstall
+    URLInfoAbout = 'https://github.com/jamesccupps/HW-Blackbox'
+    URLUpdateInfo = 'https://github.com/jamesccupps/HW-Blackbox/releases'
+    HelpLink = 'https://github.com/jamesccupps/HW-Blackbox#readme'; InstallDate = (Get-Date -Format 'yyyyMMdd')
+  }
+  foreach ($k in $entry.Keys) { New-ItemProperty -Path $AppsKey -Name $k -Value $entry[$k] -PropertyType String -Force | Out-Null }
+  foreach ($k in 'NoModify', 'NoRepair') { New-ItemProperty -Path $AppsKey -Name $k -Value 1 -PropertyType DWord -Force | Out-Null }
+  New-ItemProperty -Path $AppsKey -Name EstimatedSize -PropertyType DWord -Force `
+    -Value ([int]([long]$manifest.bytes / 1KB)) | Out-Null                      # (in KB)
+  Say 'listed in Settings -> Apps -> Installed apps (its Uninstall removes HW Blackbox and keeps the data)'
+} catch { Warn "listing it in Installed apps: $($_.Exception.Message) (Uninstall.cmd still removes it)" }
 
 if ($NoStart) { Say 'DONE (not started: -NoStart)'; exit 0 }
 
@@ -304,6 +396,7 @@ Say '== 9. Check'
 $status = Join-Path $Data 'state\status.json'
 $deadline = (Get-Date).AddSeconds(90)
 $st = $null
+Say 'waiting for the service''s first readings (usually 10-40 seconds)'
 do {
   Start-Sleep -Seconds 3
   if ((Test-Path $status) -and (Get-Item $status).LastWriteTime -gt $t0) {
@@ -316,13 +409,17 @@ else {
   if ($st.sensors) {
     Say "sensors: LibreHardwareMonitor $($st.sensors.lhm), NVML $($st.sensors.nvml), admin $($st.sensors.admin), $($st.sensors.sensors) sensors, rails $($st.sensors.rails_ok), CPU temperature $($st.sensors.cpu_temp_ok)"
     if (-not $st.sensors.admin) { Fail 'the sensors are not elevated' }
-    if (-not $st.sensors.rails_ok) { Fail ('no rail voltages' + $(if (-not $pawn) { ": $pawnHint" } else { ' (the board''s sensor chip may not be supported)' })) }
+    # (a laptop, or a board whose chip can't be read: no rails to read, and no fault. Without the driver, step 1 has
+    # said so already. Until 1.0.11 every laptop's install ended "DONE WITH PROBLEMS: no rail voltages".)
+    if ($st.attributes.rails -eq 'none on this PC') { Say "rails: none on this PC ($($st.attributes.board_note))" }
+    elseif (-not $st.sensors.rails_ok -and $pawn) { Fail 'no rail voltages (the board''s sensor chip didn''t answer)' }
   } else { Fail 'the sensors have not started' }
 }
 $me = $env:USERNAME
 $hbFile = Get-ChildItem (Join-Path $Data 'sessions') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'agent.json' } |
   Where-Object { (Test-Path $_) -and (Get-Item $_).LastWriteTime -gt $t0 } | Select-Object -First 1
 $deadline = (Get-Date).AddSeconds(45)
+if (-not $hbFile) { Say 'waiting for the session agent (up to 45 seconds)' }
 while (-not $hbFile -and (Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 3
   $hbFile = Get-ChildItem (Join-Path $Data 'sessions') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'agent.json' } |

@@ -311,8 +311,26 @@ def run(dry_run=False, pretend=None, from_zip=None, sha256=None, staging=None, o
     return 0 if code == "started" else code
 
 
+def no_quick_edit():
+    """QuickEdit off for this window: a click in it starts selecting text, and while it selects, whatever writes to it
+    waits (2026-11-06: the update's installer sat at its last step, the title "Select ...", until it was closed). The
+    installer turns it off too; this covers the download before it."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.GetStdHandle.restype = ctypes.c_void_p
+        h = ctypes.c_void_p(k.GetStdHandle(-10))
+        mode = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            k.SetConsoleMode(h, ctypes.c_uint32((mode.value | 0x80) & ~0x40))
+    except Exception:
+        pass
+
+
 def _run(dry_run, pretend, from_zip, sha256, staging, out):
     from . import winapi
+    if not dry_run:
+        no_quick_edit()
     cur = parse_version(pretend) if pretend else current()
     if cur is None:
         out("not a version: %r" % pretend)
