@@ -729,5 +729,175 @@ class HardeningTest(TempData):
                 s.server_close()
 
 
+class FakeHw:
+    """A LibreHardwareMonitor device: its type, name, sensors, and an Update() that can be made to hang."""
+    def __init__(self, kind, sensors, gate=None):
+        self.HardwareType, self.Name, self.SubHardware, self.gate = kind, kind + " chip", [], gate
+        self.Sensors = [type("S", (), {"SensorType": t, "Name": n, "Value": v})() for t, n, v in sensors]
+
+    def Update(self):
+        if self.gate is not None:
+            self.gate.wait(10)
+
+
+class RailsLaneTest(TempData):
+    """2026-11-05: a core kept busy all night by another program held up every CPU read, and the rails, read on the same
+    thread, slowed to 2 a second. The CPU now has a lane (and a lock) of its own."""
+
+    def backend(self, gate=None):
+        import threading
+        from hwblackbox.sensors import LhmBackend
+        b = LhmBackend.__new__(LhmBackend)
+        b.error, b.gpu, b.names = None, False, {}
+        b.lock, b.cpu_lock = threading.Lock(), threading.Lock()
+        b.computer = type("C", (), {"Hardware": [
+            FakeHw("Cpu", [("Temperature", "Core (Tctl/Tdie)", 52.0), ("Power", "Package", 14.2)], gate),
+            FakeHw("SuperIO", [("Voltage", "+12V", 12.168), ("Voltage", "+5V", 5.04), ("Voltage", "Vcore", 1.2)])]})()
+        return b
+
+    def test_a_held_up_cpu_read_doesnt_hold_up_the_rails(self):
+        import threading
+        gate = threading.Event()
+        b = self.backend(gate)
+        t = threading.Thread(target=b.read_cpu, daemon=True)
+        t.start()                                    # (the CPU read now waits on its "busy core", holding its lock)
+        time.sleep(0.1)
+        t0 = time.monotonic()
+        fast = b.read_fast()
+        self.assertLess(time.monotonic() - t0, 1)
+        self.assertEqual(fast[("SuperIO", "Voltage", "+12V")], 12.168)
+        self.assertNotIn(("Cpu", "Temperature", "Core (Tctl/Tdie)"), fast)
+        gate.set()
+        t.join(5)
+
+    def test_rows_take_the_cpu_lanes_newest_reading(self):
+        from hwblackbox import sensors
+        s = sensors.Sampler.__new__(sensors.Sampler)
+        s.lhm, s.admin, s.cpu_mark, s.ram_total_gb, s.lhm_gpu, s.last_nv = self.backend(), True, None, None, False, {}
+        s.nvml = type("N", (), {"read": lambda self: {}})()
+        import psutil
+        s.psutil = psutil
+        s.cpu_lane, s.cpu_last = False, None
+        s.read_cpu()                                                # (the lane's read)
+        s.cpu_lane = True
+        calls = []
+        real = s.lhm.read_cpu
+        s.lhm.read_cpu = lambda: calls.append(1) or real()
+        row = s.sample_fast()
+        self.assertEqual((row["v12_v"], row["cpu_temp_c"], row["cpu_power_w"]), (12.168, 52.0, 14.2))
+        self.assertEqual(calls, [])                                 # the rails lane never reads the CPU itself
+        s.cpu_last = (time.monotonic() - 5, s.cpu_last[1])          # the CPU lane held up for 5 s
+        row = s.sample_fast()
+        self.assertEqual((row["v12_v"], row["cpu_temp_c"], row["cpu_power_w"]), (12.168, "", ""))
+        row, _ = s.sample()                                         # (the 5-second row still takes a 5 s old one)
+        self.assertEqual((row["v12_v"], row["cpu_temp_c"]), (12.168, 52.0))
+        self.assertEqual(calls, [])
+        s.cpu_last = (time.monotonic() - 60, s.cpu_last[1])
+        row, _ = s.sample()
+        self.assertEqual(row["cpu_temp_c"], "")
+
+    def status(self, fast_hz, cpu_age=0.5, cpu_temp_ok=True):
+        from hwblackbox import status
+
+        class Sens:
+            def status(self):
+                return {"last_sample_age_s": 2, "admin": True, "rails_ok": True, "cpu_temp_ok": cpu_temp_ok,
+                        "fast_hz": fast_hz, "cpu_age_s": cpu_age}
+
+            def rails_on(self):
+                return True
+
+        none = lambda *a: None                                                     # noqa: E731
+        svc = type("Svc", (), {})()
+        svc.cfg, svc.sensors, svc.want_sensors, svc.started, svc.test = config.defaults(), Sens(), True, 0, False
+        svc.watcher = type("W", (), {"events": None, "notes": {}, "logs_mb": 1})()
+        svc.agents = type("A", (), {"view": []})()
+        svc.agent_down = {}
+        svc.ports = type("P", (), {"listed": False, "error": None})()
+        svc.disks = type("D", (), {"free_gb": none, "problems": lambda self, cfg: []})()
+        svc.thread_ages, svc.STUCK = lambda: {}, {}
+        return status.build(svc)
+
+    def test_a_slow_rails_lane_is_a_note_not_a_problem(self):
+        state, problems, attrs = self.status(2.0)
+        self.assertEqual((state, problems), ("ok", []))
+        self.assertEqual(attrs["rails_note"], "read 2.0 times a second instead of 4: still read, only less often")
+        self.assertNotIn("rails_note", self.status(4.0)[2])
+        from hwblackbox import status
+        self.assertNotIn("rails_note", status.HA_KEYS)              # (the page shows it; Home Assistant doesn't get it)
+
+    def test_a_held_up_cpu_lane_says_so(self):
+        _s, problems, _a = self.status(4.0, cpu_age=42, cpu_temp_ok=False)
+        self.assertTrue(problems[0].startswith("No CPU readings for 42 s"))
+        _s, problems, _a = self.status(4.0, cpu_age=0.5, cpu_temp_ok=False)
+        self.assertEqual(problems, ["No CPU temperature (the sensor driver, PawnIO, may be gone)"])
+
+
+class CpuLogTest(TempData):
+    """Each program's CPU use, minute by minute: Windows keeps no such history."""
+
+    def snap(self, procs):
+        from hwblackbox.winapi import Proc
+        return {pid: Proc(name, 1, 1, created, int(cpu_s * 1e7), 0) for pid, (name, created, cpu_s) in procs.items()}
+
+    def test_a_minute_by_program(self):
+        from unittest import mock
+        from hwblackbox import cpulog
+        log = cpulog.CpuLog(183)
+        t0 = time.time()
+        old = t0 - 3600
+        with mock.patch.object(cpulog, "interrupt_seconds", side_effect=[100.0, 100.9]):
+            log.look(self.snap({1752: ("dwm.exe", old, 500.0), 10: ("chrome.exe", old, 30.0),
+                                11: ("chrome.exe", old, 20.0), 77: ("python.exe", old, 9.0),
+                                88: ("idle.exe", old, 1.0)}), now=0, wall=t0)
+            log.look(self.snap({1752: ("dwm.exe", old, 559.0),                 # a core flat out
+                                10: ("chrome.exe", old, 33.0), 11: ("chrome.exe", old, 21.5),
+                                77: ("python.exe", t0 + 30, 2.0),              # pid 77 again: a new process
+                                90: ("build.exe", t0 + 40, 4.0),               # started since the last look
+                                91: ("old.exe", old, 50.0),                    # (missing from the last look: not counted)
+                                88: ("idle.exe", old, 1.1)}), now=60, wall=t0 + 60)
+            rows = log.minute()
+        got = {r[0]: (round(r[1], 2), r[2], r[3]) for r in rows}
+        self.assertEqual(got["dwm.exe"], (59.0, 1, 1752))
+        self.assertEqual(got["chrome.exe"], (4.5, 2, 10))
+        self.assertEqual(got["build.exe"], (4.0, 1, 90))
+        self.assertEqual(got["python.exe"], (2.0, 1, 77))
+        self.assertNotIn("idle.exe", got)                                  # 0.1 s: under 1 % of a core
+        self.assertNotIn("old.exe", got)
+        self.assertEqual(got[cpulog.INTERRUPTS][0], 0.9)
+        self.assertEqual(got[cpulog.ALL][0], round(59 + 4.5 + 4 + 2 + 0.1 + 0.9, 2))
+        self.assertEqual([r[0] for r in rows][:4], ["dwm.exe", "chrome.exe", "build.exe", "python.exe"])
+        on_disk = cpulog.read_rows(cpulog.path_for(dt.date.today()))
+        self.assertEqual([(r[2], r[3]) for r in on_disk][0], ("dwm.exe", 59.0))
+        self.assertEqual(on_disk[0][1], 60.0)
+        self.assertTrue(log.busiest()[0].startswith("dwm.exe: 98 % of one core (1 process, the busiest pid 1752)"))
+
+    def test_the_page(self):
+        from hwblackbox import cpulog
+        from hwblackbox.dashboard import server
+        now = time.time()
+        with open(cpulog.path_for(dt.date.today()), "w", encoding="utf-8") as f:
+            f.write(",".join(cpulog.COLUMNS) + "\n")
+            for k in range(30, 0, -1):                       # the last half hour: dwm.exe a core flat out
+                t = dt.datetime.fromtimestamp(now - k * 60).isoformat(timespec="seconds")
+                f.write("%s,60.0,dwm.exe,60.0,1,1752\n%s,60.0,chrome.exe,%.1f,9,10\n%s,60.0,System interrupts,0.6,0,\n"
+                        "%s,60.0,(all),%.1f,250,\n" % (t, t, 3 + (k == 10) * 30, t, t, 63.6 + (k == 10) * 30))
+        with open(paths.P.status, "w", encoding="utf-8") as f:
+            json.dump({"pc": {"threads": 12}}, f)
+        server._cpu_files.clear()
+        d = server.api_cpu({"hours": "1", "points": "60"})
+        self.assertEqual([p["name"] for p in d["programs"]], ["dwm.exe", "chrome.exe", "System interrupts"])
+        dwm, chrome = d["programs"][0], d["programs"][1]
+        self.assertEqual((dwm["avg_cores"], dwm["peak_cores"], dwm["avg_pct"]), (1.0, 1.0, 8.33))
+        self.assertEqual(chrome["peak_cores"], 0.55)
+        self.assertAlmostEqual(chrome["peak_at"], now - 600, delta=1.5)
+        self.assertEqual(d["logged_s"], 1800)
+        dw = d["series"]["dwm.exe"]
+        self.assertTrue(all(v is None for v in dw[:25]))                   # before the log: a gap, not 0
+        self.assertEqual([v for v in dw if v is not None], [8.33] * 30)
+        self.assertEqual([v for v in d["total"] if v is not None][-1], 8.83)
+        self.assertEqual([v for v in d["other"] if v is not None][-1], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ def slug(text):
 
 def defaults():
     return {
-        # every reading every interval_s; the voltage rails and the CPU every rails_interval_s (0: off). lhm_gpu:
+        # every reading every interval_s; the voltage rails every rails_interval_s (0: off). lhm_gpu:
         # LibreHardwareMonitor's GPU readings, for AMD and Intel GPUs ("auto": when there's no NVIDIA GPU, which is
         # read through NVML; true / false)
         "sensors": {"interval_s": 5.0, "rails_interval_s": 0.25, "keep_days": 183, "rails_keep_days": 7,

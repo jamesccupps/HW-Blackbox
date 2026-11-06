@@ -1,8 +1,9 @@
 r"""The service: the sensors, the watcher, the ports and the status, under one roof, from boot.
 
-Threads: "sensors" (every 5 s) and "rails" (4 a second) log the sensors; "watcher" ticks every second (the watched
-apps' exits every second, the process list every 2 s, Windows' records and the ports every 15 s, the session agents
-and the status every 30 s, the drives' free space and Home Assistant every minute); "supervisor" checks every 5 s that all three are moving,
+Threads: "sensors" (every 5 s), "rails" (4 a second) and "cpu" (the CPU's sensors, once a second) log the sensors;
+"watcher" ticks every second (the watched apps' exits every second, the process list every 2 s, Windows' records and
+the ports every 15 s, the session agents and the status every 30 s, the drives' free space, each program's CPU use
+and Home Assistant every minute); "supervisor" checks every 5 s that the sensors, the rails and the watcher are moving,
 and only then pushes back the dead man's switch (deadman.py): a part that stops moving gets the process ended within
 3 minutes, and the service manager starts it again.
 
@@ -160,6 +161,7 @@ class Service:
                         w.scan()
                     if tick % 60 == 0:
                         w.sample_memory()
+                        w.sample_cpu()
                     if tick % 15 == 0:
                         w.check_events()
                     if tick % 15 == 4:

@@ -1,12 +1,20 @@
 r"""The sensors: every reading every 5 s, the voltage rails 4 times a second, into crash-safe CSVs.
 
   logs\flight_YYYYMMDD.csv   every 5 s: the key readings (CPU and GPU temperature, power, load, the rails, memory...)
-  logs\rails_YYYYMMDD.csv    4 a second: the +12/+5/+3.3 V rails, Vcore, SoC, CPU power and temperature: the readings
-                             that can show a power problem on the way down
+  logs\rails_YYYYMMDD.csv    4 a second: the +12/+5/+3.3 V rails, Vcore, SoC, and the CPU's power and temperature (its
+                             newest reading, taken once a second): the readings that can show a power problem on the
+                             way down
   state\sensors.json         every sensor (about 85 on a typical desktop), with its minimum, maximum and average since
                              the service started, for the dashboard
 
 Every row is flushed and fsync'd, so the rows up to a hard power loss survive on disk.
+
+Three lanes, each on a thread of its own: the rails (4 a second), the CPU (once a second) and everything (every 5 s).
+The CPU has a lane of its own because reading it takes the reading thread onto each core in turn (LibreHardwareMonitor
+reads each core's own registers there), and a core kept busy by a program of higher priority holds that read up for
+seconds. On 2026-11-05 a core was kept busy all night (most likely by Windows' desktop compositor), and the rails,
+read on the same thread then, slowed to 2 a second; a test with a busy thread of high priority on one core took them
+to 0.3 a second. Now the other lanes take the CPU lane's newest reading, and only the CPU's columns wait.
 
 Sources: LibreHardwareMonitorLib (through pythonnet) for the CPU, the board's sensor chip (temperatures, voltages,
 fans) and a Corsair digital power supply; NVML for an NVIDIA GPU; Windows for the CPU load and memory. The CPU's and
@@ -37,13 +45,18 @@ FAST_COLUMNS = [
     "cpu_power_w", "cpu_temp_c", "psu_v12_v", "psu_power_w", "psu_temp_c",
 ]
 
+CPU_INTERVAL = 1.0      # seconds between the CPU lane's reads
+FAST_CPU_AGE = 1.5      # the oldest CPU reading a rails row takes (older: its CPU columns stay blank)
+SLOW_CPU_AGE = 15.0     # ... and a 5-second row (a CPU lane held up longer leaves them blank: see status)
+
 
 class LhmBackend:
     """LibreHardwareMonitorLib through pythonnet."""
 
-    # The groups the fast lane reads (the rails, the CPU, a digital power supply), so a sub-second rate costs a
-    # fraction of a full sweep.
-    FAST_HW = ("Motherboard", "SuperIO", "Cpu", "Psu")
+    # The groups the rails lane reads (the board's sensor chip, a digital power supply), so a sub-second rate costs a
+    # fraction of a full sweep. The CPU is read by a lane of its own (CPU_HW).
+    FAST_HW = ("Motherboard", "SuperIO", "Psu")
+    CPU_HW = ("Cpu",)
 
     def __init__(self, gpu=False):
         self.computer = None
@@ -51,8 +64,11 @@ class LhmBackend:
         self.gpu = gpu
         self.names = {}                  # hardware key -> its name ("AMD Ryzen 5 5600G", "ITE IT8688E"...)
         # LibreHardwareMonitor isn't thread-safe, and the CPU's power figure is the difference between two reads: the
-        # two lanes take turns, one device at a time.
+        # lanes take turns, one device at a time. The CPU has a lock of its own, so a CPU read held up by a busy core
+        # holds up nothing else (the CPU and the board's chip don't share anything: each is a driver module of its own,
+        # and the buses they use have Windows-wide locks that every monitoring program takes).
         self.lock = threading.Lock()
+        self.cpu_lock = threading.Lock()
         try:
             if not os.path.exists(os.path.join(paths.LIB, "LibreHardwareMonitorLib.dll")):
                 raise FileNotFoundError("LibreHardwareMonitorLib.dll isn't in %s" % paths.LIB)
@@ -99,10 +115,10 @@ class LhmBackend:
         except Exception as exc:
             self.error = "%s: %s" % (type(exc).__name__, exc)
 
-    def _read(self, groups=None):
+    def _read(self, groups=None, skip=()):
         """{(hardware key, sensor_type, sensor_name): value} for every device, or only the top-level devices whose
-        type is in `groups`. The hardware key is its type ("Cpu", "SuperIO", "GpuAmd"), with "#2", "#3"... for a
-        second and third device of the same type (two GPUs), in Windows' order."""
+        type is in `groups`, less those in `skip`. The hardware key is its type ("Cpu", "SuperIO", "GpuAmd"), with
+        "#2", "#3"... for a second and third device of the same type (two GPUs), in Windows' order."""
         out = {}
         if self.computer is None:
             return out
@@ -127,16 +143,20 @@ class LhmBackend:
                 walk(sub)
 
         for hw in self.computer.Hardware:
-            if groups is None or str(hw.HardwareType) in groups:
-                with self.lock:
+            kind = str(hw.HardwareType)
+            if (groups is None or kind in groups) and kind not in skip:
+                with self.cpu_lock if kind in self.CPU_HW else self.lock:
                     walk(hw)
         return out
 
-    def read_all(self):
-        return self._read()
+    def read_all(self, skip=()):
+        return self._read(skip=skip)
 
     def read_fast(self):
         return self._read(self.FAST_HW)
+
+    def read_cpu(self):
+        return self._read(self.CPU_HW)
 
 
 class NvmlBackend:
@@ -292,6 +312,24 @@ class Sampler:
         self.last_nv = {}
         self.ram_total_gb = None
         self.cpu_mark = None             # (time, idle time, total time): the CPU load from the system's own counters
+        # Once the CPU lane runs (Sensors._cpu), the other lanes don't read the CPU: they take the lane's newest
+        # reading, (time.monotonic(), {(key, type, name): value}), if it's recent enough.
+        self.cpu_lane = False
+        self.cpu_last = None
+
+    def read_cpu(self):
+        """The CPU lane's read: the CPU's sensors, kept for the other lanes."""
+        d = self.lhm.read_cpu()
+        self.cpu_last = (time.monotonic(), d)
+        return d
+
+    def cpu_now(self, max_age):
+        """The CPU's sensors for a row: the CPU lane's newest reading if it's at most max_age seconds old (else none:
+        blank CPU columns rather than old values passed off as new); without the lane, a read of its own."""
+        if not self.cpu_lane:
+            return dict(self.read_cpu())
+        last = self.cpu_last
+        return dict(last[1]) if last and time.monotonic() - last[0] <= max_age else {}
 
     def cpu_load(self):
         t = self.psutil.cpu_times()
@@ -304,7 +342,8 @@ class Sampler:
     def sample(self):
         s = {c: "" for c in COLUMNS}
         s["timestamp"] = now_iso()
-        lhm = self.lhm.read_all()
+        lhm = self.lhm.read_all(skip=LhmBackend.CPU_HW)
+        lhm.update(self.cpu_now(SLOW_CPU_AGE))
         if lhm and self.admin:
             # The CPU's own sensors read zeros or made-up values without the ring-0 driver: only trust them elevated.
             v = _pick(lhm, "Cpu", "Temperature", ("tctl", "tdie"))
@@ -347,14 +386,15 @@ class Sampler:
         return s, lhm
 
     def sample_fast(self):
-        """The narrow row: rails, Vcore/SoC, CPU package power and temperature, and a digital power supply's own
-        channels. No NVML and no Windows counters: they're most of the cost of a full sample, and none of them can
-        show a rail sagging."""
+        """The narrow row: rails, Vcore/SoC, CPU package power and temperature (the CPU lane's newest), and a digital
+        power supply's own channels. No NVML and no Windows counters: they're most of the cost of a full sample, and
+        none of them can show a rail sagging."""
         s = {c: "" for c in FAST_COLUMNS}
         s["timestamp"] = now_iso(ms=True)
         lhm = self.lhm.read_fast()
         if not lhm:
             return s
+        lhm.update(self.cpu_now(FAST_CPU_AGE))
         s["v12_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("+12",)), 3)
         s["v5_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("+5",), ("5vsb", "standby")), 3)
         s["v33_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("3vcc", "+3.3"), ("3vsb", "avcc", "vbat", "standby")), 3)
@@ -536,6 +576,9 @@ class Sensors:
             pass
 
     def start(self, stop):
+        if self.sampler.lhm.computer is not None:
+            self.sampler.cpu_lane = True             # (open()'s sample read the CPU: the first rows have that)
+            threading.Thread(target=self._cpu, args=(stop,), name="cpu", daemon=True).start()
         threading.Thread(target=self._slow, args=(stop,), name="sensors", daemon=True).start()
         if self.rails_on():
             threading.Thread(target=self._fast, args=(stop,), name="rails", daemon=True).start()
@@ -589,6 +632,24 @@ class Sensors:
             stop.wait(max(0.0, wait))
         logger.close()
 
+    def _cpu(self, stop):
+        """The CPU's sensors once a second, for the other two lanes. Not watched by the service's supervisor: a core
+        kept busy by another program can hold this lane up for as long as it likes, and that's no reason for the
+        service to end itself. A CPU lane held up for long shows as blank CPU columns and in the status."""
+        winapi.raise_thread_priority(highest=True)
+        due = time.monotonic()
+        while not stop.is_set():
+            self.beats["cpu"] = time.monotonic()
+            try:
+                self.sampler.read_cpu()
+            except Exception:
+                pass
+            due += CPU_INTERVAL
+            wait = due - time.monotonic()
+            if wait < -CPU_INTERVAL:
+                due, wait = time.monotonic(), 0.0
+            stop.wait(max(0.0, wait))
+
     def _fast(self, stop):
         """On its own thread, so a slow read in the 5-second lane can never stall it. It keeps to a schedule: Windows
         rounds every wait up to its 15.6 ms tick, so waiting "the rest of the interval" ran 4 % slow. A late row makes
@@ -627,7 +688,9 @@ class Sensors:
         elif prev:
             self.fast_mark = prev                 # (too soon after the last look to measure: keep the older mark)
         s = self.sampler
+        cpu_last = s.cpu_last if s and s.cpu_lane else None
         return {"lhm": "ok" if s and s.lhm.computer else ((s.lhm.error if s else None) or "off"),
+                "cpu_age_s": None if cpu_last is None else round(now - cpu_last[0], 1),
                 "nvml": "ok" if s and s.nvml.handle else ((s.nvml.error if s else None) or "off"),
                 "admin": s.admin if s else None, "sensors": self.lhm_count, "last_sample": row.get("timestamp"),
                 "last_sample_age_s": None if written is None else round(now - written, 1),

@@ -45,8 +45,8 @@ against the release's manifest. More options are under [Install, in detail](#ins
   controllers and Corsair digital power supplies. An NVIDIA GPU is read through NVML, an AMD or Intel GPU through
   LibreHardwareMonitor, and Windows supplies the CPU load and memory.
   - The key readings go to `flight_YYYYMMDD.csv`.
-  - The +12 / +5 / +3.3 V rails, Vcore, SoC and CPU power and temperature go to `rails_YYYYMMDD.csv`, four times a
-    second.
+  - The +12 / +5 / +3.3 V rails, Vcore and SoC go to `rails_YYYYMMDD.csv`, four times a second, with the CPU's power
+    and temperature (read once a second).
   - Every row is written to disk before the next one is taken (fsync), so the last rows before a sudden power loss
     survive.
 - **Power-offs.** At the boot after a shutdown that wasn't clean (Windows' Kernel-Power 41 and EventLog 6008), it
@@ -69,6 +69,9 @@ against the release's manifest. More options are under [Install, in detail](#ins
   that should always be listening but isn't.
 - **Sessions.** Sign-ins, locks and sign-outs; sleep and resume; screen changes (resolution, position, scaling); the
   taskbar coming back after Explorer restarts; the clock being changed.
+- **CPU by program.** Every program's share of the CPU, minute by minute, all its processes together, plus the time
+  the processors spent on drivers' interrupts. Windows keeps no such history: Task Manager only shows now. So when
+  the CPU was busy at 3 in the morning, the Processes tab says which program it was.
 - **Disk space.** Every fixed drive's free space, once a minute, to chart over days. The Windows drive is a problem
   when it gets low or fills up fast (an update unpacking, a download, a runaway log). It also notes a Windows update
   that's waiting for a restart.
@@ -92,6 +95,9 @@ What keeps it reliable:
   Windows starts it again. It's a native thread-pool timer, so it still works when Python itself is wedged.
 - **The rails lane has its own high-priority thread** and keeps to a schedule. A slow GPU read can't hold it up, and
   Windows' 15.6 ms timer rounding doesn't make it drift.
+- **The CPU has a lane of its own.** Reading the CPU's sensors means visiting each core in turn, and a core kept busy
+  by a program of higher priority can hold that up for seconds. So the CPU is read once a second on its own thread,
+  and the rails never wait for it.
 - **The service starts the agent again** through its scheduled task if the agent stops in a signed-in session.
 - **Ports come from Windows' own listener table.** That's `GetExtendedTcpTable` with `TCP_TABLE_OWNER_PID_LISTENER`,
   not the connection table's state field, which is garbage on some Windows builds (netstat and
@@ -142,7 +148,7 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 | **Events** | the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' records |
 | **Ports** | who listens where, and port problems |
 | **Incidents** | the power-off and crash reports |
-| **Processes** | what's using the CPU and memory right now |
+| **Processes** | what's using the CPU and memory right now, and every program's CPU use over the last week (pick the programs to chart) |
 
 The header shows the page's version. After an update, a page that was already open says so and offers a reload.
 
@@ -253,6 +259,7 @@ triggers:
 | `config.json` | the settings |
 | `logs\flight_YYYYMMDD.csv` | every 5 s: the key readings (kept 183 days, about 2.5 MB a day) |
 | `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
+| `logs\cpu_YYYYMMDD.csv` | every minute: each busy program's CPU time, a row per program (kept 183 days, about 1 MB a day) |
 | `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
 | `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line |
 | `state\status.json` | the status, every 30 s |
@@ -292,7 +299,9 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
   Assistant.
 - **The app in front is kept for the last 3 minutes only**, as a rolling window. It's copied into a record when
   Windows shuts down or restarts, and into an app's incident report; those are kept (records 183 days, app reports
-  the same, power-off reports until you delete them). There's no other history of what you use.
+  the same, power-off reports until you delete them).
+- **The CPU history names programs:** each minute, the programs that used at least 1 % of a core, by exe name
+  (`chrome.exe`, `game.exe`), kept 183 days. It doesn't say which account ran them, or what they had open.
 - **On a PC with several accounts, everyone signed in sees the same dashboard:** every account's sessions, the app
   in front included, and every listening program's command line (with password-like values hidden as `***`).
 - **The program can only be changed by admins:** Program Files, with a Python of its own. The service runs as

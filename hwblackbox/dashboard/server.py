@@ -8,7 +8,7 @@ r"""The dashboard's server: one page (index.html) and a read-only JSON API over 
   Events      the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' own records
   Ports       who listens on which port, and port problems
   Incidents   the power-off and app incident reports, to read in place
-  Processes   what's using the CPU and the memory right now
+  Processes   what's using the CPU and the memory right now, and each program's CPU use over the last week
 
 It only reads: HW Blackbox's files, and Windows for the processes and the disks. It listens on 127.0.0.1 (this PC
 only), and answers only requests addressed to it that way, so a web page elsewhere can't reach it through a DNS
@@ -417,6 +417,80 @@ def logged_drives():
     return sorted(seen)
 
 
+# each program's CPU use (logs\cpu_YYYYMMDD.csv, a row per busy program a minute: cpulog) -----------------------------
+
+_cpu_files = {}                 # name -> (size, rows)
+_cpu_lock = threading.Lock()
+
+
+def cpu_rows(day):
+    """A day's rows [(epoch, seconds, program, cpu_s, processes, pid)], parsed again only when the file has grown."""
+    from ..cpulog import path_for, read_rows
+    path = path_for(day)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    name = os.path.basename(path)
+    with _cpu_lock:
+        hit = _cpu_files.get(name)
+        if not hit or hit[0] != size:
+            hit = _cpu_files[name] = (size, read_rows(path))
+            while len(_cpu_files) > 10:
+                _cpu_files.pop(next(iter(_cpu_files)))
+        return hit[1]
+
+
+def api_cpu(q):
+    """Each program's CPU use over the last hours: the busiest programs (average, busiest minute, CPU time) and, for
+    each, its share of the CPU per time bucket. A share is of the whole processor, as Task Manager's: 100 % is every
+    logical processor flat out (one core flat out is 100 / threads)."""
+    from ..cpulog import ALL
+    hours = min(24 * 7, max(0.25, float(q.get("hours") or 6)))
+    points = min(1000, max(20, int(q.get("points") or 240)))
+    n = min(40, max(1, int(q.get("n") or 15)))
+    end = time.time()
+    start = end - hours * 3600
+    st = read_json(paths.P.status) or {}
+    threads = ((st.get("pc") or {}).get("threads")) or psutil.cpu_count() or 1
+    rows = []
+    d = dt.date.fromtimestamp(start)
+    while d <= dt.date.fromtimestamp(end):
+        rows.extend(r for r in cpu_rows(d) if start <= r[0] <= end)
+        d += dt.timedelta(days=1)
+    step = max(60.0, (end - start) / points)
+    nb = int(math.ceil((end - start) / step))
+    covered = [0.0] * nb                         # the seconds logged in each bucket (from the "(all)" rows)
+    total = [0.0] * nb
+    per = collections.defaultdict(lambda: [0.0] * nb)
+    stats = {}                                   # program -> [CPU s, busiest minute's cores, its time, minutes]
+    for t, secs, prog, cpu_s, _k, _pid in rows:
+        b = min(nb - 1, int((t - start) / step))
+        if prog == ALL:
+            covered[b] += secs
+            total[b] += cpu_s
+            continue
+        per[prog][b] += cpu_s
+        s = stats.setdefault(prog, [0.0, 0.0, None, 0])
+        s[0] += cpu_s
+        s[3] += 1
+        if secs > 0 and cpu_s / secs > s[1]:
+            s[1], s[2] = cpu_s / secs, t
+    logged = sum(covered)
+    pct = lambda cpu_s, secs: round(100.0 * cpu_s / (secs * threads), 2) if secs > 0 else None   # noqa: E731
+    top = sorted(stats.items(), key=lambda kv: -kv[1][0])[:n]
+    programs = [{"name": p, "cpu_s": round(s[0], 1), "avg_pct": pct(s[0], logged),
+                 "avg_cores": round(s[0] / logged, 3) if logged else None,
+                 "peak_pct": round(100.0 * s[1] / threads, 2), "peak_cores": round(s[1], 3), "peak_at": s[2],
+                 "minutes": s[3]} for p, s in top]
+    series = {p["name"]: [pct(per[p["name"]][b], covered[b]) for b in range(nb)] for p in programs}
+    listed = [sum(per[p["name"]][b] for p in programs) for b in range(nb)]
+    return {"start": start, "end": end, "step": step, "threads": threads, "logged_s": round(logged),
+            "t": [round(start + (b + 0.5) * step, 1) for b in range(nb)], "programs": programs, "series": series,
+            "total": [pct(total[b], covered[b]) for b in range(nb)],
+            "other": [pct(max(0.0, total[b] - listed[b]), covered[b]) for b in range(nb)]}
+
+
 def api_rails(q):
     """The last minutes of the 4-a-second lane, read from the end of the file(s)."""
     minutes = min(60, max(1, float(q.get("minutes") or 10)))
@@ -797,7 +871,7 @@ def page():
 ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/history": api_history,
           "/api/flight_columns": api_flight_columns, "/api/rails": api_rails, "/api/events": api_events,
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
-          "/api/processes": lambda q: PROCESSES.sample(), "/api/config": api_config,
+          "/api/processes": lambda q: PROCESSES.sample(), "/api/cpu": api_cpu, "/api/config": api_config,
           "/api/ping": lambda q: {"app": APP, "version": VERSION, "pid": os.getpid(), "user": winapi.user_name()}}
 
 

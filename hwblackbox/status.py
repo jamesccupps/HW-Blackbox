@@ -11,6 +11,7 @@ import psutil
 
 from . import VERSION
 from .poweroff import last_dirty_shutdown
+from .sensors import SLOW_CPU_AGE
 from .util import now_iso, parse_iso
 
 _disks = {"at": 0.0, "list": []}
@@ -56,6 +57,7 @@ def host_facts():
     """This PC, as the status file records it (so a copied data folder still says which PC it came from)."""
     v = sys.getwindowsversion()
     return {"host": socket.gethostname(), "boot_epoch": psutil.boot_time(), "disks": disks(),
+            "threads": psutil.cpu_count(),               # (logical processors: what 100 % of the CPU is)
             "windows": "Windows %s, build %d" % ("11" if v.build >= 22000 else "10", v.build)}
 
 # What Home Assistant gets: the facts that change rarely. HA keeps a history row for every change of state OR
@@ -92,13 +94,22 @@ def build(svc):
             if not sens.get("rails_ok"):
                 problems.append("No rail voltages (the sensor driver, PawnIO, may be gone)")
             if not sens.get("cpu_temp_ok"):
-                problems.append("No CPU temperature (the sensor driver, PawnIO, may be gone)")
+                held = sens.get("cpu_age_s")
+                if held is not None and held > SLOW_CPU_AGE:
+                    problems.append("No CPU readings for %d s: reading the CPU's sensors is held up (a core kept busy "
+                                    "by another program, or the sensor driver)" % held)
+                else:
+                    problems.append("No CPU temperature (the sensor driver, PawnIO, may be gone)")
         else:
             a["rails"] = a["cpu_temperature"] = "not elevated"
         fast = cfg["sensors"]["rails_interval_s"]
         hz = sens.get("fast_hz")
+        # A note for the page, not a problem: the rails are still read, only less often, and what they read is what
+        # matters. (The lane stopping is a problem: the supervisor's "stuck".) Until 1.0.7 this was a problem, and a
+        # core kept busy all night by another program sent five phone alerts that read like a fault in the power.
         if svc.sensors.rails_on() and hz is not None and hz < 0.8 / fast:
-            problems.append("The rails lane is slow: %.2f a second (should be %g)" % (hz, round(1 / fast, 2)))
+            a["rails_note"] = "read %.1f times a second instead of %g: still read, only less often" % (
+                hz, round(1 / fast, 2))
     lds = last_dirty_shutdown() or {}
     a["last_power_loss_died_at"] = lds.get("time_of_death")
     a["watcher"] = "running" + (" (test)" if svc.test else "")

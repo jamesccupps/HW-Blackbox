@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hwblackbox import VERSION  # noqa: E402
+from hwblackbox.cpulog import COLUMNS as CPU_COLUMNS  # noqa: E402
 from hwblackbox.disks import COLUMNS as DISK_COLUMNS  # noqa: E402
 from hwblackbox.sensors import COLUMNS, FAST_COLUMNS  # noqa: E402
 
@@ -194,6 +195,36 @@ def main():
         t += dt.timedelta(minutes=1)
     for day, rows_ in disk_rows.items():
         write_csv(os.path.join(logs, "disks_%s.csv" % day), DISK_COLUMNS, rows_)
+    # each program's CPU use, a minute at a time (16 logical processors: 60 s of CPU in a minute is one of them): the
+    # browser and an editor by day, a game and OBS in the evening, and a virus scan at 2 every night
+    cpu_rows, t = {}, start
+    while t <= now:
+        if not (off_at < t < back_at + dt.timedelta(seconds=40) or restart_at < t < restart_back + dt.timedelta(seconds=35)):
+            st, h = m.state(t), t.hour + t.minute / 60
+            w = 1 + 0.35 * math.sin(t.timestamp() / 410) + rnd.uniform(-0.15, 0.15)
+            progs = {"dwm.exe": 1.2 + {"idle": 0, "use": 2.5, "game": 9}[st], "System interrupts": 0.9,
+                     "System": 0.7, "explorer.exe": 0.4 + (st == "use") * 1.2}
+            if st == "use":
+                progs.update({"chrome.exe": 14 * w, "Code.exe": 5 * w, "Discord.exe": 1.6})
+            elif st == "game":
+                progs.update({"Game.exe": 240 * w, "obs64.exe": 38 * w, "Discord.exe": 2.4, "chrome.exe": 3})
+            if 2 <= h < 2.75:                                       # the nightly scan
+                progs["MsMpEng.exe"] = 52 * w
+            if t.minute % 15 == 0:
+                progs["SearchIndexer.exe"] = 3.5
+            rows_ = [(p, round(v * rnd.uniform(0.9, 1.1), 2)) for p, v in progs.items()]
+            rows_ = sorted((r for r in rows_ if r[1] >= 0.6 or r[0] == "System interrupts"), key=lambda r: -r[1])
+            ts = t.isoformat(timespec="seconds")
+            day = cpu_rows.setdefault(t.strftime("%Y%m%d"), [])
+            for p, v in rows_:
+                day.append({"timestamp": ts, "seconds": 60.0, "program": p, "cpu_s": v,
+                            "processes": {"chrome.exe": 23, "Discord.exe": 6, "Code.exe": 9, "System": 1}.get(p, 0 if p == "System interrupts" else 1),
+                            "pid": "" if p == "System interrupts" else 1000 + sum(map(ord, p))})
+            day.append({"timestamp": ts, "seconds": 60.0, "program": "(all)", "cpu_s": round(sum(v for _, v in rows_) + 2.1, 2),
+                        "processes": 287, "pid": ""})
+        t += dt.timedelta(minutes=1)
+    for day, rows_ in cpu_rows.items():
+        write_csv(os.path.join(logs, "cpu_%s.csv" % day), CPU_COLUMNS, rows_)
 
     # the records
     def boot(at, clean, prev_kind):
@@ -442,7 +473,7 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
               "agents": [{"session": 1, "user": USER, "state": "active", "agent": "running", "age": 12, "pid": 7344,
                           "version": VERSION}],
               "ha": {"ok": True, "at": (now - dt.timedelta(seconds=21)).isoformat(timespec="seconds"), "error": None},
-              "pc": {"host": HOST, "windows": "Windows 11, build 26100", "boot_epoch": booted.timestamp(),
+              "pc": {"host": HOST, "windows": "Windows 11, build 26100", "boot_epoch": booted.timestamp(), "threads": 16,
                      "disks": [{"mount": "C:\\", "total_gb": 930.6, "free_gb": 412.6},
                                {"mount": "D:\\", "total_gb": 1863.0, "free_gb": 1210.4}]},
               "cpu_pct": 1.1, "mem_mb": 168.4, "threads": {"watcher": 0.4, "sensors": 2.1, "rails": 0.1},

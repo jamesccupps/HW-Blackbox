@@ -158,8 +158,9 @@ label.chk { display: inline-flex; gap: 6px; align-items: center; color: var(--mu
 .chart svg { width: 100%; display: block; overflow: visible; }
 text.axis { fill: var(--dim); font: 11px var(--mono); }
 .gridline { stroke: var(--line); }
-.tip { position: absolute; pointer-events: none; background: rgba(13,16,22,.96); border: 1px solid var(--line2);
-  border-radius: 8px; padding: 7px 10px; font-size: 12px; white-space: nowrap; display: none; z-index: 5;
+/* (fixed: it's placed at the pointer's window position, which on a scrolled page isn't the page position) */
+.tip { position: fixed; pointer-events: none; background: rgba(13,16,22,.96); border: 1px solid var(--line2);
+  border-radius: 8px; padding: 7px 10px; font-size: 12px; white-space: nowrap; display: none; z-index: 20;
   box-shadow: 0 6px 20px rgba(0,0,0,.4); }
 .tip .t { color: var(--muted); margin-bottom: 3px; }
 .tip .row { display: flex; gap: 10px; justify-content: space-between; font-family: var(--mono); }
@@ -189,6 +190,9 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 .viewer .vbar .btn { margin-left: auto; padding: 3px 10px; font-size: 12.5px; }
 
 .bars td.barcell { width: 40%; }
+tr.pick { cursor: pointer; }
+.swd { display: inline-block; width: 11px; height: 11px; border-radius: 3px; border: 2px solid; margin-right: 8px;
+  vertical-align: -1px; }
 .hbar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .8; }
 .foot { color: var(--dim); font-size: 12px; margin-top: 8px; }
 .err { color: var(--bad); }
@@ -318,6 +322,14 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
       <div><div class="h2" style="margin-top:0">Using memory</div><div class="tablewrap"><table class="bars" id="pr-mem"><thead><tr><th>Process</th><th class="num">PID</th><th class="num">Private</th><th></th></tr></thead><tbody><tr><td colspan="4" class="dim">Loading…</td></tr></tbody></table></div></div>
     </div>
     <div class="foot" id="pr-foot">CPU is each process's share of the whole processor since the last look, like Task Manager. Memory is private bytes (what it has committed). Session 0 is Windows' services; the signed-in sessions are 1 and up.</div>
+    <div class="h2" id="cpu-history">CPU by program, over time</div>
+    <div class="toolbar">
+      <div class="seg" id="pc-range"><button data-h="1">1 hour</button><button data-h="6">6 hours</button><button data-h="24" class="on">24 hours</button><button data-h="72">3 days</button><button data-h="168">7 days</button></div>
+      <span class="spacer"></span><span class="dim" id="pc-info"></span>
+    </div>
+    <div class="chart" id="pc-chart"><div class="dim" style="padding:30px 10px">Loading…</div></div>
+    <div class="tablewrap"><table class="bars" id="pc-table"><thead><tr><th>Program</th><th class="num">Average</th><th class="num">Busiest minute</th><th>When</th><th class="num">CPU time</th><th></th></tr></thead><tbody><tr><td colspan="6" class="dim">Loading…</td></tr></tbody></table></div>
+    <div class="foot" id="pc-foot"></div>
   </section>
 </main>
 <div class="tip" id="tip"></div>
@@ -527,7 +539,7 @@ $("#nv-reload").addEventListener("click", () => location.reload());     // (the 
 new ResizeObserver(() => document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px")).observe($("header"));
 
 // Overview -----------------------------------------------------------------------------------------------------
-let ovSpark = null, ovSparkAt = 0, ovDisk = null;
+let ovSpark = null, ovSparkAt = 0, ovDisk = null, ovCpu = null;
 const diskId = d => "disk:" + d.mount.replace(/\\$/, "");
 TABS.overview = {every: 5000, async load() {
   if (!overview) await header();
@@ -537,6 +549,7 @@ TABS.overview = {every: 5000, async load() {
     ovSpark = await api("/api/history?cols=cpu_temp_c,cpu_power_w,cpu_load_pct,gpu_temp_c,gpu_power_w,gpu_util_pct,ram_pct,v12_v&hours=1&points=120");
     const ids = (o.disks || []).map(diskId);
     ovDisk = ids.length ? await api(`/api/history?cols=${ids.join(",")}&hours=168&points=168`) : null;
+    ovCpu = await api("/api/cpu?hours=1&points=20&n=1");
     ovSparkAt = Date.now();
   }
   const h = healthOf(o), a = o.ages, sv = o.service || {}, sens = sv.sensors || {}, now = o.now;
@@ -560,7 +573,8 @@ TABS.overview = {every: 5000, async load() {
       `Last sample ${fmtAgo(a.flight)} · rails ${a.rails != null ? fmtAgo(a.rails) : "–"}<br>` +
       `${sens.fast_hz ? sens.fast_hz + " rails rows a second · " : ""}${sens.sensors ?? "?"} sensors` +
       (sens.lhm && sens.lhm !== "ok" ? "<br><span class='bad-t'>LibreHardwareMonitor: " + esc(sens.lhm) + "</span>" : "") +
-      (sens.rails_ok === false && sens.admin ? "<br><span class='bad-t'>No rail voltages: the sensor driver may be gone</span>" : "")),
+      (sens.rails_ok === false && sens.admin ? "<br><span class='bad-t'>No rail voltages: the sensor driver may be gone</span>" : "") +
+      ((sv.attributes || {}).rails_note ? `<br><span class="warn-t" title="A busy PC: the rails are still read, only less often. The readings themselves are on the Power tab.">Rails ${esc(sv.attributes.rails_note)}</span>` : "")),
     card(h.ag, "Session agent", h.agents.length ? h.agents.map(x => x.user).join(", ") : (o.agents || []).length ? "Stopped" : "Nobody signed in",
       sessions.length ? sessions.map(s => `Session ${s.session} (${esc(s.user)}, ${esc(s.state)}): ${s.agent === "running" ? "running" : "<span class='warn-t'>" + esc(s.agent) + "</span>"}`).join("<br>")
         : "Runs in each signed-in session: the screens, the app in front, sign-outs, this page"),
@@ -632,6 +646,7 @@ TABS.overview = {every: 5000, async load() {
       (/^waiting/.test(attrs.windows_update || "") ? `<div class="reading"><span class="l">Windows Update</span><span class="r warn-t" style="font-size:13px" title="An update is installed and finishes at the next restart">waiting for a restart since ${fmtDateTime(isoT(attrs.windows_update.replace(/^.* since /, "").replace(" ", "T")))}</span></div>` : "") +
       `<div class="reading"><span class="l">Up since</span><span class="r" style="font-size:13px">${fmtDateTime(o.boot)}</span></div>` +
       `<div class="reading"><span class="l">Uptime</span><span class="r" style="font-size:13px">${fmtDur(now - o.boot)}</span></div>` +
+      (ovCpu && ovCpu.programs && ovCpu.programs[0] ? `<div class="reading"><span class="l">Busiest program, the last hour</span><span class="r" style="font-size:13px"><a href="#processes" title="Every program's CPU use over time: the Processes tab">${esc(ovCpu.programs[0].name)}</a> ${fmtPct(ovCpu.programs[0].avg_pct)}</span></div>` : "") +
       note("Last shutdown or restart asked for", attrs.last_shutdown) +
       note("Last app incident", attrs.last_incident) +
     `</div>`;
@@ -785,7 +800,8 @@ function bucketize(ts, vs, t0, t1, n) {
 // one chart: series [{name, color, unit, t[], avg[], min[], max[]}] on a shared time axis; marks [{t, color, text}]
 // (minSpan: the smallest range the height stands for, so the sensor chip's one-step flicker doesn't fill the chart)
 let pointer = null;     // where the mouse was last, so a chart redrawn under it keeps its tooltip
-function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true, minSpan = 0}) {
+// (tipExtra(i): more rows for the tooltip at point i; floor: the lowest value the scale goes to, at most)
+function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true, minSpan = 0, tipExtra = null, floor = null}) {
   const W = Math.max(280, host.clientWidth - 24), H = height, L = 54, R = 12, T = 10, B = 24;
   let lo = Infinity, hi = -Infinity;
   for (const s of series) for (let i = 0; i < s.avg.length; i++) {
@@ -796,6 +812,7 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
   if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
   if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
   const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
+  if (floor != null && lo < floor) lo = floor;        // (a share of the CPU starts at 0, not below it)
   const x = t => L + ((t - t0) / (t1 - t0)) * (W - L - R), y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
   const yt = niceTicks(lo, hi, 5), xt = timeTicks(t0, t1);
   // the axis numbers carry as many decimals as the step between them needs ("12.25", not "12.250"; "50", not "50.0")
@@ -836,7 +853,7 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
     tip.innerHTML = `<div class="t">${span > 26 * 3600 ? fmtDateTime(ref[best]) : fmtTime(ref[best])}</div>` + series.map(s => {
       const v = s.avg[best]; const mm = band && s.min && s.min[best] != null && s.max[best] !== s.min[best] ? ` <span class="dim">(${fmtVal(s.min[best], s.unit)}–${fmtVal(s.max[best], s.unit)})</span>` : "";
       return `<div class="row"><span style="color:${s.color}">${esc(s.name)}</span><span>${v == null ? "no data" : fmtVal(v, s.unit)}${mm}</span></div>`;
-    }).join("") + marks.filter(m => Math.abs(m.t - ref[best]) < (t1 - t0) / 80).map(m => `<div class="row"><span style="color:${m.color}">${esc(m.text)}</span></div>`).join("");
+    }).join("") + (tipExtra ? tipExtra(best) : "") + marks.filter(m => Math.abs(m.t - ref[best]) < (t1 - t0) / 80).map(m => `<div class="row"><span style="color:${m.color}">${esc(m.text)}</span></div>`).join("");
     tip.style.display = "block";
     const tw = tip.offsetWidth; let left = e.clientX + 14; if (left + tw > innerWidth - 8) left = e.clientX - tw - 14;
     tip.style.left = left + "px"; tip.style.top = (e.clientY + 12) + "px";
@@ -899,7 +916,7 @@ TABS.charts = {every: 60000, async load(force) {
   const gaps = first ? cData.t.filter((_, i) => first.avg[i] == null).length : 0;
   $("#c-info").textContent = `${cData.rows.toLocaleString()} samples · one point per ${fmtDur(cData.step)}` + (gaps ? ` · ${gaps} empty (the PC off or the logger down)` : "") + " · line: average, band: min to max";
 }};
-let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (current === "charts") TABS.charts.render(); if (current === "power") TABS.power.render(); }, 150); });
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (current === "charts") TABS.charts.render(); if (current === "power") TABS.power.render(); if (current === "processes") renderCpuHistory(); }, 150); });
 
 // Power --------------------------------------------------------------------------------------------------------
 let pMin = 10, pData = null;
@@ -1076,7 +1093,64 @@ TABS.processes = {every: 3000, async load() {
     d.cpu.map(r => `<tr><td>${name(r)}</td><td class="num">${r.pid}</td><td class="num">${r.cpu.toFixed(1)} %</td><td class="barcell"><div class="hbar" style="width:${(r.cpu / maxCpu * 100).toFixed(1)}%"></div></td></tr>`).join("");
   $("#pr-mem tbody").innerHTML = d.mem.map(r => `<tr><td>${name(r)}</td><td class="num">${r.pid}</td><td class="num">${r.mem_mb.toLocaleString()} MB</td><td class="barcell"><div class="hbar" style="width:${(r.mem_mb / maxMem * 100).toFixed(1)}%;background:var(--violet)"></div></td></tr>`).join("");
   $("#pr-info").textContent = `${d.count} processes · CPU ${d.total_cpu == null ? "…" : d.total_cpu.toFixed(0) + " %"} in use (${d.threads} logical processors) · memory ${d.ram.used_pct.toFixed(0)} % of ${d.ram.total_gb} GB`;
+  if (Date.now() - pcAt > 60000) {                    // (the history gains a row a minute)
+    pcAt = Date.now();
+    // a point a minute over an hour, 2 min over 6 hours, 5 over a day, 15 over 3 days, half an hour over a week
+    const points = {1: 60, 6: 180, 24: 288, 72: 288, 168: 336}[pcHours] || 288;
+    pcData = await api(`/api/cpu?hours=${pcHours}&points=${points}`);
+    if (!selecting($("#pc-table"))) renderCpuHistory();
+  }
 }};
+
+// CPU by program, over time: the service's minute-by-minute log (Windows keeps no such history)
+let pcHours = 24, pcData = null, pcAt = 0, pcSel = null;     // pcSel: the programs on the chart (null: the busiest five)
+segment($("#pc-range"), b => { pcHours = +b.dataset.h; pcAt = 0; TABS.processes.load().catch(offline); });
+const fmtPct = p => (p >= 10 ? p.toFixed(0) : p >= 1 ? p.toFixed(1) : p.toFixed(2)) + " %";
+// a share in cores too: "1.0 core", "2.3 cores", "45 % of a core"
+const fmtCores = c => c >= 0.95 ? c.toFixed(1) + (c < 1.05 ? " core" : " cores") : Math.round(c * 100) + " % of a core";
+const share = (pct, c) => pct == null ? "–" : `${fmtPct(pct)} <span class="dim">· ${fmtCores(c)}</span>`;
+function renderCpuHistory() {
+  const d = pcData; if (!d) return;
+  const progs = d.programs || [];
+  const color = name => COLORS[Math.max(0, progs.findIndex(p => p.name === name)) % COLORS.length];
+  const sel = (pcSel || progs.slice(0, 5).map(p => p.name)).filter(n => d.series[n]);
+  const host = $("#pc-chart");
+  $("#tip").style.display = "none";
+  if (!d.logged_s) {
+    host.innerHTML = `<div class="dim" style="padding:30px 10px">Nothing logged in this range. The service writes each busy program's CPU use every minute (since HW Blackbox 1.0.7).</div>`;
+  } else {
+    const series = [{name: "All programs", color: "#8d96a7", unit: "%", t: d.t, avg: d.total}]
+      .concat(sel.map(n => ({name: n, color: color(n), unit: "%", t: d.t, avg: d.series[n]})));
+    // the tooltip names the busiest programs at that moment, charted or not: "what was it, at 3 in the morning?"
+    const tipExtra = i => {
+      const top = progs.map(p => [p.name, d.series[p.name][i]]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      return top.length ? `<div class="t" style="margin-top:6px">Busiest then</div>` + top.map(([n, v]) => `<div class="row"><span>${esc(n)}</span><span>${fmtPct(v)}</span></div>`).join("") : "";
+    };
+    drawChart(host, {series, t0: d.start, t1: d.end, unit: "%", band: false, height: innerWidth < 640 ? 220 : 280, floor: 0, tipExtra,
+      title: `<b>Share of the CPU</b>`});
+  }
+  const maxAvg = Math.max(1e-6, ...progs.map(p => p.avg_pct || 0));
+  redraw($("#pc-table tbody"), progs.map(p => {
+    const on = sel.includes(p.name), c = color(p.name);
+    return `<tr data-prog="${esc(p.name)}" tabindex="0" aria-pressed="${on}" class="pick" title="${on ? "On the chart: click to take it off" : "Click to put it on the chart"}">` +
+      `<td><span class="swd" style="border-color:${c};background:${on ? c : "transparent"}"></span>${esc(p.name)}</td>` +
+      `<td class="num">${share(p.avg_pct, p.avg_cores)}</td><td class="num">${share(p.peak_pct, p.peak_cores)}</td>` +
+      `<td class="mono dim">${p.peak_at ? (d.end - d.start > 86400 ? fmtDateTime(p.peak_at) : fmtTime(p.peak_at, false)) : "–"}</td>` +
+      `<td class="num">${fmtDur(p.cpu_s)}</td><td class="barcell"><div class="hbar" style="width:${((p.avg_pct || 0) / maxAvg * 100).toFixed(1)}%"></div></td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="dim" style="white-space:normal">No programs logged in this range yet.</td></tr>`, "data-prog");
+  const span = d.end - d.start;
+  $("#pc-info").textContent = (d.logged_s ? `one point per ${fmtDur(d.step)}` + (d.logged_s < span * 0.95 ? ` · logged ${fmtDur(d.logged_s)} of the ${fmtDur(span)}` : "") : "");
+  $("#pc-foot").textContent = `Every program's CPU use, minute by minute, from the service: all of a program's processes together (a browser's dozens are one row). ` +
+    `100 % is the whole processor, as in Task Manager: on this PC (${d.threads} logical processors) one core flat out is ${fmtPct(100 / d.threads)}. ` +
+    `A program under 1 % of one core in a minute isn't recorded for that minute. System interrupts: the processors' time on drivers' interrupts, which Windows charges to no program. ` +
+    `Click a program to put it on the chart or take it off; the grey line is all programs together.`;
+}
+$("#pc-table").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-prog]"); if (!tr || !pcData) return;
+  const cur = (pcSel || pcData.programs.slice(0, 5).map(p => p.name)), n = tr.dataset.prog;
+  pcSel = cur.includes(n) ? cur.filter(x => x !== n) : cur.concat([n]);
+  renderCpuHistory();
+});
 
 // go
 header().then(() => show(location.hash.slice(1) || "overview"));
