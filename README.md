@@ -139,6 +139,23 @@ What keeps it reliable:
 Its log is `%TEMP%\hwblackbox-install.txt`. Running it again updates an installed HW Blackbox and keeps the settings
 and the history. **`Uninstall.cmd`** removes it and keeps the data.
 
+### Updates
+
+From 1.0.10 on, HW Blackbox updates itself from the page:
+- Once a day the page's program asks GitHub for the latest release. When there's a newer one, the top of the page says
+  so, with **What's new** (the release's page) and **Update**. The Overview's Service card says when it last asked,
+  with **check now**.
+- **Update** asks Windows for an admin (the same prompt as `Install.cmd`), then opens a window that downloads the
+  release's zip into `C:\ProgramData\HWBlackbox\update` (where only SYSTEM and admins can write), checks it against
+  the SHA-256 GitHub gives for it and the one in the release notes, unpacks it, checks it's the version offered, and
+  runs that version's installer. The settings and the history are kept; the download is deleted afterwards. Done,
+  the window closes by itself and the page reloads into the new version; with problems, the window stays open to
+  show them. If any check fails, nothing is installed.
+- Nothing is installed without someone at the PC clicking Update and saying yes to Windows: HW Blackbox runs as
+  SYSTEM, and installing new code that way without asking would be a risk.
+- From an elevated prompt: `& "C:\Program Files\HWBlackbox\python\python.exe" -m hwblackbox update` (`--dry-run`
+  stops before the install).
+
 The same from an elevated PowerShell, with options:
 
 ```powershell
@@ -202,9 +219,13 @@ the wrong kind (a word where a number goes) keeps its default, and the Overview 
   "dashboard": {"enabled": true, "port": 9070,
                 "milestones": [{"at": "2026-10-08T19:03:00", "text": "BIOS setting changed"}]},
   "disk_warn_gb": 10,
-  "disk_drop_gb": 10
+  "disk_drop_gb": 10,
+  "updates": {"check": true}
 }
 ```
+
+**`updates.check`**: the page asks GitHub once a day for a newer release (`false`: never; **check now** on the
+Service card still asks when clicked).
 
 **`disk_warn_gb`** and **`disk_drop_gb`** are about the Windows drive. It's a problem when less than `disk_warn_gb`
 is free, or when it's filling up fast: `disk_drop_gb` gone within an hour, and at that rate under `disk_warn_gb`
@@ -280,7 +301,8 @@ triggers:
 | `state\sensors.json` | every sensor, with its minimum, maximum and average since the service started |
 | `state\ports.json` | who listens where |
 | `incidents\incident_*.txt` | `incident_<boot>.txt` for a power-off, `incident_<time>_<app>.txt` for an app |
-| `sessions\<user>\` | each user's agent: `session_YYYYMMDD.jsonl`, `agent.json` (its heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes) |
+| `sessions\<user>\` | each user's agent: `session_YYYYMMDD.jsonl`, `agent.json` (its heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes), `update.json` (the last update check) |
+| `update\` | an update's download while it installs (removed after), and `install-report.txt`, the installer's report |
 | `crash.log` | anything the service couldn't put anywhere else |
 
 From a prompt:
@@ -310,8 +332,11 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 ## Privacy and security
 
-- **Nothing leaves the PC** unless you turn Home Assistant on, and then only the status above goes to your own Home
-  Assistant.
+- **Nothing about the PC leaves it** unless you turn Home Assistant on, and then only the status above goes to your
+  own Home Assistant.
+- **The update check** asks GitHub's API for the latest release once a day, from the page's program (the session
+  agent). GitHub sees the request, from your address, with HW Blackbox's version in it; nothing else is sent. Turn it
+  off with `updates.check: false`. An update is never installed by itself: see [Updates](#updates).
 - **The app in front is kept for the last 3 minutes only**, as a rolling window. It's copied into a record when
   Windows shuts down or restarts, and into an app's incident report; those are kept (records 183 days, app reports
   the same, power-off reports until you delete them).

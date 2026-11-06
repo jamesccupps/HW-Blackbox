@@ -1073,6 +1073,166 @@ class ProgramLogTest(TempData):
         self.assertEqual(v["programs"][0]["now"], 300)
 
 
+class UpdateTest(TempData):
+    """1.0.10: updates from GitHub, offered on the page, installed only on a click and Windows' admin prompt."""
+
+    def zip_of(self, version, extra=None):
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("HWBlackbox/MANIFEST.json", json.dumps({"version": version, "files": 2}))
+            z.writestr("HWBlackbox/install.ps1", "# the installer")
+            for name, data in (extra or {}).items():
+                z.writestr(name, data)
+        return buf.getvalue()
+
+    def release(self, tag="v1.0.10", data=b"zip", body_sha=True, digest=True, **kw):
+        import hashlib
+        sha = hashlib.sha256(data).hexdigest()
+        rel = {"tag_name": tag, "draft": False, "prerelease": False,
+               "html_url": "https://github.com/jamesccupps/HW-Blackbox/releases/tag/" + tag,
+               "body": "notes\n\nSHA-256: `%s`\n" % sha if body_sha else "notes",
+               "assets": [{"name": "HWBlackbox-win64.zip", "size": len(data),
+                           "browser_download_url": "https://github.com/jamesccupps/HW-Blackbox/releases/download/%s/"
+                                                   "HWBlackbox-win64.zip" % tag,
+                           "digest": "sha256:" + sha if digest else None}]}
+        rel.update(kw)
+        return rel
+
+    def test_versions(self):
+        from hwblackbox.update import parse_version
+        self.assertEqual(parse_version("v1.0.10"), (1, 0, 10))
+        self.assertGreater(parse_version("1.0.10"), parse_version("v1.0.9"))
+        self.assertEqual(parse_version("1.1"), (1, 1, 0))
+        self.assertIsNone(parse_version("1.1.0-beta"))                  # (pre-releases are never offered)
+        self.assertIsNone(parse_version("latest"))
+
+    def test_what_a_release_offers(self):
+        from hwblackbox.update import offer
+        off = offer(self.release(), (1, 0, 9))
+        self.assertEqual((off["version"], off["size"]), ("1.0.10", 3))
+        self.assertIsNone(offer(self.release(), (1, 0, 10)))            # (no newer)
+        self.assertIsNone(offer(self.release(tag="v1.0.8"), (1, 0, 9)))
+        self.assertIsNone(offer(self.release(draft=True), (1, 0, 9)))
+        self.assertIsNone(offer(self.release(prerelease=True), (1, 0, 9)))
+        self.assertEqual(offer(self.release(digest=False), (1, 0, 9))["sha256"], off["sha256"])   # (the notes')
+        self.assertEqual(offer(self.release(body_sha=False), (1, 0, 9))["sha256"], off["sha256"])  # (GitHub's)
+        bad = [self.release(digest=False, body_sha=False),                                  # no SHA-256 at all
+               self.release(assets=[]),                                                     # no zip
+               self.release(body="SHA-256: `%s`" % ("0" * 64))]                             # two that disagree
+        elsewhere = self.release()
+        elsewhere["assets"][0]["browser_download_url"] = "https://example.com/HWBlackbox-win64.zip"
+        bad.append(elsewhere)
+        for rel in bad:
+            with self.assertRaises(ValueError):
+                offer(rel, (1, 0, 9))
+        odd = self.release()
+        odd["html_url"] = "javascript:alert(1)"
+        self.assertIsNone(offer(odd, (1, 0, 9))["page"])                 # (the page links only to GitHub)
+
+    def test_a_zip_that_points_outside_is_refused(self):
+        from hwblackbox.update import unpack
+        z = os.path.join(self.dir, "evil.zip")
+        for name in ("HWBlackbox/../../evil.txt", "C:/evil.txt", "elsewhere/x.txt"):
+            with open(z, "wb") as f:
+                f.write(self.zip_of("1.0.10", {name: "x"}))
+            with self.assertRaises(ValueError):
+                unpack(z, os.path.join(self.dir, "out"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "evil.txt")))
+
+    def test_the_download_is_checked(self):
+        import io
+        from unittest import mock
+        from hwblackbox import update
+        data = self.zip_of("1.0.10")
+        rel = self.release(data=data)
+        staging = os.path.join(self.dir, "update")
+        lines = []
+
+        def fake_open(served):
+            def _open(url, timeout):
+                return io.BytesIO(json.dumps(rel).encode() if url == update.LATEST else served)
+            return _open
+        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 0)
+        self.assertTrue(os.path.isfile(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1")))
+        with open(os.path.join(staging, "run-install.cmd")) as f:
+            self.assertIn(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1"), f.read())
+        self.assertIn("dry run", lines[-1])
+        lines.clear()
+        tampered = data[:-1] + bytes([data[-1] ^ 1])                    # (one bit changed on the way)
+        with mock.patch.object(update, "_open", fake_open(tampered)), mock.patch.object(update, "VERSION", "1.0.9"):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+        self.assertTrue(any("SHA-256 isn't the release's" in x for x in lines), lines)
+        self.assertEqual(os.listdir(staging), [])                       # (nothing left to install from)
+        other = self.zip_of("1.0.11")                                   # (the zip of another version)
+        rel = self.release(data=other)
+        with mock.patch.object(update, "_open", fake_open(other)), mock.patch.object(update, "VERSION", "1.0.9"):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+        self.assertIn("holds HW Blackbox 1.0.11, not 1.0.10", lines[-2])
+        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.10"):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 0)
+        self.assertEqual(lines[-1], "This is the newest version.")
+
+    def test_the_pages_check(self):
+        from unittest import mock
+        from hwblackbox import update
+        path = os.path.join(self.dir, "update.json")
+        c = update.Checker(path)
+        with mock.patch.object(update, "latest_release", return_value=self.release()), \
+                mock.patch.object(update, "VERSION", "1.0.9"):
+            self.assertTrue(c.view()["checking"])
+            for _ in range(50):
+                if not c.busy:
+                    break
+                time.sleep(0.05)
+            v = c.view()
+            self.assertEqual((v["offer"]["version"], v["latest"], v["error"]), ("1.0.10", "1.0.10", None))
+            self.assertFalse(v["checking"])                             # (asked a moment ago: not again for a day)
+        with mock.patch.object(update, "VERSION", "1.0.10"):
+            self.assertIsNone(update.Checker(path).view()["offer"])     # (kept on disk; this version has it now)
+        c = update.Checker(None)
+        with mock.patch.object(update, "latest_release", side_effect=OSError("offline")):
+            self.assertFalse(c.view(enabled=False)["checking"])          # (the daily look off: never asks)
+            c.view(enabled=False, now=True)                             # ("check now" asks anyway)
+            for _ in range(50):
+                if not c.busy:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(c.view(enabled=False)["error"], "OSError: offline")
+
+    def test_update_only_from_the_page(self):
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+        from hwblackbox.dashboard import server
+        port = free_port()
+        httpd = server.start(port)
+        try:
+            def post(path, headers):
+                req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=b"", headers=headers,
+                                             method="POST")
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                try:
+                    with opener.open(req, timeout=5) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, None
+            page = {"Sec-Fetch-Site": "same-origin", "X-HWB": "1"}
+            with mock.patch.object(server.update, "launch", return_value={"started": True}) as launch:
+                self.assertEqual(post("/api/update/install", {})[0], 403)                      # (a program)
+                self.assertEqual(post("/api/update/install", {"Sec-Fetch-Site": "cross-site", "X-HWB": "1"})[0], 403)
+                self.assertEqual(post("/api/update/install", {"Sec-Fetch-Site": "same-origin"})[0], 403)
+                self.assertEqual(post("/api/other", page)[0], 404)
+                launch.assert_not_called()
+                self.assertEqual(post("/api/update/install", page), (200, {"started": True}))
+                launch.assert_called_once_with()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class DiagnoseTest(unittest.TestCase):
     """The Diagnose tab's rules, on made-up records."""
 

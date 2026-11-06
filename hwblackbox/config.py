@@ -50,6 +50,9 @@ def defaults():
         # every minute (logs\disks_*.csv).
         "disk_warn_gb": 10,
         "disk_drop_gb": 10,
+        # The page asks GitHub once a day whether there's a newer release, and offers it (installed only when someone
+        # clicks Update and says yes to Windows' admin prompt). false: never asks.
+        "updates": {"check": True},
     }
 
 

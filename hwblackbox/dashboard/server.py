@@ -33,7 +33,7 @@ import urllib.request
 
 import psutil
 
-from .. import NAME, VERSION, config, paths, poweroff, winapi
+from .. import NAME, VERSION, config, paths, poweroff, update, winapi
 from ..util import age, read_json, tail_lines
 
 APP = "hw-blackbox-dashboard"
@@ -1017,6 +1017,24 @@ class ProcessSampler:
 PROCESSES = ProcessSampler()
 
 
+_checkers = {}
+
+
+def checker():
+    """The update check for this page's user, kept in their session folder (when the agent has made it)."""
+    c = _checkers.get(paths.P.data)
+    if c is None:
+        d = paths.P.session_dir(winapi.user_name())
+        c = _checkers[paths.P.data] = update.Checker(os.path.join(d, "update.json") if os.path.isdir(d) else None)
+    return c
+
+
+def api_update(q):
+    v = checker().view(bool((settings().get("updates") or {}).get("check", True)), now=bool(q.get("check")))
+    v["installable"] = update.installed_python() is not None
+    return v
+
+
 def api_config(q):
     cfg = config.public(settings())
     cfg["data_dir"] = paths.P.data
@@ -1035,7 +1053,7 @@ ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/hist
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
           "/api/processes": lambda q: PROCESSES.sample(), "/api/programs": api_programs,
           "/api/diagnose": lambda q: cached("diagnose", 0 if q.get("fresh") else 60, diagnose_now),
-          "/api/config": api_config,
+          "/api/config": api_config, "/api/update": api_update,
           "/api/ping": lambda q: {"app": APP, "version": VERSION, "pid": os.getpid(), "user": winapi.user_name()}}
 
 
@@ -1091,6 +1109,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(404, json.dumps({"error": str(e)}).encode(), "application/json")
         except Exception as e:
             self.send(500, json.dumps({"error": "%s: %s" % (type(e).__name__, e)}).encode(), "application/json")
+
+    def do_POST(self):
+        """The page's one action: Update. Only from this page itself: the browser says where a request comes from, and
+        the X-HWB header makes any other site's page ask first (which this server never answers). Windows' admin
+        prompt is the real gate, and the command it starts is fixed: nothing from the request goes into it."""
+        host = (self.headers.get("Host") or "").lower()
+        if host not in self.server.allowed_hosts:
+            self.send(421, b"Misdirected request", "text/plain")
+            return
+        if self.headers.get("Sec-Fetch-Site") != "same-origin" or self.headers.get("X-HWB") != "1":
+            self.send(403, b"Only from the page itself", "text/plain")
+            return
+        Handler.last_request = time.time()
+        n = int(self.headers.get("Content-Length") or 0)
+        if 0 < n <= 4096:
+            self.rfile.read(n)
+        if urllib.parse.urlsplit(self.path).path != "/api/update/install":
+            self.send(404, b"Not found", "text/plain")
+            return
+        try:
+            body = update.launch()
+        except Exception as e:
+            body = {"error": "%s: %s" % (type(e).__name__, e)}
+        self.send(200, json.dumps(body).encode("utf-8"), "application/json")
 
 
 def clean(o):

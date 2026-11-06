@@ -9,6 +9,9 @@ r"""python -m hwblackbox <command>
   status     the service's status file, printed
   init       make the data folders, and config.json with the defaults unless there is one (--set K=V to change some)
   set K=V    change settings in config.json (K dotted: home_assistant.enabled=true dashboard.port=9070)
+  update     install the newest release from GitHub, checked against its SHA-256 (as admin: the page's Update button
+             starts it). --dry-run: everything but the install; --pretend-version X: be version X; --from-zip Z
+             --sha256 H: a zip on this PC instead
 
   --data-dir DIR   another data folder (default %ProgramData%\HWBlackbox)
   --test           a second instance next to the real one: its own lock, never sends to Home Assistant, never
@@ -201,7 +204,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="hwblackbox", description="%s %s" % (NAME, VERSION),
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("command", choices=["service", "console", "agent", "open", "serve", "once", "status", "init",
-                                        "set"])
+                                        "set", "update"])
     ap.add_argument("--port", type=int, help="(serve) the port, instead of config.json's")
     ap.add_argument("items", nargs="*", help="(set) KEY=VALUE settings, KEY dotted: dashboard.port=9070")
     ap.add_argument("--data-dir")
@@ -211,6 +214,11 @@ def main(argv=None):
     ap.add_argument("--no-sensors", action="store_true")
     ap.add_argument("--no-dashboard", action="store_true")
     ap.add_argument("--run-for", type=float, help="(console, agent) stop after this many seconds")
+    ap.add_argument("--dry-run", action="store_true", help="(update) everything but the install")
+    ap.add_argument("--pretend-version", help="(update) be this version")
+    ap.add_argument("--from-zip", help="(update) this zip instead of the download (with --sha256)")
+    ap.add_argument("--sha256", help="(update) the --from-zip zip's SHA-256")
+    ap.add_argument("--staging", help="(update) unpack here instead of the data folder's update\\")
     args = ap.parse_args(argv)
     if args.data_dir:
         paths.init(args.data_dir)
@@ -237,6 +245,17 @@ def main(argv=None):
         return cmd_init(args)
     if args.command == "set":
         return cmd_set(args)
+    if args.command == "update":
+        from . import update
+
+        def wait():
+            if sys.stdin and sys.stdin.isatty():
+                try:
+                    input("\nPress Enter to close this window.")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        return update.run(dry_run=args.dry_run, pretend=args.pretend_version, from_zip=args.from_zip,
+                          sha256=args.sha256, staging=args.staging, wait=None if args.dry_run else wait)
     return 2
 
 

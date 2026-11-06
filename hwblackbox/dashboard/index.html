@@ -224,6 +224,11 @@ tr.pick { cursor: pointer; }
     <span><b>HW Blackbox was updated to <span id="nv-new"></span>.</b> This page is still <span id="nv-old"></span>: reload it to get the new one.</span>
     <button class="btn" id="nv-reload">Reload</button>
   </div>
+  <div class="newver" id="upd" role="status" hidden>
+    <span id="upd-text"></span>
+    <a id="upd-notes" target="_blank" rel="noopener noreferrer">What's new</a>
+    <button class="btn" id="upd-go" title="Windows asks for an admin; then the new version installs in a window of its own, keeping the settings and the history">Update</button>
+  </div>
   <div class="bar">
     <div class="brand">
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#151a23" stroke="#252c39"/><path d="M4 19h6l3-9 5 15 3-8h7" fill="none" stroke="#5cc8ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -543,7 +548,10 @@ async function header() {
     $("#ver").textContent = pv ? "v" + pv : "";
     $("#ver").title = "This page is HW Blackbox " + pv + (moved ? "; the program is " + o.version : "");
     $("#nv-new").textContent = o.version; $("#nv-old").textContent = PAGE_VERSION;
+    // (an update started from this page: the new version answers, so the page becomes it, with nothing to click)
+    if (moved && updStarted) { location.reload(); return; }
     $("#newver").hidden = !moved;
+    if (moved) $("#upd").hidden = true;                // (the update is in: the strip above says so)
     const h = healthOf(o);
     // (a chip's short name is for a phone's width; its title says what the colour means)
     const WORD = {good: "OK", warn: "needs a look", bad: "not working", "": "off"};
@@ -598,7 +606,8 @@ TABS.overview = {every: 5000, async load() {
       h.svOk ? `Version ${esc(sv.version || "?")} · up ${fmtDur(now - (isoT(sv.started) || now))}<br>` +
         `${sv.mem_mb != null ? Math.round(sv.mem_mb) : "?"} MB · CPU ${sv.cpu_pct != null ? (+sv.cpu_pct).toFixed(1) : "…"} % · watching ${plural((sv.apps || []).length, "app", "apps")}` +
         (sv.attributes && sv.attributes.ports_listening != null ? ` and ${sv.attributes.ports_listening} ports` : "") +
-        (Object.values(sv.event_logs || {}).some(x => !x) ? "<br><span class='warn-t'>Some of Windows' event logs can't be read</span>" : "")
+        (Object.values(sv.event_logs || {}).some(x => !x) ? "<br><span class='warn-t'>Some of Windows' event logs can't be read</span>" : "") +
+        updLine()
         : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It's the Windows service "HW Blackbox": start it in Services (services.msc), or run Install.cmd again.`),
     card(h.sens, "Sensors", h.sensOk ? "Logging" : "Not logging",
       `Last sample ${fmtAgo(a.flight)} · rails ${a.rails != null ? fmtAgo(a.rails) : "–"}<br>` +
@@ -706,6 +715,58 @@ TABS.overview = {every: 5000, async load() {
       note("Last app incident", attrs.last_incident) +
     `</div>`;
 }};
+// Updates: the agent asks GitHub for the latest release once a day (and on "check now"); a newer one shows at the top.
+// Update starts the installed updater, for which Windows asks an admin: it downloads the release, checks its SHA-256,
+// and runs its installer in a window of its own. When the new version answers, the strip above offers a reload.
+let upd = null, updAt = 0, updStarted = false;
+async function updates(check) {
+  try { upd = await api("/api/update" + (check ? "?check=1" : "")); updAt = Date.now(); } catch (_) { return; }
+  const off = upd.offer;
+  if (!updStarted) {
+    $("#upd").hidden = !off || !$("#newver").hidden;
+    if (off) {
+      $("#upd-text").innerHTML = `<b>HW Blackbox ${esc(off.version)} is out.</b> This PC has ${esc(upd.current)}.` +
+        (upd.installable ? "" : " Install it with the new version's Install.cmd.");
+      $("#upd-notes").hidden = !off.page;
+      if (off.page) $("#upd-notes").href = off.page;
+      $("#upd-go").hidden = !upd.installable;
+    }
+  }
+  if (upd.checking) setTimeout(() => updates(false), 4000);
+  if (current === "overview" && TABS.overview) TABS.overview.load().catch(() => {});
+}
+function updLine() {
+  if (!upd) return "";
+  const ago = upd.checked ? fmtAgo(Date.now() / 1000 - upd.checked) : null;
+  const now = ` · <a href="#" data-updcheck title="Ask GitHub now">check now</a>`;
+  if (upd.checking) return "<br>Updates: asking GitHub…";
+  if (upd.offer) return `<br><span class="warn-t">${esc(upd.offer.version)} is out</span>: see the top of the page`;
+  if (upd.error) return `<br><span class="warn-t" title="${esc(upd.error)}">Updates: GitHub couldn't be asked</span>${ago ? " (" + ago + ")" : ""}${now}`;
+  if (!upd.checked) return `<br>Updates: ${upd.enabled ? "not asked yet" : "not asked (off in config.json)"}${now}`;
+  return `<br>Updates: this is the newest (asked ${ago})${now}`;
+}
+document.addEventListener("click", e => {
+  if (!e.target.matches("[data-updcheck]")) return;
+  e.preventDefault();
+  updates(true);
+});
+$("#upd-go").addEventListener("click", async e => {
+  const btn = e.target, ver = upd && upd.offer ? upd.offer.version : "";
+  btn.disabled = true;
+  updStarted = true;
+  $("#upd-text").innerHTML = "<b>Windows is asking for an admin.</b> Then the update runs in a window of its own.";
+  try {
+    const r = await fetch("/api/update/install", {method: "POST", headers: {"X-HWB": "1"}}).then(r => r.json());
+    if (r.started) { $("#upd-text").innerHTML = `<b>Updating to ${esc(ver)}</b> in its own window. When it's done, this page reloads itself.`; btn.hidden = true; return; }
+    $("#upd-text").innerHTML = `<b>The update didn't start:</b> ${esc(r.error || "no answer")}.`;
+  } catch (err) {
+    $("#upd-text").innerHTML = `<b>The update didn't start:</b> ${esc(err.message || String(err))}.`;
+  }
+  btn.disabled = false;
+  updStarted = false;
+});
+setInterval(() => { if (!document.hidden && Date.now() - updAt > 600000) updates(false); }, 30000);
+
 // the newest milestone already passed (from config.json's dashboard.milestones): what "since the change" counts from
 function latestMilestone(list, now) {
   return (list || []).map(m => ({t: isoT(m.at), text: m.text || ""})).filter(m => m.t && m.t <= now).sort((a, b) => b.t - a.t)[0] || null;
@@ -1274,7 +1335,7 @@ setInterval(async () => {
 }, 5000);
 
 // go
-header().then(() => show(location.hash.slice(1) || "overview"));
+header().then(() => { show(location.hash.slice(1) || "overview"); updates(false); });
 </script>
 </body>
 </html>
