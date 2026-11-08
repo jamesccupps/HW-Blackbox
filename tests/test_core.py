@@ -1314,6 +1314,42 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(c["rails"]["level"], "bad")
         self.assertTrue(any("+12 V" in s and "outside the ATX limit" in s for s in c["rails"]["seen"]))
 
+    def test_a_laptops_battery(self):
+        self.assertNotIn("battery", self.run_())                                   # (a desktop: no battery at all)
+        now = time.time()
+
+        def bat(name, value, kind="Energy"):
+            return {"id": "Battery/%s/%s" % (kind, name), "name": name, "value": value}
+        worn = [bat("Designed Capacity", 55000.0), bat("Fully-Charged Capacity", 30250.0),
+                bat("Degradation Level", 45.0, "Level")]
+        # the last 2 hours: an hour plugged in, then 50 min on battery from 60 % to 4 % (a gap, a sleep, in between
+        # doesn't count as time on battery), then plugged in again
+        ts, pct, ac = [], [], []
+        for k in range(1440):
+            t = now - 7200 + 5 * k
+            if 3600 <= 5 * k < 6600:
+                ts.append(t), pct.append(60.0 - (5 * k - 3600) / 3000 * 56), ac.append(0.0)
+            elif 5 * k >= 6600:
+                ts.append(t), pct.append(5.0 + (5 * k - 6600) / 600), ac.append(1.0)
+            else:
+                ts.append(t), pct.append(90.0), ac.append(1.0)
+        c = self.run_(sensors=worn, flight_t=ts, flight={"battery_pct": pct, "on_ac": ac})["battery"]
+        self.assertEqual((c["level"], c["summary"]), ("warn", "Holds 55 % of the charge it held new"))
+        self.assertEqual(c["seen"][0], "Holds 30 Wh of the 55 Wh it was made for: 45 % worn")
+        self.assertTrue(c["seen"][1].startswith("On battery for 50 min in the last 24 hours, draining about 67 % an "
+                                                "hour: a full charge would last about 1 h 30 min"), c["seen"][1])
+        self.assertTrue(c["seen"][2].startswith("Ran down to 4 % on battery"), c["seen"])
+        self.assertEqual(c["seen"][-1], "Now 6 %, plugged in")
+        self.assertIn("plan to replace it", c["advice"][0])
+        self.assertTrue(any("Critical battery action" in a for a in c["advice"]))
+        self.assertIn("powercfg /batteryreport", c["advice"][-1])
+        good = [bat("Designed Capacity", 55000.0), bat("Fully-Charged Capacity", 52800.0)]
+        c = self.run_(sensors=good)["battery"]
+        self.assertEqual((c["level"], c["summary"], c["advice"]), ("ok", "Holds 96 % of the charge it held new", []))
+        c = self.run_(sensors=[bat("Degradation Level", 27.0, "Level")])["battery"]          # (only the wear)
+        self.assertEqual((c["level"], c["seen"][0]), ("info", "27 % worn"))
+        self.assertIn("charge limit", c["advice"][0])
+
     def test_a_laptops_power_offs(self):
         now = time.time()
         boot = dt.datetime.fromtimestamp(now - 3600).isoformat(timespec="seconds")

@@ -570,7 +570,7 @@ def api_programs(q):
 
 # the Diagnose tab: diagnose.py judges, this gathers --------------------------------------------------------------------
 
-DIAG_COLS = ("cpu_temp_c", "gpu_temp_c", "v12_v", "v5_v", "v33_v", "ram_pct", "gpu_vram_mb")
+DIAG_COLS = ("cpu_temp_c", "gpu_temp_c", "v12_v", "v5_v", "v33_v", "ram_pct", "gpu_vram_mb", "battery_pct", "on_ac")
 
 
 def diagnose_inputs(now=None):

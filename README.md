@@ -16,7 +16,8 @@ switch off, or why did that app close?*
   and the last two minutes of readings. After an app crash: the exit code in words, and the last three minutes of
   everything.
 - **Tells you what's wrong, and what to do.** The Diagnose tab checks what it has recorded (power-offs, crashes,
-  heat, the rails, a program stuck busy or growing without end, memory, disk space) and says what to do about each.
+  heat, the rails, a program stuck busy or growing without end, memory, a laptop's battery, disk space) and says what
+  to do about each.
 - **Runs from boot, as a Windows service,** whether or not anyone signs in. Windows restarts it if it ever fails.
 - **Stays on your PC.** A local dashboard on `127.0.0.1`; optionally a status for your own Home Assistant, with
   alerts for a problem, a power loss or a PC that has gone quiet.
@@ -183,7 +184,7 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 | Tab | Shows |
 |---|---|
 | **Overview** | the service and the agents, any problems, the key readings now, power-offs, disks (with their last week) |
-| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, crashes, display driver resets, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, disk space, a waiting update, uptime |
+| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, crashes, display driver resets, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, a laptop's battery (its wear, how fast it drains, how low it ran), disk space, a waiting update, uptime |
 | **Sensors** | every sensor: current, minimum, maximum and average, since the page opened or since the service started |
 | **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
 | **Power** | the 4-a-second rails over the last minutes, and every power-off caught |
@@ -331,9 +332,10 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 ## Limitations
 
-- **Tested on one PC so far:** an AMD Ryzen 5 5600G on a B550 board, with an NVIDIA RTX 3060, on Windows 11. Other
-  CPUs, sensor chips and GPUs go through LibreHardwareMonitor and should work. Which readings show up, and what
-  they're called, varies by board, and the rails need a sensor chip that reports them.
+- **Tested on two PCs so far,** both on Windows 11: a desktop (AMD Ryzen 5 5600G on a B550 board, NVIDIA RTX 3060)
+  and a laptop (Framework, Intel Core i7-1260P, Intel Iris Xe graphics). Other CPUs, sensor chips and GPUs go through
+  LibreHardwareMonitor and should work. Which readings show up, and what they're called, varies by board; the rails
+  need a sensor chip that reports them, which laptops don't have.
 - **It isn't code-signed.** Windows SmartScreen may warn about `Install.cmd` the first time. Check the zip's SHA-256
   against the release notes; the installer then checks every file against the release's manifest.
 - **Times are local, without a time zone.** The logs and records use the PC's local time, so when daylight saving

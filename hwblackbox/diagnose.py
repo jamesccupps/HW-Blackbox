@@ -544,6 +544,96 @@ def check_vram(x):
                     "GPU memory on the Processes tab lists them."], "#processes:vram")
 
 
+def battery_sensor(x, name):
+    """A laptop battery's reading from LibreHardwareMonitor ("Designed Capacity", "Fully-Charged Capacity" in mWh,
+    "Degradation Level" in %), or None."""
+    for s in x.sensors:
+        if isinstance(s, dict) and str(s.get("id", "")).split("/")[0].split("#")[0] == "Battery" and \
+                s.get("name") == name and isinstance(s.get("value"), (int, float)):
+            return s["value"]
+    return None
+
+
+def battery_use(x):
+    """The last day on battery, from the 5-second log: (hours on battery, %/hour drained, (t, lowest %) or None).
+    A stretch on battery is unbroken rows unplugged (a gap over a minute, a sleep, ends it); the drain counts the
+    stretches of 10 minutes or more."""
+    ac = dict(x.series("on_ac"))
+    rows = [(t, v) for t, v in x.series("battery_pct") if ac.get(t) == 0]
+    hours = drop = drop_h = 0.0
+    low = None
+    run = []
+    for t, v in rows + [(None, None)]:
+        if run and (t is None or t - run[-1][0] > 60):
+            length = run[-1][0] - run[0][0]
+            hours += length / 3600
+            if length >= 600 and run[0][1] > run[-1][1]:
+                drop += run[0][1] - run[-1][1]
+                drop_h += length / 3600
+            run = []
+        if t is not None:
+            run.append((t, v))
+            if low is None or v < low[1]:
+                low = (t, v)
+    return hours, (drop / drop_h if drop_h >= 0.25 else None), low
+
+
+def check_battery(x):
+    """A laptop's battery: how much of its charge it still holds (its wear), how fast it drained on battery over the
+    last day, and how low it ran. Desktops have none: no finding."""
+    designed, full = battery_sensor(x, "Designed Capacity"), battery_sensor(x, "Fully-Charged Capacity")
+    wear = None
+    if designed and full and designed > 0 and 0 < full <= designed * 1.2:
+        wear = max(0.0, 100.0 * (1 - full / designed))
+    elif battery_sensor(x, "Degradation Level") is not None:
+        wear = max(0.0, float(battery_sensor(x, "Degradation Level")))
+    pct = x.series("battery_pct")
+    if wear is None and not pct:
+        return None
+    hours, rate, low = battery_use(x)
+    seen, advice, level = [], [], "ok"
+    if wear is not None:
+        seen.append(("Holds %.0f Wh of the %.0f Wh it was made for: %.0f %% worn" % (full / 1000, designed / 1000, wear))
+                    if designed and full and designed > 0 and 0 < full <= designed * 1.2 else "%.0f %% worn" % wear)
+        summary = "Holds %.0f %% of the charge it held new" % (100 - wear)
+        if wear >= 40:
+            level = "warn"
+            advice += ["It holds well under what it was made for: plan to replace it (the maker's own part, or one made "
+                       "for this exact model).",
+                       "Until then, keep it plugged in for long work: a worn battery can cut out suddenly near empty, "
+                       "before Windows' low-battery warning."]
+        elif wear >= 20:
+            level = "info"
+            advice += ["Normal for a battery a few years old. To slow it down: if the laptop's BIOS or its maker's app "
+                       "has a charge limit (\"battery charge limit\", \"conservation mode\"), set it to about 80 %, and "
+                       "keep the laptop out of the heat."]
+    else:
+        summary = "Its charge is logged; it doesn't report its wear"
+    if hours >= 0.1:
+        line = "On battery for %s in the last 24 hours" % span(hours * 3600)
+        if rate:
+            line += ", draining about %.0f %% an hour: a full charge would last about %s at that rate" % (
+                rate, span(max(600, round(100 / rate * 6) * 600)))           # (an estimate: to 10 minutes)
+        seen.append(line)
+    if low and low[1] <= 5:
+        seen.append("Ran down to %.0f %% on battery at %s" % (low[1], when(low[0], x.now)))
+        if level == "ok":
+            level = "info"
+        advice.append("It ran nearly empty: set what Windows does at its critical level to Hibernate (Control Panel → "
+                      "Power Options → Change plan settings → Change advanced power settings → Battery → Critical "
+                      "battery action), so running out never loses work.")
+    if pct:
+        ac = dict(x.series("on_ac"))
+        t, v = pct[-1]
+        state = {1: "plugged in", 0: "on battery"}.get(ac.get(t))
+        seen.append("Now %.0f %%" % v + (", " + state if state else ""))
+    if level != "ok":
+        advice.append("Its whole history: run powercfg /batteryreport in a terminal; it writes battery-report.html, with "
+                      "the capacity it held over the months.")
+    return finding("battery", "Battery", level, summary, "now and the last 24 hours", seen, advice,
+                   "#charts:24:battery_pct")
+
+
 def check_disk(x):
     pc = x.status.get("pc") or {}
     warn = x.cfg.get("disk_warn_gb") or 10
@@ -593,7 +683,8 @@ def run(d):
     steps = [check_problems, check_power_offs, check_crashes, check_display_resets,
              lambda x: check_temperature(x, "cpu_temp_c", "CPU", 85, 95, 3, CPU_HEAT),
              lambda x: check_temperature(x, "gpu_temp_c", "GPU", 83, 90, 6, GPU_HEAT),
-             check_rails, check_busy, check_memory, check_ram, check_vram, check_disk, check_update, check_uptime]
+             check_rails, check_busy, check_memory, check_ram, check_vram, check_battery, check_disk, check_update,
+             check_uptime]
     for step in steps:
         try:
             got = step(x)
