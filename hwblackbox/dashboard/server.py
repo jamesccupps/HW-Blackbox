@@ -834,6 +834,9 @@ def describe(rec, t, src="service", agent=None):
         elif rec.get("while_session_ends"):
             text += " (its session was ending: a sign-out or restart)"
             level = "info"
+        elif rec.get("shell_running"):
+            text += " (an extra Explorer, started to open a folder or a program; the taskbar's kept running)"
+            level = "info"
     elif k == "start":
         text = "%s started" % rec.get("app")
     elif k == "winevent":

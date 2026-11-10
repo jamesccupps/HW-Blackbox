@@ -162,6 +162,10 @@ class Agents:
     def taskbar_pids(self):
         return {hb.get("taskbar_pid") for hb in self.heartbeats.values() if hb.get("taskbar_pid")}
 
+    def taskbar_of(self, sid):
+        """The taskbar's process in a session (its Explorer), from the session agent's heartbeat; None if unknown."""
+        return (self.heartbeats.get(sid) or {}).get("taskbar_pid")
+
     def screens(self):
         return {sid: hb.get("screens") or [] for sid, hb in self.heartbeats.items()}
 

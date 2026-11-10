@@ -254,6 +254,10 @@ class Watcher:
         if self.ending:
             rec["while_shutting_down"] = True
         report = crashed(code) or (t.main and t.policy != "crash" and code != 0)
+        shell = self.shell_running(t, code) if report else None
+        if shell:
+            rec["shell_running"] = shell
+            report = False
         if report and not crashed(code) and not self.ending and self.session_ending(t.session):
             # Windows ending the session's apps (a sign-out, or a restart before the services stop) is expected:
             # recorded, not an incident. A crash still is one.
@@ -262,6 +266,28 @@ class Watcher:
         self.jrnl.write("exit", rec)
         if report:
             self.incident(t.exe, "%s ended: %s" % (t.label, meaning(code)), rec)
+
+    def shell_running(self, t, code):
+        """An Explorer that isn't its session's taskbar, ending without a crash while the taskbar's Explorer runs on:
+        the taskbar's pid, else None. An explorer.exe started to open a folder or a program hands it to the running
+        shell and ends with exit code 1 (2026-11-09: the Ollama updater starting Ollama that way wrote an incident).
+        The taskbar's Explorer ending, a crash, or a session whose taskbar isn't known still counts."""
+        if t.exe.lower() != "explorer.exe" or crashed(code):
+            return None
+        try:
+            shell = self.agents.taskbar_of(t.session)
+        except Exception:
+            return None
+        s = self.tracked.get(shell) if shell and shell != t.pid else None
+        if s is None or s.exe.lower() != "explorer.exe" or s.session != t.session:
+            return None
+        if s.handle is not None:
+            try:
+                if win32event.WaitForSingleObject(s.handle, 0) == win32event.WAIT_OBJECT_0:
+                    return None                             # (the taskbar's Explorer has just ended too)
+            except Exception:
+                return None
+        return shell
 
     def session_ending(self, sid, window=120):
         """Whether the session is ending: Windows told the service it signed out, or asked the session's agent to end

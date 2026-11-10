@@ -463,12 +463,16 @@ class WatcherTest(TempData):
     """An app Windows ends as its session ends is recorded, not an incident (2026-10-16: a restart wrote two)."""
     SIGN_OUT = 0x40010004
 
-    def ended(self, code, agent_recs=(), signed_out=False, session=1):
+    def ended(self, code, agent_recs=(), signed_out=False, session=1, taskbar=None, shell=None, exe="explorer.exe",
+              rec=False):
         from hwblackbox import watcher
 
         class FakeAgents:
             def taskbar_pids(self):
-                return set()
+                return {taskbar} if taskbar else set()
+
+            def taskbar_of(self, sid):
+                return taskbar if sid == 1 else None
 
             def recent_records(self, seconds):
                 return list(agent_recs)
@@ -483,13 +487,45 @@ class WatcherTest(TempData):
         w = watcher.Watcher(jr, {"watch": []}, None, FakeAgents())
         if signed_out:
             w.signed_out[1] = time.time()
+        if shell:                                       # (pid, exe, session) of a running process the watcher tracks
+            s = watcher.Tracked()
+            s.pid, s.exe, s.label, s.started, s.main, s.handle, s.mem = shell[0], shell[1], "Explorer", time.time(), \
+                True, None, None
+            s.by_port, s.policy, s.ports, s.session = False, "nonzero", None, shell[2]
+            w.tracked[s.pid] = s
         t = watcher.Tracked()
-        t.pid, t.exe, t.label, t.started, t.main, t.handle, t.mem = 4242, "explorer.exe", "Explorer", time.time(), True, \
+        t.pid, t.exe, t.label, t.started, t.main, t.handle, t.mem = 4242, exe, "Explorer", time.time(), True, \
             None, None
         t.by_port, t.policy, t.ports, t.session = False, "nonzero", None, session
+        w.tracked[t.pid] = t
         w.ended(t, code)
         exit_rec = next(r for r in jr.recs if r["kind"] == "exit")
+        if rec:
+            return w.notes["last_incident"] is not None, exit_rec
         return w.notes["last_incident"] is not None, bool(exit_rec.get("while_session_ends"))
+
+    def test_explorer_hand_off(self):
+        """2026-11-09: an updater ran explorer.exe to start a program; it handed that to the running shell and ended
+        with exit code 1 (ran 1 s), which wrote "Windows Explorer ended" though the taskbar never went away."""
+        from hwblackbox.dashboard.server import describe
+        shell = (8568, "explorer.exe", 1)
+        incident, rec = self.ended(1, taskbar=8568, shell=shell, rec=True)
+        self.assertFalse(incident)
+        self.assertEqual(rec["shell_running"], 8568)
+        d = describe(rec, time.time())
+        self.assertEqual(d["level"], "info")
+        self.assertIn("the taskbar's kept running", d["text"])
+        # still incidents: a crash; the taskbar's own Explorer; no taskbar known (no agent); the taskbar's pid no
+        # longer a running Explorer (restarted, or another program got the pid); its taskbar in another session;
+        # another program
+        self.assertTrue(self.ended(0xC0000005, taskbar=8568, shell=shell)[0])
+        self.assertTrue(self.ended(1, taskbar=4242, shell=shell)[0])
+        self.assertTrue(self.ended(1, taskbar=None, shell=shell)[0])
+        self.assertTrue(self.ended(1, taskbar=8568)[0])
+        self.assertTrue(self.ended(1, taskbar=8568, shell=(8568, "notepad.exe", 1))[0])
+        self.assertTrue(self.ended(1, taskbar=8568, shell=(8568, "explorer.exe", 2))[0])
+        self.assertTrue(self.ended(1, taskbar=8568, shell=shell, exe="claude.exe")[0])
+        self.assertTrue(self.ended(1, session=2, taskbar=8568, shell=shell)[0])
 
     def test_session_ending(self):
         asked = {"kind": "shutdown", "phase": "asked", "session": 1}
