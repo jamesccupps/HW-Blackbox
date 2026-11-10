@@ -34,7 +34,7 @@ import time
 import psutil
 
 from . import paths
-from .util import now_iso, parse_iso, prune
+from .util import ensure_line_end, now_iso, open_log, parse_iso, prune
 
 PREFIX = "programs_"
 OLD_PREFIX = "cpu_"                                  # (1.0.7)
@@ -75,14 +75,16 @@ def read_rows(path):
     """[(epoch, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid)] from a day's log, this version's
     or 1.0.7's (no memory or GPU: None); damaged rows skipped."""
     out = []
+    last = None
     try:
-        with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        with open_log(path) as f:
             for row in csv.reader(line.replace("\x00", "") for line in f):
                 if not row or row[0] == "timestamp":
                     continue
-                t = parse_iso(row[0])
+                t = parse_iso(row[0], last)
                 if not t:
                     continue
+                last = t
                 try:
                     if len(row) == len(COLUMNS):
                         out.append((t, float(row[1]), row[2], float(row[3]), _num(row[4]), _num(row[5]),
@@ -287,6 +289,8 @@ class ProgramLog:
         day = ts[:10]
         path = path_for(day)
         new = not os.path.exists(path)
+        if day != self.day and not new:
+            ensure_line_end(path)               # (a row cut off by a power loss stays on a line of its own)
         r = lambda v, nd: "" if v is None else round(v, nd)                      # noqa: E731
         with open(path, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)

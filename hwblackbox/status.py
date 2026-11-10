@@ -64,7 +64,8 @@ def host_facts():
 # attributes, so per-minute numbers (CPU, memory, the last sample's time) stay in status.json; HA still sees every
 # report through the sensor's last_reported, which an alert for "gone quiet" can use.
 HA_KEYS = ("sensors", "rails", "cpu_temperature", "watcher", "session_agent", "boot", "last_incident",
-           "last_shutdown", "last_power_loss", "last_power_loss_died_at", "windows_update")
+           "last_shutdown", "last_power_loss", "last_power_loss_died_at", "windows_update", "last_hardware_error",
+           "last_drive_error", "drives")
 
 
 PAWNIO_HOW = ("run Install.cmd again and answer yes to installing it (or, as admin: winget install namazso.PawnIO, "
@@ -173,6 +174,11 @@ def build(svc):
     if free is not None:
         a["disk_free_gb"] = round(free, 1)
     problems.extend(svc.disks.problems(cfg))
+    problems.extend(svc.drives.problems())
+    if svc.drives.latest:
+        d = svc.drives.latest[1]
+        bad = [x for x in d if x.get("health") not in ("healthy", None)]
+        a["drives"] = "%d healthy" % len(d) if not bad else ", ".join("disk %s %s" % (x["disk"], x["health"]) for x in bad)
     # (a note, not a problem: Windows decides when, and it isn't something wrong)
     try:
         since = restart_pending_since()

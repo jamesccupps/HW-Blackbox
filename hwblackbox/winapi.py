@@ -3,6 +3,7 @@ and who is signed in, priorities, tokens. (x64 only: the structures below are la
 import collections
 import ctypes
 import os
+import re
 import socket
 import struct
 from ctypes import wintypes
@@ -22,6 +23,8 @@ k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 k32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
 k32.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 k32.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+k32.GetLongPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+k32.GetLongPathNameW.restype = wintypes.DWORD
 ntdll.NtQuerySystemInformation.argtypes = [ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong,
                                            ctypes.POINTER(ctypes.c_ulong)]
 ntdll.NtQuerySystemInformation.restype = ctypes.c_long
@@ -250,12 +253,64 @@ def is_portable():
         return None
 
 
+def long_path(path):
+    """The full form of a path written short ("C:\\PROGRA~1\\QGIS34~1.15" -> "C:\\Program Files\\QGIS 3.40.15"); the
+    path as it was when that can't be found. Local drives only: never a network path."""
+    if not isinstance(path, str) or not re.match(r"^[A-Za-z]:[\\/]", path):
+        return path
+    buf = ctypes.create_unicode_buffer(1024)
+    n = k32.GetLongPathNameW(path, buf, 1024)
+    return buf.value if 0 < n < 1024 else path
+
+
+# folders that say nothing about which program it is
+GENERIC = {"bin", "bin64", "bin32", "x64", "x86", "amd64", "win64", "win32", "app", "apps", "current", "scripts",
+           "release", "lib", "program", "programs", "exe", "runtime", "local", "roaming", "appdata", "common files",
+           "tools", "sbin", "cmd", ".venv", "venv", "env"}
+
+
+def program_of(path):
+    """Which program an exe belongs to, from where it is: "QGIS 3.40.15" for C:\\PROGRA~1\\QGIS34~1.15\\bin\\python.exe
+    (a program's own python.exe, not HW Blackbox's or the one people install). None when that can't be told. Only
+    ever a local path: a crash record can be written by anyone, under any name, and the service doesn't reach out to
+    another PC for one (as SYSTEM, it would be the PC's own account)."""
+    if not isinstance(path, str) or not re.match(r"^[A-Za-z]:[\\/]", path) or ".." in path:
+        return None
+    # Short names (QGIS34~1.15) are looked up only under Program Files, where only admins make folders: elsewhere a
+    # user's folder could be a link to another PC, and the look-up would follow it.
+    if re.match(r"^[A-Za-z]:[\\/](PROGRA~[12]|Program Files|Program Files \(x86\))[\\/]", path, re.I):
+        path = long_path(path)
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    low = [p.lower() for p in parts]
+    folders = parts[1:-1]
+    if not folders:
+        return None
+    if low[1] == "windows":
+        return "Windows"
+    if low[1] in ("program files", "program files (x86)", "programdata") and len(parts) > 3:
+        if low[2] == "windowsapps" and len(parts) > 4:
+            return parts[3].split("_")[0]                      # (a Store app's package: Publisher.App_1.2.3_x64__id)
+        return parts[2] if low[2] not in GENERIC else (parts[3] if len(parts) > 4 else None)
+    if "appdata" in low:
+        rest = [p for p in folders[low.index("appdata"):] if p.lower() not in GENERIC]
+        return rest[0] if rest else None
+    for name in reversed(folders):
+        if name.lower() not in GENERIC and not re.match(r"^(app-|v)?\d[\d.]*$", name, re.I):
+            return name
+    return None
+
+
 # priorities --------------------------------------------------------------------------------------------------------
 
 def raise_process_priority():
     """Above normal: a busy PC is exactly when the monitors must keep up (a job holding every core can starve a
     logger running at normal priority)."""
     return bool(k32.SetPriorityClass(k32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
+
+
+def lower_thread_priority():
+    """Below normal: for a chore (packing old logs) that must never get in the way of anything."""
+    return bool(k32.SetThreadPriority(k32.GetCurrentThread(), -1))       # (THREAD_PRIORITY_BELOW_NORMAL)
 
 
 def raise_thread_priority(highest=False):

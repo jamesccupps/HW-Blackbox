@@ -29,7 +29,7 @@ import threading
 import time
 
 from . import paths, winapi
-from .util import now_iso, prune, read_json, write_json
+from .util import ensure_line_end, now_iso, prune, read_json, write_json
 
 COLUMNS = [
     "timestamp", "cpu_temp_c", "cpu_power_w", "vcore_v", "vsoc_v",
@@ -561,6 +561,7 @@ class CsvLogger:
             if self.fh:
                 self.fh.close()
             path = self.path_for(day)
+            ensure_line_end(path)                    # (a row cut off by a power loss stays on a line of its own)
             head = self.header_of(path)
             self.fh = open(path, "a", newline="", encoding="utf-8")
             self.writer = csv.writer(self.fh)

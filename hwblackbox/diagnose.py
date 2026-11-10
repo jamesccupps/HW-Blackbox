@@ -126,6 +126,8 @@ class Inputs:
         self.records = d.get("records") or []            # the service's exits and Windows' records, with "t"
         self.displays = sorted(d.get("displays") or [])  # when the screens changed
         self.watched_mem = {k: sorted(v) for k, v in (d.get("watched_mem") or {}).items()}  # exe -> [(t, MB)]
+        self.drives = d.get("drives") or {}               # state\drives.json: {"drives": [...], "error"}
+        self.drive_rows = d.get("drive_rows") or []      # [(t, disk, {column: value})], the last 30 days
         self.by_program = collections.defaultdict(list)
         self.minutes = {}                                 # minute's epoch -> its rows
         for r in self.programs:
@@ -300,8 +302,16 @@ def check_crashes(x):
             if any(e == exe and abs(t - r["t"]) <= 120 for t, e in exits):
                 continue                     # (a watched app's crash: its exit record already counted it)
             app = r.get("app") or (ins[0] if ins else "?")
+            # which program's exe it was (a python.exe can be anyone's: QGIS's, a game's, a tool's), and the part of
+            # it that crashed when that's another file (gdal313.dll)
+            prog = r.get("program")
+            if prog and prog.lower() not in app.lower():
+                app = "%s (%s)" % (app, prog)
+            module = str(ins[3]) if len(ins) > 3 else ""
             code = next((i for i in ins if re.fullmatch(r"0x[0-9a-fA-F]{8}", str(i))), "")
-            crashes[app].append((r["t"], "Windows recorded a crash" + (" (%s)" % code if code else "")))
+            crashes[app].append((r["t"], "Windows recorded a crash" +
+                                 (" in %s" % module if module and module.lower() not in (exe, "unknown") else "") +
+                                 (" (%s)" % code if code else "")))
             if code.lower() in ("0xc0000005", "0xc0000374"):
                 memory_like.add(app.lower())
     if not crashes:
@@ -322,6 +332,151 @@ def check_crashes(x):
     return finding("crashes", "Programs crashing", level, "%d crash%s in the last 7 days, %d program%s" % (
         n, "" if n == 1 else "es", len(crashes), "" if len(crashes) == 1 else "s"), "the last 7 days", seen, advice,
         "#events")
+
+
+HW_ADVICE = {
+    "CPU": ["Put the CPU back to its stock settings: undo any overclock or undervolt (PBO and Curve Optimizer on AMD, "
+            "XTU or ThrottleStop on Intel), then see if the errors stop.",
+            "Update the BIOS: many CPU errors are fixed by the microcode in a newer one.",
+            "Check the CPU's temperature (below) and that its cooler sits firmly."],
+    "memory": ["Test the memory: Windows Memory Diagnostic (run mdsched.exe) or MemTest86 (free, from a USB stick).",
+               "Turn XMP / EXPO off in the BIOS (the memory at its standard speed) and see if the errors stop. If they "
+               "do, the memory's rated speed isn't stable on this board: a slower profile, or a little more voltage, "
+               "is the usual fix."],
+    "PCI Express": ["Power off, unplug, and reseat the graphics card and the NVMe drives; check the card's power cables "
+                    "are firmly in at both ends.",
+                    "Update the BIOS and the chipset driver.",
+                    "If they keep coming from one slot, setting that slot one PCIe generation lower in the BIOS (Gen 4 "
+                    "to Gen 3) often stops them, at no cost you'd notice."],
+    None: ["Update the BIOS and the chipset driver, and put the CPU and memory back to stock (no overclock, XMP / EXPO "
+           "off) to see if they stop."],
+}
+
+
+def check_hardware(x):
+    """The hardware's own error reports (WHEA): a corrected error did no harm but is a sign of a part (or a setting)
+    on the edge; a fatal one took Windows down (a blue screen, stop code 0x124)."""
+    from .events import WHEA, WHEA_SHORT, hardware_error
+    recs = sorted((r["t"], hardware_error(r), r) for r in x.records if r.get("kind") == "winevent" and
+                  r.get("source") == WHEA and r.get("t") and x.now - r["t"] <= 7 * DAY)
+    if not recs:
+        return finding("hardware", "Hardware errors", "ok", "None in the last 7 days", "the last 7 days",
+                       link="#events")
+    parts = collections.OrderedDict()
+    for t, (part, fatal), r in recs:
+        p = parts.setdefault(part, {"fatal": 0, "corrected": 0, "last": t})
+        p["fatal" if fatal else "corrected"] += 1 + int(r.get("skipped_before") or 0)
+        p["last"] = t
+    fatal = sum(p["fatal"] for p in parts.values())
+    seen = ["%s: %s (the last %s)" % (WHEA_SHORT[part][0].upper() + WHEA_SHORT[part][1:], ", ".join(
+        "%d %s" % (p[k], k) for k in ("fatal", "corrected") if p[k]), when(p["last"], x.now))
+        for part, p in parts.items()]
+    advice = []
+    for part in parts:
+        advice.extend(a for a in HW_ADVICE.get(part, HW_ADVICE[None]) if a not in advice)
+    advice.append("A corrected error did no harm, but a part that keeps needing it is on the edge; a fatal one crashes "
+                  "Windows. Each one is on the Events tab (Hardware), with Windows' own record of it.")
+    n = sum(p["fatal"] + p["corrected"] for p in parts.values())
+    return finding("hardware", "Hardware errors", "bad" if fatal else "warn",
+                   "%d hardware error%s in the last 7 days%s" % (n, "" if n == 1 else "s",
+                                                                 ", %d fatal" % fatal if fatal else ""),
+                   "the last 7 days", seen, advice, "#events")
+
+
+def check_drives(x):
+    """The drives: what Windows thinks of each, its wear, its temperature, the errors it has counted (and whether
+    they grew this month), and the drives' error records of the last week."""
+    from .events import disk_error
+    drives = [d for d in (x.drives.get("drives") or []) if isinstance(d, dict)]
+    model = {d.get("disk"): d.get("model") for d in drives}
+    errs = []
+    for r in x.records:
+        if r.get("kind") == "winevent" and r.get("t") and x.now - r["t"] <= 7 * DAY:
+            got = disk_error(r)
+            if got:
+                errs.append((r["t"], got, int(r.get("skipped_before") or 0)))
+    if not drives and not errs:
+        return None
+    level, seen, advice = "ok", [], []
+    rank = lambda lv: ORDER[lv]                                           # noqa: E731
+
+    def worse(lv):
+        nonlocal level
+        if rank(lv) < rank(level):
+            level = lv
+
+    def add(*tips):
+        advice.extend(t for t in tips if t not in advice)
+    BACKUP = "Back up what's on it now (copy what matters to another drive or the cloud)."
+    first = {}                                        # disk -> its oldest row of the month (the counters then)
+    for t, disk, vals in sorted(x.drive_rows):
+        first.setdefault(disk, vals)
+    for d in drives:
+        disk, bits = d.get("disk"), [d.get("health") or "unknown"]
+        name = "Disk %s (%s)" % (disk, d.get("model") or "?")
+        hot = 70 if d.get("media") != "HDD" else 55
+        if d.get("temp_c"):
+            bits.append("%d °C" % d["temp_c"])
+        if d.get("wear_pct") is not None:
+            bits.append("%d %% worn" % d["wear_pct"])
+        if d.get("power_on_h"):
+            bits.append("%s on" % span(d["power_on_h"] * 3600))
+        unc = (d.get("read_err_unc") or 0) + (d.get("write_err_unc") or 0)
+        before = first.get(disk) or {}
+        grew = unc - ((before.get("read_err_unc") or 0) + (before.get("write_err_unc") or 0)) if before else 0
+        if unc:
+            bits.append("%d errors it couldn't correct%s" % (unc, " (+%d this month)" % grew if grew > 0 else ""))
+        seen.append("%s: %s" % (name, ", ".join(bits)))
+        if d.get("health") == "unhealthy":
+            worse("bad")
+            add(BACKUP, "Then replace it: Windows itself says it's failing (its own health check, from the drive's "
+                        "SMART data).")
+        elif d.get("health") == "warning":
+            worse("warn")
+            add(BACKUP, "Windows says it needs a look: see its maker's tool (Samsung Magician, WD Dashboard, Crucial "
+                        "Storage Executive, SeaTools...) for what it reports.")
+        if grew > 0:
+            worse("bad")
+            add(BACKUP, "Its count of errors it couldn't correct is growing: replace it.")
+        elif unc:
+            worse("info")
+        if d.get("wear_pct") is not None and d["wear_pct"] >= 100:
+            worse("warn")
+            add(BACKUP, "It has written all it was rated for: it may go on for a long time, but keep its data backed "
+                        "up and plan to replace it.")
+        elif d.get("wear_pct") is not None and d["wear_pct"] >= 80:
+            worse("info")
+            add("It's used most of the writes it's rated for: plan to replace it in time.")
+        if d.get("temp_c") and d["temp_c"] >= hot:
+            worse("warn")
+            add("It runs hot: give it airflow (an NVMe drive's heatsink, a case fan over it), and keep it away from "
+                "the graphics card's exhaust.")
+    by_disk = collections.defaultdict(list)
+    for t, (what, lv, disk), more in errs:
+        by_disk[disk].append((t, what, lv, more))
+    for disk, rows in by_disk.items():
+        n = sum(1 + more for _t, _w, _lv, more in rows)
+        bad = [r for r in rows if r[2] == "bad"]
+        t, what, _lv, _m = max(rows)
+        name = "Disk %s (%s)" % (disk, model.get(disk) or "?") if disk is not None else "A drive"
+        seen.append("%s: %d error record%s this week; the last, %s: %s" % (name, n, "" if n == 1 else "s",
+                                                                          when(t, x.now), what))
+        worse("bad" if bad else "warn" if n >= 3 else "info")
+        if bad:
+            add(BACKUP, "Then check it: in a terminal run as admin, chkdsk C: /scan (with the drive's letter), and its "
+                        "maker's tool for its SMART health.")
+        else:
+            add("Retries and resets come from the drive, its cable or its port: reseat it (a SATA drive: another cable "
+                "and port), and update its firmware with its maker's tool and the storage or chipset driver.")
+    worst = next((s for s in seen if "unhealthy" in s or "couldn't correct" in s), None)
+    healthy = sum(1 for d in drives if d.get("health") == "healthy")
+    summary = ("%d drive%s, all healthy" % (len(drives), "" if len(drives) == 1 else "s") if level == "ok" else
+               worst or ("%d error record%s from the drives this week" % (
+                   sum(1 + m for _t, _g, m in errs), "" if len(errs) == 1 else "s") if errs else
+                   "%d of %d drives healthy" % (healthy, len(drives))))
+    if x.drives.get("error") and not any(d.get("temp_c") or d.get("wear_pct") is not None for d in drives):
+        seen.append("Their temperature and wear couldn't be read: %s" % x.drives["error"])
+    return finding("drives", "Drives", level, summary, "now, and the last 7 days' records", seen, advice, "#events")
 
 
 def check_display_resets(x):
@@ -680,7 +835,7 @@ def check_uptime(x):
 def run(d):
     x = Inputs(d)
     checks = []
-    steps = [check_problems, check_power_offs, check_crashes, check_display_resets,
+    steps = [check_problems, check_power_offs, check_hardware, check_crashes, check_display_resets, check_drives,
              lambda x: check_temperature(x, "cpu_temp_c", "CPU", 85, 95, 3, CPU_HEAT),
              lambda x: check_temperature(x, "gpu_temp_c", "GPU", 83, 90, 6, GPU_HEAT),
              check_rails, check_busy, check_memory, check_ram, check_vram, check_battery, check_disk, check_update,

@@ -11,7 +11,6 @@ From the service manager it also hears, as they happen: Windows shutting down (t
 "services stopping": the last thing written before a clean shutdown, so its absence before a boot means the power
 went), sessions starting, locking and ending, sleep and resume, and the clock being changed."""
 import ctypes
-import datetime as dt
 import os
 import sys
 import threading
@@ -24,12 +23,17 @@ from . import VERSION, config, paths, poweroff, status, winapi
 from .agents import Agents
 from .deadman import DeadMan
 from .disks import DiskWatch
+from .drives import DriveWatch
 from .homeassistant import HaReporter
 from .journal import Journal
 from .ports import PortWatch
 from .sensors import Sensors
-from .util import is_link, now_iso
+from .util import is_link, now_iso, pack_logs
 from .watcher import Watcher
+
+# the day logs packed into .csv.gz once they're two days old (the records, events_*.jsonl, stay as they are: small, and
+# read in many places)
+PACKED = ("flight_", "rails_", "programs_", "cpu_", "disks_", "drives_")
 
 WTS_EVENTS = {1: "console connect", 2: "console disconnect", 3: "remote connect", 4: "remote disconnect",
               5: "sign-in", 6: "sign-out", 7: "lock", 8: "unlock", 9: "remote control", 10: "session created",
@@ -69,6 +73,7 @@ class Service:
         self.agents = Agents(self.jrnl, restart=not test)
         self.watcher = Watcher(self.jrnl, self.cfg, self.ports, self.agents, test)
         self.disks = DiskWatch(self.jrnl, self.cfg["sensors"]["keep_days"])
+        self.drives = DriveWatch(self.jrnl, self.cfg["sensors"]["keep_days"])
         self.lock = threading.Lock()         # the watcher's state: its thread, and the service manager's calls
         self.deadman = None
         self.host = None
@@ -79,7 +84,7 @@ class Service:
 
     def run(self, host):
         self.host = host
-        prev = poweroff._last_record_before(dt.datetime.now())
+        prev = poweroff._last_record_before(time.time())
         clean = prev is None or prev.get("kind") in ("stop", "shutdown", "shutdown_snapshot")
         self.jrnl.write("startup", {
             "pid": os.getpid(), "version": VERSION, "python": sys.version.split()[0], "user": winapi.user_name(),
@@ -97,6 +102,9 @@ class Service:
         threading.Thread(target=self._poweroff_check, name="poweroff-check", daemon=True).start()
         threading.Thread(target=self._sensors_start, name="sensors-open", daemon=True).start()
         self.watcher.programs.start_gpu(self.stop)        # (Windows' GPU counters, once a minute)
+        if not self.test:
+            self.drives.start(self.stop)                   # (the drives' health, once an hour)
+        threading.Thread(target=self._pack_logs, name="logs-pack", daemon=True).start()
         threading.Thread(target=self._watch_loop, name="watcher", daemon=True).start()
         threading.Thread(target=self._supervise, name="supervisor", daemon=True).start()
         host.stop.wait()
@@ -115,6 +123,20 @@ class Service:
                                             "admin": s.sampler.admin})
         except Exception as e:
             self.error("sensors", e)
+
+    def _pack_logs(self):
+        """The day logs older than yesterday into .csv.gz (about a tenth of the size), 10 minutes after the start and
+        then every 6 hours, at low priority: a few seconds' work a day."""
+        winapi.lower_thread_priority()
+        wait = 600
+        while not self.stop.wait(wait):
+            wait = 6 * 3600
+            try:
+                n = pack_logs(paths.P.logs, PACKED, done=self.stop)
+                if n:
+                    self.jrnl.write("logs", {"event": "packed", "files": n})
+            except Exception as e:
+                self.error("packing the logs", e)
 
     def _poweroff_check(self):
         """On a thread of its own from the start: a sensor library that's slow to open after a power loss mustn't

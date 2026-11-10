@@ -15,7 +15,7 @@ import subprocess
 import time
 
 from . import paths
-from .util import now_iso, read_json, write_json
+from .util import iso_at, now_iso, parse_iso, read_json, read_log_bytes, write_json
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -45,6 +45,31 @@ def _event_time(query):
         return None
 
 
+# The common blue screens' stop codes: their names (Microsoft's "Bug check code reference") and what they usually point
+# at. A name is a hint where to look, not a diagnosis.
+STOP_CODES = {
+    0x0A: ("IRQL_NOT_LESS_OR_EQUAL", "usually a driver, sometimes the memory"),
+    0x1A: ("MEMORY_MANAGEMENT", "often the memory (RAM) or its speed settings"),
+    0x1E: ("KMODE_EXCEPTION_NOT_HANDLED", "usually a driver"),
+    0x3B: ("SYSTEM_SERVICE_EXCEPTION", "usually a driver"),
+    0x4E: ("PFN_LIST_CORRUPT", "often the memory (RAM)"),
+    0x50: ("PAGE_FAULT_IN_NONPAGED_AREA", "a driver, or the memory"),
+    0x7A: ("KERNEL_DATA_INPAGE_ERROR", "reading from the drive failed: the drive, its cable or controller"),
+    0x7E: ("SYSTEM_THREAD_EXCEPTION_NOT_HANDLED", "usually a driver"),
+    0x9F: ("DRIVER_POWER_STATE_FAILURE", "a driver failed going to sleep, waking, or a power change"),
+    0xD1: ("DRIVER_IRQL_NOT_LESS_OR_EQUAL", "a driver (often network or storage)"),
+    0xEF: ("CRITICAL_PROCESS_DIED", "a core Windows process ended: often the drive or a damaged Windows"),
+    0x101: ("CLOCK_WATCHDOG_TIMEOUT", "a CPU core stopped answering: often an unstable CPU overclock or undervolt"),
+    0x116: ("VIDEO_TDR_FAILURE", "the graphics driver or card couldn't be recovered"),
+    0x119: ("VIDEO_SCHEDULER_INTERNAL_ERROR", "the graphics driver or card"),
+    0x124: ("WHEA_UNCORRECTABLE_ERROR", "the hardware reported an error it couldn't correct (the CPU, memory or "
+                                        "PCIe): often an unstable overclock, XMP / EXPO, or a failing part"),
+    0x133: ("DPC_WATCHDOG_VIOLATION", "a driver took too long: often storage (SSD firmware) or graphics"),
+    0x139: ("KERNEL_SECURITY_CHECK_FAILURE", "a driver, or damaged memory"),
+    0x154: ("UNEXPECTED_STORE_EXCEPTION", "the drive (or its driver)"),
+}
+
+
 def why_41(data):
     """What Windows' Kernel-Power 41 record says about how the PC went off, in words ('' when it says nothing: the power
     was cut, or the PC froze so hard that nothing was recorded)."""
@@ -59,7 +84,9 @@ def why_41(data):
                 continue
         return 0
     if num("BugcheckCode"):
-        return "Windows crashed: a blue screen, stop code 0x%08X" % num("BugcheckCode")
+        code = num("BugcheckCode")
+        name = STOP_CODES.get(code)
+        return "Windows crashed: a blue screen, stop code 0x%08X%s" % (code, " (%s: %s)" % name if name else "")
     if str(data.get("LongPowerButtonPressDetected")).lower() == "true" or num("PowerButtonTimestamp"):
         return "the power button was held down (a forced power-off)"
     if num("SleepInProgress"):
@@ -101,30 +128,37 @@ def boot_time():
 
 
 def _rows_before(path, before, n):
-    """The last n rows of one log file with a time before `before`, as (time, 'file: row'). Reads from the end,
-    widening the window until it reaches back far enough, and drops the NUL bytes a power loss can leave behind."""
+    """The last n rows of one log file with a time before `before` (epoch seconds), as (epoch, 'file: row'). Reads
+    from the end, widening the window until it reaches back far enough, and drops the NUL bytes a power loss can leave
+    behind. A packed day (.csv.gz) is read whole."""
     name = os.path.basename(path)
+    if name.endswith(".gz"):
+        name = name[:-3]
     try:
         size = os.path.getsize(path)
     except OSError:
         return []
     window = 1 << 20
     while True:
-        start = max(0, size - window)
+        start = 0 if path.endswith(".gz") else max(0, size - window)
         try:
-            with open(path, "rb") as fh:
-                fh.seek(start)
-                lines = fh.read().replace(b"\x00", b"").decode("utf-8", "replace").splitlines()
+            if path.endswith(".gz"):
+                data = read_log_bytes(path)
+            else:
+                with open(path, "rb") as fh:
+                    fh.seek(start)
+                    data = fh.read()
+            lines = data.replace(b"\x00", b"").decode("utf-8", "replace").splitlines()
         except OSError:
             return []
         if start:
             lines = lines[1:]                 # (probably cut in half by the seek)
-        rows = []
+        rows, last = [], None
         for ln in lines:
-            try:
-                t = dt.datetime.fromisoformat(ln.split(",", 1)[0])
-            except ValueError:
+            t = parse_iso(ln.split(",", 1)[0], last)
+            if t is None:
                 continue                      # the header, or a damaged line
+            last = t
             if t < before:
                 rows.append((t, "%s: %s" % (name, ln.rstrip())))
         if len(rows) >= n or start == 0:
@@ -132,13 +166,25 @@ def _rows_before(path, before, n):
         window *= 8
 
 
-def _tail_rows(prefix, before, n):
-    """The last n rows written before `before`, from the newest files of a log (named by day, so a file written only
-    after the boot is passed over)."""
+def _day_logs(prefix):
+    """A log's day files, oldest first, each day once: its .csv, else its .csv.gz."""
     try:
-        files = sorted(f for f in os.listdir(paths.P.logs) if f.startswith(prefix) and f.endswith(".csv"))
+        names = os.listdir(paths.P.logs)
     except OSError:
         return []
+    days = {}
+    for f in names:
+        if f.startswith(prefix) and f.endswith((".csv", ".csv.gz")):
+            day = f[len(prefix):len(prefix) + 8]
+            if f.endswith(".csv") or day not in days:
+                days[day] = f
+    return [days[d] for d in sorted(days)]
+
+
+def _tail_rows(prefix, before, n):
+    """The last n rows written before `before` (epoch seconds), from the newest files of a log (named by day, so a
+    file written only after the boot is passed over)."""
+    files = _day_logs(prefix)
     rows = []
     for name in reversed(files[-3:]):
         rows = _rows_before(os.path.join(paths.P.logs, name), before, n - len(rows)) + rows
@@ -148,7 +194,7 @@ def _tail_rows(prefix, before, n):
 
 
 def _last_record_before(before):
-    """The service's last record before `before` (from the newest events_*.jsonl files), or None."""
+    """The service's last record before `before` (epoch seconds) from the newest events_*.jsonl files, or None."""
     try:
         files = sorted(f for f in os.listdir(paths.P.logs) if f.startswith("events_") and f.endswith(".jsonl"))
     except OSError:
@@ -164,7 +210,8 @@ def _last_record_before(before):
         for line in reversed(lines):
             try:
                 rec = json.loads(line)
-                if dt.datetime.fromisoformat(rec["ts"]) < before:
+                t = parse_iso(rec["ts"])
+                if t is not None and t < before:
                     return rec
             except (ValueError, KeyError, TypeError):
                 continue
@@ -172,16 +219,20 @@ def _last_record_before(before):
 
 
 def _existing_incident(boot):
-    """An incident file already written for this boot (named by this boot's time, or, in older reports, by its Event
-    6008's time a few seconds later)."""
+    """An incident file already written for this boot (epoch seconds): named by this boot's time, or, in older
+    reports, by its Event 6008's time a few seconds later."""
     try:
         for f in os.listdir(paths.P.incidents):
             m = re.match(r"incident_(\d{8}_\d{6})\.txt$", f)
-            if m and abs((dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S") - boot).total_seconds()) < 180:
+            if m and abs(dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").timestamp() - boot) < 180:
                 return f
     except (OSError, ValueError):
         pass
     return None
+
+
+# a log row quoted in a report: "rails_20261023.csv: 2026-10-23T22:24:22.800,..." (since 1.1.0 with the offset)
+ROW_TIME = re.compile(r"(?:flight|rails)_\d{8}\.csv: (\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d\d:\d\d|Z)?),")
 
 
 def last_dirty_shutdown():
@@ -197,17 +248,18 @@ def last_dirty_shutdown():
     if not names:
         return None
     newest = names[-1]
-    died = None
+    died = None                                       # (epoch, the row's time as written)
     try:
         with open(os.path.join(paths.P.incidents, newest), encoding="utf-8", errors="replace") as f:
             for ln in f:
-                m = re.match(r"(?:flight|rails)_\d{8}\.csv: (\d{4}-\d\d-\d\dT[\d:.]+),", ln.replace("\x00", ""))
-                if m and (died is None or m.group(1) > died):
-                    died = m.group(1)
+                m = ROW_TIME.match(ln.replace("\x00", ""))
+                t = parse_iso(m.group(1)) if m else None
+                if t is not None and (died is None or t > died[0]):
+                    died = (t, m.group(1))
     except OSError:
         pass
     data = {"boot": dt.datetime.strptime(newest[9:24], "%Y%m%d_%H%M%S").isoformat(timespec="seconds"),
-            "time_of_death": died, "incident": newest}
+            "time_of_death": died[1] if died else None, "incident": newest}
     try:
         write_json(paths.P.last_incident, data)
     except Exception:
@@ -219,26 +271,31 @@ def check(boot=None, now=None):
     """If this boot followed a shutdown that wasn't clean, write the report (once per boot). Returns a one-line
     summary ('' if the last shutdown was clean). (boot / now are for tests.)"""
     boot = boot or boot_time()
-    if (now or dt.datetime.now()) - boot > dt.timedelta(hours=48):
+    b = boot.timestamp()                              # (epoch seconds: the logs' times have an offset since 1.1.0)
+    if (now or dt.datetime.now()).timestamp() - b > 48 * 3600:
         return ""
-    margin = dt.timedelta(minutes=2)
-    dirty = [t for t in (_event_time(Q41), _event_time(Q6008)) if t and t >= boot - margin]
+    margin = 120
+    dirty = [t for t in (_event_time(Q41), _event_time(Q6008)) if t and t.timestamp() >= b - margin]
     if not dirty:
         return ""
-    existing = _existing_incident(boot)
+    existing = _existing_incident(b)
     if existing:
         return "Dirty shutdown before this boot  ->  %s" % existing
     txt_41, txt_6008 = _wevtutil(Q41, 1), _wevtutil(Q6008, 1)      # (the records as text, for the report)
-    from .events import newest_event
+    from .events import hardware_records, newest_event
     at41, data41 = newest_event("System", Q41)
-    why = why_41(data41) if at41 and dt.datetime.strptime(at41, "%Y-%m-%d %H:%M:%S") >= boot - margin else ""
+    why = why_41(data41) if at41 and dt.datetime.strptime(at41, "%Y-%m-%d %H:%M:%S").timestamp() >= b - margin \
+        else ""
     os.makedirs(paths.P.incidents, exist_ok=True)
     name = "incident_%s.txt" % boot.strftime("%Y%m%d_%H%M%S")
-    flight = _tail_rows("flight_", boot, 120)
-    rails = _tail_rows("rails_", boot, 240)
+    flight = _tail_rows("flight_", b, 120)
+    rails = _tail_rows("rails_", b, 240)
     ends = [rows[-1][0] for rows in (flight, rails) if rows]
     last = max(ends) if ends else None
-    rec = _last_record_before(boot)
+    rec = _last_record_before(b)
+    # the hardware's own error records (WHEA) from an hour before it went down to 15 minutes after the boot: a fatal
+    # one is written at the boot after the crash it caused
+    hw = hardware_records((last or b) - 3600, b + 900)
     desc = ""
     m = re.search(r"Description:\s*(.+)", txt_6008, re.DOTALL)
     if m:
@@ -246,12 +303,12 @@ def check(boot=None, now=None):
     with open(os.path.join(paths.P.incidents, name), "w", encoding="utf-8") as f:
         f.write("HW Blackbox: power-off report (written %s)\n" % now_iso())
         f.write("=" * 70 + "\n\n")
-        f.write("Booted at:    %s, after a shutdown that wasn't clean\n" % boot.isoformat(sep=" ", timespec="seconds"))
+        f.write("Booted at:    %s, after a shutdown that wasn't clean\n" % iso_at(b).replace("T", " "))
         if last:
             f.write("Went down:    %s  (the last sample before the gap; Windows' own\n"
                     "              estimate in the 6008 below can be many minutes off)\n"
-                    % last.isoformat(sep=" ", timespec="milliseconds"))
-            f.write("Gap:          %d s\n" % (boot - last).total_seconds())
+                    % iso_at(last, ms=True).replace("T", " "))
+            f.write("Gap:          %d s\n" % (b - last))
         if rec:
             said = "a clean shutdown had begun" if rec.get("kind") == "shutdown" else "no shutdown had begun"
             f.write("Last record:  %s %s (%s)\n" % (rec.get("ts", "?").replace("T", " "), rec.get("kind"), said))
@@ -260,6 +317,16 @@ def check(boot=None, now=None):
         battery = battery_before(flight)
         if battery:
             f.write("Battery:      %s  (the last sample before the gap)\n" % battery)
+        if hw:
+            fatal = sum(1 for r in hw if r["fatal"])
+            f.write("Hardware:     %d hardware error record%s around it%s  (Windows' WHEA records, below)\n" % (
+                len(hw), "" if len(hw) == 1 else "s", ", %d of them fatal" % fatal if fatal else ""))
+        if hw:
+            f.write("\nHARDWARE ERRORS (WHEA-Logger, from an hour before to 15 minutes after the boot):\n")
+            for r in hw:
+                f.write("%s  WHEA %d, %s: %s\n" % (r["at"], r["id"], "fatal" if r["fatal"] else "corrected",
+                                                  r["text"]))
+            f.write("\n")
         f.write("\nEVENT 6008 (unexpected shutdown):\n%s\n\n" % txt_6008)
         f.write("EVENT 41 (Kernel-Power, check BugcheckCode):\n%s\n\n" % txt_41)
         f.write("LAST SAMPLES BEFORE THE GAP (last %d rows):\n" % len(flight))
@@ -270,8 +337,7 @@ def check(boot=None, now=None):
         f.flush()
         os.fsync(f.fileno())
     try:
-        write_json(paths.P.last_incident, {"boot": boot.isoformat(timespec="seconds"),
-                                           "time_of_death": last.isoformat(timespec="milliseconds") if last else None,
+        write_json(paths.P.last_incident, {"boot": iso_at(b), "time_of_death": iso_at(last, ms=True) if last else None,
                                            "incident": name})
     except Exception:
         pass

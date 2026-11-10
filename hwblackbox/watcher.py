@@ -23,8 +23,9 @@ import win32process
 
 from . import paths, winapi
 from .programs import ProgramLog
-from .events import EventReader, describe_1074, event_app, newest_event, wanted
-from .util import fmt_dur, now_iso, safe_name
+from .events import (DRIVE_QUERY, WHEA, WHEA_QUERY, EventReader, describe_1074, drive_note, event_app, hardware_note,
+                     newest_event, wanted)
+from .util import fmt_dur, local_text, now_iso, safe_name
 
 SYNCHRONIZE = 0x00100000
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -63,6 +64,7 @@ def meaning(code):
 # does: on 2026-10-21 a restart wrote an incident for a desktop app's helper), and the app container ending an app.
 NOT_CRASHES = (0xC000013A, 0xCFFFFFFF)
 REPORTS_PER_HOUR = 20
+FLOOD = 30                  # records of one kind of Windows record an hour, at most
 APP_REPORT = re.compile(r"incident_(\d{8})_\d{6}_.+\.txt$")     # (a power-off report has no app name)
 
 
@@ -109,10 +111,13 @@ class Watcher:
         self.capped_at = 0
         self.ending = False                                # Windows is shutting down: exits are expected now
         self.signed_out = {}                                # session -> when Windows said it signed out
-        self.notes = {"last_incident": None, "last_shutdown": None, "last_power_loss": None}
+        self.notes = {"last_incident": None, "last_shutdown": None, "last_power_loss": None,
+                      "last_hardware_error": None, "last_drive_error": None}
         self.logs_mb = None
         self.programs = ProgramLog(((cfg.get("sensors") or {}).get("keep_days")) or 183)
         self.noted = {}                                     # the program log's last errors (each written once)
+        self.flood = {}                                     # (source, id) -> when its records were written, last hour
+        self.flood_skipped = {}                             # (source, id) -> how many were left out since
 
     # which watched app a process is, if any, and whether it may still become one (a port rule's process that isn't
     # listening yet: a server that has only just started). `listening()` gives {pid: {ports}}, asked only when needed.
@@ -337,11 +342,30 @@ class Watcher:
         return None
 
     def check_events(self):
+        now = time.time()
         for rec in self.events.new_records():
             if not wanted(rec):
                 continue
             app, crash = event_app(rec)
             rec["app"] = app
+            ins = rec.get("inserts") or []
+            if rec.get("source") == "Application Error" and len(ins) > 10:
+                prog = winapi.program_of(ins[10])        # (which program's exe it was: its folder says)
+                if prog:
+                    rec["program"] = prog
+            # Some boards report a corrected hardware error (or a drive a retry) hundreds of times an hour: each kind
+            # goes into the records FLOOD times an hour at most, and the next one written says how many were left out.
+            key = (rec.get("source"), rec.get("id"))
+            times = self.flood.setdefault(key, collections.deque())
+            while times and now - times[0] > 3600:
+                times.popleft()
+            if len(times) >= FLOOD:
+                self.flood_skipped[key] = self.flood_skipped.get(key, 0) + 1
+                self.note_event(rec)
+                continue
+            times.append(now)
+            if self.flood_skipped.get(key):
+                rec["skipped_before"] = self.flood_skipped.pop(key)
             self.jrnl.write("winevent", rec)
             self.note_event(rec)
             if crash and app and not rec.get("backfill"):
@@ -356,6 +380,14 @@ class Watcher:
             self.notes["last_shutdown"] = describe_1074(at, d.get("param1"), d.get("param5"), d.get("param3"))
         at, _ = newest_event("System", "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=41)]]")
         self.notes["last_power_loss"] = at
+        at, d = newest_event("System", WHEA_QUERY)
+        if at and d.get("_id") is not None:
+            self.notes["last_hardware_error"] = "%s: %s" % (at, hardware_note(WHEA, d["_id"], d.get("_level")))
+        at, d = newest_event("System", DRIVE_QUERY)
+        note = drive_note({"source": d.get("_provider"), "id": d.get("_id"), "inserts": d.get("_values")}) if at \
+            else None
+        if note:
+            self.notes["last_drive_error"] = "%s: %s" % (at, note)
         try:
             newest = max(f for f in os.listdir(paths.P.incidents) if re.match(r"incident_\d{8}_\d{6}_", f))
             with open(os.path.join(paths.P.incidents, newest), encoding="utf-8", errors="replace") as f:
@@ -369,12 +401,20 @@ class Watcher:
         """Keep the latest shutdown request and power loss for the status. A power loss is known by its Kernel-Power
         41, written at the boot after it: one value per loss, which is what Home Assistant's alert keys on."""
         src, eid, ins = rec["source"], rec["id"], rec.get("inserts") or []
-        at = rec["at"].replace("T", " ")
+        # (local time without the offset: the same text load_notes gives after a restart, so the status's facts, and
+        # Home Assistant's, don't change just because the service started again)
+        at = rec["at"][:19].replace("T", " ")
         if src == "User32" and eid == 1074 and ins:
             self.notes["last_shutdown"] = describe_1074(at, ins[0], ins[4] if len(ins) > 4 else None,
                                                         ins[2] if len(ins) > 2 else None)
         elif src == "Microsoft-Windows-Kernel-Power" and eid == 41:
             self.notes["last_power_loss"] = at
+        elif src == WHEA:
+            self.notes["last_hardware_error"] = "%s: %s" % (at, hardware_note(src, eid, rec.get("level")))
+        else:
+            note = drive_note(rec)
+            if note:
+                self.notes["last_drive_error"] = "%s: %s" % (at, note)
 
     def biggest(self, n=8):
         rows = sorted(((p.private, p.name, pid, p.session) for pid, p in self.snapshot.items() if pid), reverse=True)
@@ -398,7 +438,7 @@ class Watcher:
             return
         self.reports.append(now)
         self.last_incident[key] = now
-        self.notes["last_incident"] = "%s: %s" % (now_iso().replace("T", " "), title)
+        self.notes["last_incident"] = "%s: %s" % (local_text(now), title)
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(paths.P.incidents, "incident_%s_%s.txt" % (stamp, safe_name(app)))
         try:

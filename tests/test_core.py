@@ -351,8 +351,25 @@ class PowerOffTest(TempData):
         with open(p, "wb") as f:
             f.write(b"timestamp,a\n2026-10-07T02:14:50,1\n2026-10-07T02:14:55,2\n\x00\x00\x00\n"
                     b"garbage line\n2026-10-07T02:16:00,3\n")
-        rows = _rows_before(p, dt.datetime(2026, 10, 7, 2, 15, 12), 5)
+        rows = _rows_before(p, dt.datetime(2026, 10, 7, 2, 15, 12).timestamp(), 5)
         self.assertEqual([r[1].split(": ")[1] for r in rows], ["2026-10-07T02:14:50,1", "2026-10-07T02:14:55,2"])
+
+    def test_the_last_rows_across_versions_and_packed_days(self):
+        # 1.1.0 writes times with their offset; the day before, without; the day before that is packed (.csv.gz)
+        import gzip
+        from hwblackbox.poweroff import _tail_rows
+        from hwblackbox.util import iso_at
+        t0 = dt.datetime(2026, 11, 8, 23, 59, 55).timestamp()
+        with gzip.open(os.path.join(paths.P.logs, "flight_20261107.csv.gz"), "wb") as f:
+            f.write(b"timestamp,a\n2026-11-07T23:59:59,0\n")
+        with open(os.path.join(paths.P.logs, "flight_20261108.csv"), "w") as f:
+            f.write("timestamp,a\n%s,1\n" % dt.datetime.fromtimestamp(t0).isoformat())
+        with open(os.path.join(paths.P.logs, "flight_20261109.csv"), "w") as f:
+            f.write("timestamp,a\n%s,2\n%s,3\n" % (iso_at(t0 + 10), iso_at(t0 + 20)))
+        rows = _tail_rows("flight_", t0 + 15, 3)
+        self.assertEqual([r[1].rsplit(",", 1)[1] for r in rows], ["0", "1", "2"])
+        self.assertEqual([round(r[0] - t0) for r in rows][1:], [0, 10])
+        self.assertTrue(rows[0][1].startswith("flight_20261107.csv: "))       # (named as the day's log, packed or not)
 
     def test_check_reads_the_times_through_the_event_api(self):
         # (wevtutil's text names its fields in Windows' display language: the check doesn't read it, the report does)
@@ -853,6 +870,7 @@ class RailsLaneTest(TempData):
         svc.agent_down = {}
         svc.ports = type("P", (), {"listed": False, "error": None})()
         svc.disks = type("D", (), {"free_gb": none, "problems": lambda self, cfg: []})()
+        svc.drives = type("Dr", (), {"latest": None, "problems": lambda self: []})()
         svc.thread_ages, svc.STUCK = lambda: {}, {}
         return status.build(svc)
 
@@ -941,7 +959,10 @@ class LaptopTest(TempData):
     def test_why_it_went_off(self):
         from hwblackbox.poweroff import why_41
         self.assertEqual(why_41({"BugcheckCode": "159", "PowerButtonTimestamp": "0"}),
-                         "Windows crashed: a blue screen, stop code 0x0000009F")
+                         "Windows crashed: a blue screen, stop code 0x0000009F (DRIVER_POWER_STATE_FAILURE: a driver "
+                         "failed going to sleep, waking, or a power change)")
+        self.assertEqual(why_41({"BugcheckCode": "0x1C9"}), "Windows crashed: a blue screen, stop code 0x000001C9")
+        self.assertIn("WHEA_UNCORRECTABLE_ERROR", why_41({"BugcheckCode": "292"}))     # (0x124)
         self.assertEqual(why_41({"BugcheckCode": "0", "PowerButtonTimestamp": "133000000000000000"}),
                          "the power button was held down (a forced power-off)")
         self.assertEqual(why_41({"BugcheckCode": "0", "LongPowerButtonPressDetected": "true"}),
@@ -1411,6 +1432,173 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(c["problems"]["level"], "bad")
         self.assertEqual(c["error"]["title"], "A check couldn't run")          # (the rest still ran)
         self.assertIn("disk", c)
+
+    def test_hardware_errors(self):
+        now = time.time()
+        whea = lambda eid, level, ago, **kw: dict({"kind": "winevent", "source": "Microsoft-Windows-WHEA-Logger",   # noqa
+                                                  "id": eid, "level": level, "t": now - ago}, **kw)
+        c = self.run_()["hardware"]
+        self.assertEqual((c["level"], c["summary"]), ("ok", "None in the last 7 days"))
+        c = self.run_(records=[whea(19, "warning", 3600), whea(19, "warning", 600, skipped_before=4),
+                               whea(17, "warning", 300), whea(47, "warning", 8 * 86400)])["hardware"]
+        self.assertEqual(c["level"], "warn")
+        self.assertEqual(c["summary"], "7 hardware errors in the last 7 days")      # (2 + 4 left out, and the PCIe one)
+        self.assertTrue(c["seen"][0].startswith("The CPU: 6 corrected"))
+        self.assertTrue(any("PBO" in a for a in c["advice"]) and any("PCIe generation" in a for a in c["advice"]))
+        self.assertFalse(any("MemTest86" in a for a in c["advice"]))               # (the memory's was 8 days ago)
+        c = self.run_(records=[whea(18, "error", 120)])["hardware"]
+        self.assertEqual((c["level"], c["summary"]), ("bad", "1 hardware error in the last 7 days, 1 fatal"))
+
+    def test_drives(self):
+        now = time.time()
+        ok = [{"disk": 0, "model": "ST1000DM010", "media": "HDD", "health": "healthy", "temp_c": 38, "wear_pct": None,
+               "read_err_unc": 0, "write_err_unc": 0, "power_on_h": 20000},
+              {"disk": 1, "model": "Samsung SSD 990 PRO 1TB", "media": "SSD", "health": "healthy", "temp_c": 41,
+               "wear_pct": 2, "read_err_unc": 0, "write_err_unc": 0, "power_on_h": 3000}]
+        c = self.run_(drives={"drives": ok})["drives"]
+        self.assertEqual((c["level"], c["summary"]), ("ok", "2 drives, all healthy"))
+        self.assertIn("Disk 1 (Samsung SSD 990 PRO 1TB): healthy, 41 °C, 2 % worn", c["seen"][1])
+        self.assertNotIn("drives", self.run_())                                     # (nothing known: no finding)
+        # a drive that's run hot and worn out, and whose uncorrectable errors grew this month
+        bad = [dict(ok[0]), dict(ok[1], temp_c=74, wear_pct=100, read_err_unc=3)]
+        rows = [(now - 20 * 86400, 1, {"read_err_unc": 1, "write_err_unc": 0})]
+        c = self.run_(drives={"drives": bad}, drive_rows=rows)["drives"]
+        self.assertEqual(c["level"], "bad")
+        self.assertIn("3 errors it couldn't correct (+2 this month)", c["seen"][1])
+        self.assertTrue(any("heatsink" in a for a in c["advice"]) and c["advice"][0].startswith("Back up"))
+        # the drives' error records: a controller reset names its drive; a bad block is serious
+        reset = {"kind": "winevent", "source": "stornvme", "id": 129, "level": "warning", "t": now - 600,
+                 "inserts": ["\\Device\\RaidPort1"]}
+        block = {"kind": "winevent", "source": "disk", "id": 7, "level": "error", "t": now - 300,
+                 "inserts": ["\\Device\\Harddisk1\\DR1"]}
+        c = self.run_(drives={"drives": ok}, records=[reset])["drives"]
+        self.assertEqual(c["level"], "info")
+        self.assertIn("Windows reset the drive", c["seen"][-1])
+        c = self.run_(drives={"drives": ok}, records=[reset, block])["drives"]
+        self.assertEqual(c["level"], "bad")
+        self.assertTrue(any(s.startswith("Disk 1 (Samsung SSD 990 PRO 1TB): 1 error record") for s in c["seen"]))
+        self.assertTrue(any("chkdsk" in a for a in c["advice"]))
+
+    def test_crashes_name_the_program(self):
+        now = time.time()
+        ins = ["python.exe", "3.12.10", "0", "gdal313.dll", "3.11", "0", "0xc0000005", "0x1", "0x2a0", "0",
+               "C:\\PROGRA~1\\QGIS34~1.15\\bin\\python.exe"]
+        rec = {"kind": "winevent", "source": "Application Error", "id": 1000, "t": now - 600, "inserts": ins,
+               "app": "python.exe", "program": "QGIS 3.44.15"}
+        c = self.run_(records=[rec, dict(rec, t=now - 300)])["crashes"]
+        self.assertEqual(c["seen"][0].split(": ")[0], "python.exe (QGIS 3.44.15)")
+        self.assertIn("Windows recorded a crash in gdal313.dll (0xc0000005)", c["seen"][0])
+
+
+class NewIn110Test(TempData):
+    """1.1.0: times with their offset, packed day logs, the hardware's and the drives' records, crashes named by their
+    program."""
+
+    def test_times_carry_their_offset_and_the_repeated_hour_is_told_apart(self):
+        from hwblackbox.util import iso_at, now_iso, parse_iso
+        s = now_iso(ms=True)
+        self.assertRegex(s, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d$")
+        self.assertAlmostEqual(parse_iso(s), time.time(), delta=2)
+        self.assertEqual(parse_iso(iso_at(1794000000.0)), 1794000000.0)
+        first = dt.datetime(2026, 11, 1, 1, 30)
+        if first.timestamp() == first.replace(fold=1).timestamp():
+            self.skipTest("this PC's time zone has no daylight saving")
+        t = parse_iso("2026-11-01T01:30:00")                        # (the first 01:30, before 1.1.0: no offset)
+        self.assertEqual(parse_iso("2026-11-01T01:20:00", after=t), t + 3600 - 600)    # (the second, after it)
+        self.assertEqual(parse_iso("2026-11-01T01:40:00", after=t), t + 600)          # (still the first)
+
+    def test_old_days_are_packed_and_read_as_before(self):
+        import gzip
+        from hwblackbox import disks, util
+        from hwblackbox.dashboard import server
+        logs = paths.P.logs
+        today = dt.date(2026, 11, 10)
+        for day in ("20261107", "20261108", "20261109", "20261110"):
+            with open(os.path.join(logs, "flight_%s.csv" % day), "w") as f:
+                f.write("timestamp,cpu_temp_c\n%s-%s-%sT12:00:00,50\n\x00\x00" % (day[:4], day[4:6], day[6:]))
+        with open(os.path.join(logs, "disks_20261107.csv"), "w") as f:
+            f.write("timestamp,drive,free_gb,total_gb\n2026-11-07T12:00:00,C:,40.5,465\n")
+        open(os.path.join(logs, "events_20261107.jsonl"), "w").close()
+        self.assertEqual(util.pack_logs(logs, ("flight_", "disks_"), today=today), 3)
+        # (yesterday's and today's stay plain; the records, events_*.jsonl, aren't a packed kind)
+        self.assertEqual(sorted(os.listdir(logs)), ["disks_20261107.csv.gz", "events_20261107.jsonl",
+                                                    "flight_20261107.csv.gz", "flight_20261108.csv.gz",
+                                                    "flight_20261109.csv", "flight_20261110.csv"])
+        with gzip.open(os.path.join(logs, "flight_20261108.csv.gz"), "rb") as f:
+            self.assertNotIn(b"\x00", f.read())
+        self.assertEqual(disks.read_rows(disks.path_for("2026-11-07"))[0][1:], ("C:", 40.5, 465.0))
+        c = server.FlightCache().get("flight_20261108.csv")
+        self.assertEqual((list(c["cpu_temp_c"]), c["packed"]), ([50.0], True))
+        util.prune(logs, "flight_", ".csv", 1)                         # (packed or not, an old day goes)
+        self.assertFalse([f for f in os.listdir(logs) if f.startswith("flight_2026110") and f < "flight_20261109"])
+
+    def test_a_cut_off_row_is_ended_before_the_next(self):
+        from hwblackbox.util import ensure_line_end
+        p = os.path.join(paths.P.logs, "x.csv")
+        with open(p, "wb") as f:
+            f.write(b"timestamp,a\n2026-11-10T12:00:00,1\n2026-11-10T12:00:05,\x00\x00\x00")
+        ensure_line_end(p)
+        with open(p, "ab") as f:
+            f.write(b"2026-11-10T12:01:00,3\n")
+        with open(p, "rb") as f:
+            self.assertTrue(f.read().endswith(b"\x00\n2026-11-10T12:01:00,3\n"))
+
+    def test_hardware_and_drive_records_in_words(self):
+        from hwblackbox.dashboard.server import describe
+        from hwblackbox.events import drive_note, hardware_note
+        whea = {"kind": "winevent", "source": "Microsoft-Windows-WHEA-Logger", "id": 19, "level": "warning",
+                "inserts": [], "skipped_before": 12}
+        d = describe(whea, time.time())
+        self.assertEqual((d["level"], d["group"]), ("warn", "hardware"))
+        self.assertTrue(d["text"].startswith("A corrected hardware error in the CPU (a machine check) (WHEA 19)"))
+        self.assertIn("12 more like it", d["text"])
+        self.assertEqual(describe(dict(whea, id=18, level="error"), 0)["level"], "bad")
+        self.assertEqual(hardware_note("x", 17, "warning"), "a corrected hardware error in a PCI Express link (WHEA 17)")
+        reset = {"kind": "winevent", "source": "stornvme", "id": 129, "level": "warning",
+                 "inserts": ["\\Device\\RaidPort0"]}
+        self.assertEqual(describe(reset, 0)["text"], "A drive: Windows reset the drive (it had stopped answering) "
+                                                     "(stornvme 129)")
+        block = {"kind": "winevent", "source": "disk", "id": 7, "level": "error", "inserts": ["\\Device\\Harddisk2\\DR2"]}
+        self.assertEqual(describe(block, 0)["level"], "bad")
+        self.assertEqual(drive_note(block), "disk 2: a bad block on the drive (part of it can't be read) (disk 7)")
+        self.assertIsNone(drive_note({"source": "disk", "id": 999}))
+
+    def test_a_flood_of_records_is_capped(self):
+        from hwblackbox import watcher
+
+        class Ev:
+            def __init__(self, recs):
+                self.recs, self.last = recs, {}
+
+            def new_records(self):
+                out, self.recs = self.recs, []
+                return out
+
+            def save(self):
+                pass
+        jr = Recorder()
+        w = watcher.Watcher(jr, {"watch": []}, None, None)
+        rec = lambda: {"log": "System", "source": "Microsoft-Windows-WHEA-Logger", "id": 17, "level": "warning",   # noqa
+                       "at": "2026-11-10T12:00:00-05:00", "inserts": []}
+        w.events = Ev([rec() for _ in range(watcher.FLOOD + 5)])
+        w.check_events()
+        self.assertEqual(sum(1 for r in jr.recs if r["kind"] == "winevent"), watcher.FLOOD)
+        self.assertEqual(w.flood_skipped[("Microsoft-Windows-WHEA-Logger", 17)], 5)
+        self.assertEqual(w.notes["last_hardware_error"], "2026-11-10 12:00:00: a corrected hardware error in a PCI "
+                                                         "Express link (WHEA 17)")
+
+    def test_which_program_an_exe_is(self):
+        from hwblackbox.winapi import program_of
+        cases = {r"C:\Program Files\Mozilla Firefox\firefox.exe": "Mozilla Firefox",
+                 r"C:\Users\bob\AppData\Local\Discord\app-1.0.9200\Discord.exe": "Discord",
+                 r"C:\Windows\explorer.exe": "Windows",
+                 r"G:\LocalCast\.venv\Scripts\python.exe": "LocalCast",
+                 r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.21.2361.0_x64__8wekyb3d8bbwe\wt.exe":
+                     "Microsoft.WindowsTerminal",
+                 "\\\\server\\share\\x.exe": None, "//server/share/x.exe": None, r"C:\a\..\b.exe": None,
+                 "python.exe": None, "": None, None: None}
+        for path, want in cases.items():
+            self.assertEqual(program_of(path), want, path)
 
 
 if __name__ == "__main__":

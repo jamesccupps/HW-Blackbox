@@ -19,7 +19,7 @@ import time
 import psutil
 
 from . import paths
-from .util import now_iso, parse_iso, prune
+from .util import ensure_line_end, now_iso, open_log, parse_iso, prune
 
 COLUMNS = ["timestamp", "drive", "free_gb", "total_gb"]
 WINDOW = 3600          # seconds "filling fast" looks back
@@ -47,17 +47,19 @@ def path_for(day):
 
 
 def read_rows(path):
-    """[(epoch, drive, free_gb, total_gb)] from a day's log; damaged rows skipped."""
+    """[(epoch, drive, free_gb, total_gb)] from a day's log (packed or not); damaged rows skipped."""
     out = []
+    last = None
     try:
-        with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        with open_log(path) as f:
             for row in csv.reader(line.replace("\x00", "") for line in f):
                 if len(row) < 4 or row[0] == "timestamp":
                     continue
-                t = parse_iso(row[0])
+                t = parse_iso(row[0], last)
                 try:
                     if t:
                         out.append((t, row[1], float(row[2]), float(row[3])))
+                        last = t
                 except ValueError:
                     continue
     except OSError:
@@ -116,6 +118,8 @@ class DiskWatch:
     def write(self, day, rows):
         path = path_for(day)
         new = not os.path.exists(path)
+        if day != self.day and not new:
+            ensure_line_end(path)               # (a row cut off by a power loss stays on a line of its own)
         with open(path, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if new:

@@ -34,7 +34,8 @@ import urllib.request
 import psutil
 
 from .. import NAME, VERSION, config, paths, poweroff, update, winapi
-from ..util import age, read_json, tail_lines
+from ..events import WHEA_WORDS, disk_error, hardware_error
+from ..util import age, log_path, parse_iso, read_json, read_log_bytes, tail_lines
 
 APP = "hw-blackbox-dashboard"
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
@@ -62,10 +63,11 @@ FLIGHT = collections.OrderedDict([
 RAILS = ("v12_v", "v5_v", "v33_v", "vcore_v", "vsoc_v", "cpu_power_w", "cpu_temp_c")
 # records worth a line on the Events page (the rest are bulky or minute-by-minute)
 EVENT_KINDS = {"exit", "start", "winevent", "shutdown", "power", "session", "display", "taskbar", "port", "startup",
-               "stop", "error", "agent", "clock", "sensors", "power_off_report", "boot_part"}
+               "stop", "error", "agent", "clock", "sensors", "power_off_report", "boot_part", "logs"}
 # the kinds a session agent writes: the only ones taken from sessions\ (which every user can write a folder in)
 AGENT_KINDS = {"display", "taskbar", "shutdown", "startup", "stop", "error"}
 POWEROFF_NAME = re.compile(r"incident_\d{8}_\d{6}\.txt$")
+OFFSET = r"(?:[+-]\d\d:\d\d|Z)?"                    # (a time's offset from UTC: written since 1.1.0)
 INCIDENT_NAME = re.compile(r"incident_\d{8}_\d{6}[\w.\-]*\.txt$")
 
 
@@ -110,7 +112,8 @@ class FlightCache:
                 self.files.clear()
 
     def get(self, name):
-        path = os.path.join(paths.P.logs, name)
+        path = log_path(os.path.join(paths.P.logs, name))
+        packed = path.endswith(".gz")                     # (a day two or more days old: whole, and it won't grow)
         try:
             size = os.path.getsize(path)
         except OSError:
@@ -118,18 +121,24 @@ class FlightCache:
         with self.lock:
             self.used = time.time()
             c = self.files.get(name)
-            if c is None or size < c["size"]:
-                c = self.files[name] = {"size": 0, "pos": 0, "head": None, "t": array.array("d"), "cols": []}
+            if c is None or size < c["size"] or packed != c.get("packed", False) or (packed and size != c["size"]):
+                c = self.files[name] = {"size": 0, "pos": 0, "head": None, "t": array.array("d"), "cols": [],
+                                        "packed": packed}
             self.files.move_to_end(name)
             while len(self.files) > self.KEEP:
                 self.files.popitem(last=False)
             if size > c["pos"]:
-                with open(path, "rb") as f:
-                    f.seek(c["pos"])
-                    chunk = f.read(size - c["pos"])
-                end = chunk.rfind(b"\n") + 1               # (a row still being written waits for next time)
+                if packed:
+                    chunk = read_log_bytes(path)
+                    c["pos"] = size
+                    end = len(chunk)
+                else:
+                    with open(path, "rb") as f:
+                        f.seek(c["pos"])
+                        chunk = f.read(size - c["pos"])
+                    end = chunk.rfind(b"\n") + 1               # (a row still being written waits for next time)
+                    c["pos"] += end
                 lines = chunk[:end].replace(b"\x00", b"").decode("utf-8", "replace").splitlines()
-                c["pos"] += end
                 for row in csv.reader(lines):
                     if not row:
                         continue
@@ -142,7 +151,9 @@ class FlightCache:
                                 c[col] = array.array("d", [math.nan]) * len(c["t"])
                                 c["cols"].append(col)
                         continue
-                    t = epoch(row[0])
+                    # (the row before says which of the hour that repeats as daylight saving ends a time without an
+                    # offset is: rows written before 1.1.0 have none)
+                    t = parse_iso(row[0], c["t"][-1] if c["t"] else None)
                     if t is None or c["head"] is None:
                         continue
                     c["t"].append(t)
@@ -285,6 +296,7 @@ def api_overview(q):
         "problems": (st or {}).get("problems") or [] if ages["status"] is not None and ages["status"] < 120 else [],
         "ha": {"enabled": bool(ha.get("enabled")), "entity": ha.get("entity")},
         "power_offs": cached("power_offs", 30, power_offs),
+        "drives": (read_json(paths.P.drives) or {}).get("drives") or [],
         "milestones": (cfg.get("dashboard") or {}).get("milestones") or [],
         "first_log": cached("first_log", 300, first_log_day),
     }
@@ -292,7 +304,8 @@ def api_overview(q):
 
 def first_log_day():
     try:
-        names = sorted(f for f in os.listdir(paths.P.logs) if f.startswith("flight_") and f.endswith(".csv"))
+        names = sorted(f for f in os.listdir(paths.P.logs) if f.startswith("flight_") and f.endswith((".csv",
+                                                                                                    ".csv.gz")))
         return names[0][7:15] if names else None
     except OSError:
         return None
@@ -397,7 +410,7 @@ def disk_meta(drive):
 def disk_rows(day):
     """A day's rows [(epoch, drive, free GB, total GB)], parsed again only when the file has grown."""
     from ..disks import path_for, read_rows
-    path = path_for(day)
+    path = log_path(path_for(day))
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -443,6 +456,7 @@ _prog_lock = threading.Lock()
 def _rows_of(path):
     """A log's rows, parsed again only when the file has grown."""
     from ..programs import read_rows
+    path = log_path(path)
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -571,6 +585,7 @@ def api_programs(q):
 # the Diagnose tab: diagnose.py judges, this gathers --------------------------------------------------------------------
 
 DIAG_COLS = ("cpu_temp_c", "gpu_temp_c", "v12_v", "v5_v", "v33_v", "ram_pct", "gpu_vram_mb", "battery_pct", "on_ac")
+_programs = {}                  # an exe's path -> the program it belongs to (winapi.program_of)
 
 
 def diagnose_inputs(now=None):
@@ -622,15 +637,28 @@ def diagnose_inputs(now=None):
                             displays.append(t)
                         elif not agent and rec.get("kind") in ("exit", "winevent"):
                             rec["t"] = t
+                            ins = rec.get("inserts") or []
+                            if rec.get("source") == "Application Error" and not rec.get("program") and len(ins) > 10:
+                                # (recorded before 1.1.0, without the program: worked out from the exe's path now)
+                                if ins[10] not in _programs:
+                                    _programs[ins[10]] = winapi.program_of(ins[10])
+                                rec["program"] = _programs[ins[10]]
                             records.append(rec)
             except OSError:
                 continue
+        d += dt.timedelta(days=1)
+    from .. import drives
+    drive_rows = []
+    d = dt.date.fromtimestamp(now - 30 * 86400)
+    while d <= dt.date.fromtimestamp(now):
+        drive_rows.extend(drives.read_rows(drives.path_for(d)))
         d += dt.timedelta(days=1)
     return {"now": now, "status": read_json(paths.P.status) or {}, "status_age": age(paths.P.status),
             "cfg": settings(), "sensors": sens.get("sensors") or [], "flight_t": list(ts),
             "flight": {c: [None if v != v else v for v in vals] for c, vals in flight.items()},
             "programs": program_rows(day, now), "power_offs": power_offs(), "records": records,
-            "displays": displays, "watched_mem": watched}
+            "displays": displays, "watched_mem": watched, "drives": read_json(paths.P.drives) or {},
+            "drive_rows": drive_rows}
 
 
 def diagnose_now():
@@ -645,22 +673,30 @@ def api_rails(q):
     start = end - minutes * 60
     rows = []
     for d in sorted({dt.date.fromtimestamp(start), dt.date.fromtimestamp(end)}):
-        path = os.path.join(paths.P.logs, "rails_%s.csv" % d.strftime("%Y%m%d"))
+        path = log_path(os.path.join(paths.P.logs, "rails_%s.csv" % d.strftime("%Y%m%d")))
         try:
             size = os.path.getsize(path)
         except OSError:
             continue
-        want = int(minutes * 60 * 4 * 90 * 1.3) + 4096       # (rows are about 75 bytes)
-        with open(path, "rb") as f:
-            f.seek(max(0, size - want))
-            text = f.read().replace(b"\x00", b"").decode("utf-8", "replace")
+        want = int(minutes * 60 * 4 * 100 * 1.3) + 4096      # (rows are about 75 bytes; with the offset, 81)
+        if path.endswith(".gz"):                     # (packed: only with the clock put back days)
+            data = read_log_bytes(path)
+            size = len(data)
+            text = data[-want:].replace(b"\x00", b"").decode("utf-8", "replace")
+        else:
+            with open(path, "rb") as f:
+                f.seek(max(0, size - want))
+                text = f.read().replace(b"\x00", b"").decode("utf-8", "replace")
         lines = text.splitlines()
         if size > want:
             lines = lines[1:]                        # (cut in half by the seek)
+        last = None
         for row in csv.reader(lines):
             if not row or row[0] == "timestamp":
                 continue
-            t = epoch(row[0])
+            t = parse_iso(row[0], last)
+            if t is not None:
+                last = t
             if t is not None and start <= t <= end:
                 rows.append((t, row))
     rows.sort(key=lambda r: r[0])
@@ -692,16 +728,21 @@ def power_offs():
                 text = f.read().replace("\x00", "")
         except OSError:
             continue
-        died, last_rails = None, None
-        for m in re.finditer(r"^(flight|rails)_\d{8}\.csv: (\d{4}-\d\d-\d\dT[\d:.]+),(.*)$", text, re.MULTILINE):
-            if died is None or m.group(2) > died:
-                died = m.group(2)
-            if m.group(1) == "rails" and (last_rails is None or m.group(2) > last_rails[0]):
-                last_rails = (m.group(2), m.group(3))
-        m = re.search(r"Went down:\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)", text)
+        died, last_rails = None, None                 # (epoch, the time as written[, the rest of the row])
+        for m in re.finditer(r"^(flight|rails)_\d{8}\.csv: (\d{4}-\d\d-\d\dT[\d:.]+%s),(.*)$" % OFFSET, text,
+                             re.MULTILINE):
+            t = parse_iso(m.group(2))
+            if t is None:
+                continue
+            if died is None or t > died[0]:
+                died = (t, m.group(2))
+            if m.group(1) == "rails" and (last_rails is None or t > last_rails[0]):
+                last_rails = (t, m.group(2), m.group(3))
+        died = died[1] if died else None
+        m = re.search(r"Went down:\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?%s)" % OFFSET, text)
         if m:
             died = m.group(1).replace(" ", "T")
-        m = re.search(r"Booted at:\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", text)
+        m = re.search(r"Booted at:\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d%s)" % OFFSET, text)
         boot = m.group(1).replace(" ", "T") if m else None
         if not boot:                    # (older reports are named by Windows' 6008 record, written at the boot)
             boot = dt.datetime.strptime(name[9:24], "%Y%m%d_%H%M%S").isoformat()
@@ -719,7 +760,7 @@ def power_offs():
         battery = m.group(1) if m else None
         rails = None
         if last_rails:
-            v = last_rails[1].split(",")
+            v = last_rails[2].split(",")
             rails = {k: (float(x) if x else None) for k, x in zip(RAILS, v)}
         b, d = epoch(boot), epoch(died) if died else None
         out.append({"report": name, "boot": boot, "went_down": died, "gap_s": round(b - d, 1) if b and d else None,
@@ -864,8 +905,17 @@ def describe(rec, t, src="service", agent=None):
         elif s == "Service Control Manager":
             text = "The %s service ended unexpectedly" % (ins[0] if ins else "?")
             level = "warn"
+        elif hardware_error(rec):
+            part, fatal = hardware_error(rec)
+            text = "A %s hardware error in %s (WHEA %s)" % ("fatal" if fatal else "corrected", WHEA_WORDS[part], eid)
+            level = "bad" if fatal else "warn"
+        elif disk_error(rec):
+            what, level, disk = disk_error(rec)
+            text = "%s: %s (%s %s)" % ("Disk %d" % disk if disk is not None else "A drive", what, s, eid)
         else:
             text = "%s %s" % (s, eid)
+        if rec.get("skipped_before"):
+            text += " (%d more like it in the hour before, left out of the records)" % rec["skipped_before"]
         if rec.get("backfill"):
             text += " (read after the fact)"
     elif k == "shutdown":
@@ -929,11 +979,15 @@ def describe(rec, t, src="service", agent=None):
         level = "bad"
     elif k == "boot_part":
         text = "AppWatch's boot part: %s (%s)" % (rec.get("event"), rec.get("why"))
+    elif k == "logs":
+        text = "Packed %s old day logs into .csv.gz (a tenth of the size; read as before)" % rec.get("files")
     group = {"exit": "apps", "start": "apps", "taskbar": "apps", "display": "apps", "session": "sessions",
              "winevent": "windows", "shutdown": "power", "power": "power", "port": "ports", "clock": "power",
              "power_off_report": "power"}.get(k, "monitor")
     if k == "winevent" and rec.get("id") in (41, 6008, 12, 13, 1074):
         group = "power"
+    if k == "winevent" and (hardware_error(rec) or disk_error(rec)):
+        group = "hardware"
     return {"t": t, "kind": k, "group": group, "level": level, "text": text, "src": src, "rec": rec}
 
 
