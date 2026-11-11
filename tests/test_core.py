@@ -706,9 +706,12 @@ class HardeningTest(TempData):
 
         def mine(p):
             # (an agent runs unelevated, so what it makes is its user's; run elevated, as on GitHub's runner, a new
-            # file's owner would be the administrators: made the user's here, as an agent's are)
-            win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT,
-                                               win32security.OWNER_SECURITY_INFORMATION, my_sid, None, None, None)
+            # file's owner would be the administrators: made the user's here, as an agent's are. SetFileSecurity: it
+            # changes the owner alone, where SetNamedSecurityInfo works the inherited grants out again)
+            if agents.owner_of(p) != me:
+                sd = win32security.SECURITY_DESCRIPTOR()
+                sd.SetSecurityDescriptorOwner(my_sid, False)
+                win32security.SetFileSecurity(p, win32security.OWNER_SECURITY_INFORMATION, sd)
         old = paths.P.session_dir(name)
         os.makedirs(old)
         mine(old)
