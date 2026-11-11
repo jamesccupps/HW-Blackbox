@@ -24,7 +24,8 @@
   C:\Program Files\HWBlackbox     the program, with a Python of its own (only admins can change it: the service
                                   runs as SYSTEM)
   C:\ProgramData\HWBlackbox       the data: SYSTEM and admins write, everyone reads; each user's session agent
-                                  writes in sessions\<user>; secrets\ is for SYSTEM and admins only
+                                  writes in sessions\<their SID> (the service makes it, for that user alone); secrets\
+                                  is for SYSTEM and admins only
   the service "HWBlackbox"        LocalSystem, automatic start, restarted by Windows if it fails
   the task "HWBlackboxAgent"      at every sign-in, as that user, not elevated: the session agent
   Start menu: "HW Blackbox"       opens the dashboard
@@ -64,6 +65,9 @@ $Py = Join-Path $Dest 'python\pythonw.exe'
 $PyCon = Join-Path $Dest 'python\python.exe'
 $StartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\HW Blackbox.lnk'
 $AppsKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HWBlackbox'     # (Installed apps' entry)
+$ToastKey = 'HKLM:\SOFTWARE\Classes\AppUserModelId\HWBlackbox'                        # (its notifications' name)
+$Stage = "$Dest.new"                        # (the new program, copied and checked before the old one is touched)
+$Old = "$Dest.old"
 if (-not $Report) { $Report = Join-Path $env:TEMP 'hwblackbox-install.txt' }
 $script:failed = @()
 $script:warned = @()
@@ -151,9 +155,12 @@ function Initialize-DataFolder([string]$Root) {
     $p = Join-Path $Root $d
     if (-not (Get-OwnAttributes $p)) { [void](New-Item -ItemType Directory -Path $p) }
   }
-  # sessions\: each user's session agent makes a folder of its own there (and owns it). secrets\: SYSTEM and admins.
-  & icacls.exe (Join-Path $Root 'sessions') /grant '*S-1-5-32-545:(AD)' '*S-1-3-0:(OI)(CI)(IO)M' /Q | Out-Null
+  # sessions\: the service makes each user's folder there as they sign in (named by their account's SID, for them
+  # alone). Users can't make folders in it: until 1.1.0 they could (each agent made its own, by the user's name), and
+  # any user could make anyone's. Those grants come off an older install.
+  & icacls.exe (Join-Path $Root 'sessions') /remove:g '*S-1-5-32-545' '*S-1-3-0' /Q | Out-Null
   if ($LASTEXITCODE) { Say "setting the permissions of sessions\ failed (icacls $LASTEXITCODE)"; exit 1 }
+  # secrets\: SYSTEM and admins.
   & icacls.exe (Join-Path $Root 'secrets') /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
   if ($LASTEXITCODE) { Say "setting the permissions of secrets\ failed (icacls $LASTEXITCODE)"; exit 1 }
 }
@@ -203,6 +210,80 @@ function Install-PawnIO {
   if ($d) { Say "PawnIO driver: $($d.State)" }
 }
 
+# The program's files as the build listed them (MANIFEST.json): which of them, in $Root, are missing or changed.
+function Get-Mismatches([string]$Root, $Manifest) {
+  $bad = @()
+  foreach ($p in $Manifest.sha256.PSObject.Properties) {
+    $file = Join-Path $Root ($p.Name -replace '/', '\')
+    if (-not (Test-Path -LiteralPath $file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $p.Value.ToUpper()) {
+      $bad += $p.Name
+    }
+  }
+  return ,$bad
+}
+# The new program into $To (a folder of its own in Program Files), the build's files only, each checked. Returns how
+# many, or $null (having said why) when one doesn't match: nothing installed has been touched then.
+function Copy-Staged([string]$From, [string]$To, $Manifest) {
+  if (Get-OwnAttributes $To) { & cmd.exe /c rmdir /s /q "$To" }           # (left by an install that stopped)
+  if (Get-OwnAttributes $To) { Say "$To is left from an earlier install and can't be removed: restart, then try again"; return $null }
+  & robocopy.exe $From $To /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XF 'hwblackbox-install*.txt' | Out-Null
+  if ($LASTEXITCODE -ge 8) { Say "copying failed (robocopy $LASTEXITCODE)"; return $null }
+  # anything that isn't the build's (added to the folder it came from) is left out: it never reaches Program Files,
+  # where the service would load it (a .pth file there would run as SYSTEM)
+  $want = @{ 'manifest.json' = $true }
+  foreach ($p in $Manifest.sha256.PSObject.Properties) { $want[($p.Name -replace '/', '\').ToLowerInvariant()] = $true }
+  $extra = @()
+  foreach ($f in Get-ChildItem -LiteralPath $To -Recurse -File -Force) {
+    $rel = $f.FullName.Substring($To.TrimEnd('\').Length + 1)
+    if (-not $want.ContainsKey($rel.ToLowerInvariant())) { $extra += $rel; Remove-Item -LiteralPath $f.FullName -Force }
+  }
+  if ($extra) { Warn "left out $($extra.Count) file(s) that aren't the build's: $(($extra | Select-Object -First 5) -join ', ')" }
+  $bad = Get-Mismatches $To $Manifest
+  if ($bad.Count) {
+    Say "these files don't match the build: $(($bad | Select-Object -First 10) -join ', '). Nothing was changed: download the release again"
+    & cmd.exe /c rmdir /s /q "$To"
+    return $null
+  }
+  # (a downloaded release carries Windows' "from the internet" mark, which would make the shortcut ask before it runs)
+  Get-ChildItem -LiteralPath $To -Recurse -File | Unblock-File
+  return ($want.Count - 1)
+}
+# The checked copy in place of the installed program: the installed one moved aside, the new one renamed in, the old
+# one removed. If the installed folder can't be moved (a window open in it), the new files go over it instead and are
+# checked again there. $true, or $false (having said why) with the installed program as it was.
+function Swap-Program([string]$New, [string]$To, [string]$Aside, $Manifest) {
+  if (Get-OwnAttributes $Aside) { & cmd.exe /c rmdir /s /q "$Aside" }
+  $moved = $false
+  if (Get-OwnAttributes $To) {
+    try { Rename-Item -LiteralPath $To -NewName (Split-Path $Aside -Leaf) -ErrorAction Stop; $moved = $true }
+    catch { Say "  ($To is in use, so the new files go over it: $($_.Exception.Message))" }
+  }
+  if ($moved -or -not (Get-OwnAttributes $To)) {
+    try { Rename-Item -LiteralPath $New -NewName (Split-Path $To -Leaf) -ErrorAction Stop }
+    catch {
+      Say "putting the new program in place failed: $($_.Exception.Message)"
+      if ($moved) { Rename-Item -LiteralPath $Aside -NewName (Split-Path $To -Leaf) }
+      return $false
+    }
+    if ($moved) {
+      & cmd.exe /c rmdir /s /q "$Aside"
+      if (Get-OwnAttributes $Aside) { Warn "the old program is left in $Aside (a file in it was held open): delete it after a restart" }
+    }
+    Say "in place: $To"
+    return $true
+  }
+  & robocopy.exe $New $To /MIR /R:3 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
+  $rc = $LASTEXITCODE
+  & cmd.exe /c rmdir /s /q "$New"
+  $bad = Get-Mismatches $To $Manifest
+  if ($rc -ge 8 -or $bad.Count) {
+    Say "copying over $To failed (robocopy $rc; $($bad.Count) files don't match): close what has it open (or restart), then run this again"
+    return $false
+  }
+  Say "copied over: $To"
+  return $true
+}
+
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
            [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin -and $Uninstall) {
@@ -239,6 +320,8 @@ if ($Uninstall) {
   }
   if (Test-Path $StartMenu) { Remove-Item $StartMenu -Force; Say 'removed the Start menu shortcut' }
   if (Test-Path $AppsKey) { Remove-Item $AppsKey -Recurse -Force; Say 'removed it from Installed apps' }
+  if (Test-Path $ToastKey) { Remove-Item $ToastKey -Recurse -Force; Say 'removed its notifications'' name' }
+  foreach ($p in $Stage, $Old) { if (Get-OwnAttributes $p) { & cmd.exe /c rmdir /s /q "$p" } }
   if (Test-Path $Dest) {
     # (a moment for the processes just ended to let go of their files, then once more)
     $gone = $false
@@ -286,31 +369,33 @@ else {
   elseif ($pawn.State -ne 'Running') { Warn "the PawnIO driver is installed but $($pawn.State.ToLower()): restart the PC to start it" }
 }
 
-Say '== 2. Stop a running HW Blackbox (an update)'
+Say "== 2. Copy the program to $Stage and check it"
+# Into a folder of its own in Program Files first (only admins can change it), and checked there, while whatever is
+# installed keeps running: a damaged or changed copy is never put where the service runs it, as SYSTEM. Only the
+# build's own files: anything else in the folder it came from is left out. (Until 1.1.0 the copy went straight over
+# the installed program and was checked after; a bad copy stopped the install with the service pointing at it.)
+$copied = Copy-Staged $PSScriptRoot $Stage $manifest
+if (-not $copied) { exit 1 }
+Say "copied and checked $copied files"
+
+Say '== 3. Stop a running HW Blackbox (an update)'
 Stop-HWBlackbox
 
-Say "== 3. Copy the program to $Dest"
-& robocopy.exe $PSScriptRoot $Dest /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XF 'hwblackbox-install*.txt' | Out-Null
-if ($LASTEXITCODE -ge 8) { Say "robocopy failed ($LASTEXITCODE)"; exit 1 }
-# every file as built (a damaged or changed copy shouldn't run as SYSTEM)
-$bad = @()
-foreach ($p in $manifest.sha256.PSObject.Properties) {
-  $file = Join-Path $Dest ($p.Name -replace '/', '\')
-  if (-not (Test-Path $file) -or (Get-FileHash $file -Algorithm SHA256).Hash -ne $p.Value.ToUpper()) { $bad += $p.Name }
+Say "== 4. Put it in $Dest"
+if (-not (Swap-Program $Stage $Dest $Old $manifest)) {
+  # (the old program, as it was: started again, so an update that couldn't go in leaves the PC watched)
+  if (Get-Service -Name $Service -ErrorAction SilentlyContinue) { try { Start-Service -Name $Service } catch { } }
+  exit 1
 }
-if ($bad) { Say "these files don't match the build: $($bad[0..9] -join ', ')"; exit 1 }
-# (a downloaded release carries Windows' "from the internet" mark, which would make the shortcut ask before it runs)
-Get-ChildItem $Dest -Recurse -File | Unblock-File
-Say "copied and checked $($manifest.files) files"
 
-Say "== 4. The data folder $Data"
+Say "== 5. The data folder $Data"
 Initialize-DataFolder $Data
 $initArgs = @('init', '--data-dir', $Data)
 foreach ($s in $Set) { $initArgs += @('--set', $s) }
 Run-Hwb $initArgs
 if (-not (Test-Path (Join-Path $Data 'config.json'))) { Say 'no config.json: the settings could not be written'; exit 1 }
 
-Say '== 5. The service'
+Say '== 6. The service'
 $bin = '"{0}" -m hwblackbox service' -f $Py
 $desc = 'HW Blackbox: every sensor and the voltage rails into crash-safe logs, the apps that close or crash, Windows'' records, the ports, and a report for every power-off. The dashboard: HW Blackbox in the Start menu.'
 if (Get-Service -Name $Service -ErrorAction SilentlyContinue) {
@@ -331,7 +416,7 @@ Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$Service" -Name 
 $q = sc.exe qc $Service
 Say ("registered: " + (($q | Select-String 'BINARY_PATH_NAME|START_TYPE|SERVICE_START_NAME') -join ' | ') -replace '\s+', ' ')
 
-Say '== 6. The session agent: at every sign-in, as that user'
+Say '== 7. The session agent: at every sign-in, as that user'
 $users = (New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')).Translate([Security.Principal.NTAccount]).Value
 $action = New-ScheduledTaskAction -Execute $Py -Argument '-m hwblackbox agent' -WorkingDirectory (Join-Path $Dest 'app')
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -342,7 +427,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Pr
   -Description 'HW Blackbox''s session agent: the screens, the app in front, sign-outs, and the dashboard.' -Force | Out-Null
 Say "registered $TaskName (group $users)"
 
-Say '== 7. The Start menu shortcut, and Installed apps'
+Say '== 8. The Start menu shortcut, Installed apps, and the notifications'' name'
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($StartMenu)
 $lnk.TargetPath = $Py
@@ -374,10 +459,19 @@ try {
     -Value ([int]([long]$manifest.bytes / 1KB)) | Out-Null                      # (in KB)
   Say 'listed in Settings -> Apps -> Installed apps (its Uninstall removes HW Blackbox and keeps the data)'
 } catch { Warn "listing it in Installed apps: $($_.Exception.Message) (Uninstall.cmd still removes it)" }
+# Windows' notifications name the app they come from: registered here as "HW Blackbox", with its icon (else they'd
+# say "Windows PowerShell", which shows them). Nice to have too: a warning if it fails.
+try {
+  New-Item -Path $ToastKey -Force | Out-Null
+  New-ItemProperty -Path $ToastKey -Name DisplayName -Value 'HW Blackbox' -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path $ToastKey -Name IconUri -PropertyType String -Force `
+    -Value (Join-Path $Dest 'app\hwblackbox\dashboard\icon.png') | Out-Null
+  Say 'its notifications show as "HW Blackbox"'
+} catch { Warn "naming its notifications: $($_.Exception.Message) (they show as Windows PowerShell's)" }
 
 if ($NoStart) { Say 'DONE (not started: -NoStart)'; exit 0 }
 
-Say '== 8. Start'
+Say '== 9. Start'
 $t0 = Get-Date
 try {
   Start-Service -Name $Service
@@ -392,7 +486,7 @@ try {
   Say "started the agent in session $((Get-Process -Id $PID).SessionId)"
 } catch { Warn "starting the agent now: $($_.Exception.Message) (it starts at the next sign-in)" }
 
-Say '== 9. Check'
+Say '== 10. Check'
 $status = Join-Path $Data 'state\status.json'
 $deadline = (Get-Date).AddSeconds(90)
 $st = $null

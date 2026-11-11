@@ -629,18 +629,22 @@ class HardeningTest(TempData):
 
         def line(**r):
             return json.dumps(dict({"ts": now.isoformat()}, **r)) + "\n"
+        from hwblackbox import winapi
         with open(os.path.join(paths.P.logs, "events_%s.jsonl" % day), "w", encoding="utf-8") as f:
             f.write(line(kind="startup", version="1.0.6", data_dir="x"))
-        folder = os.path.join(paths.P.sessions, "service")         # (a user named "service", or posing as it)
-        os.makedirs(folder)
-        with open(os.path.join(folder, "session_%s.jsonl" % day), "w", encoding="utf-8") as f:
-            f.write("[]\n")                                                       # not a record
-            f.write(line(kind="winevent", source="Microsoft-Windows-Kernel-Power", id=41, at=now.isoformat()))
-            f.write(line(kind="display", before=5, after=6))                      # wrong types
-            f.write(json.dumps({"ts": "2099-01-01T00:00:00", "kind": "startup", "version": "x"}) + "\n")
-            f.write(line(kind="startup", version="1.0.6", data_dir="x"))
+        # (a folder named "service", posing as the service: an older version's kind of folder, not read since 1.1.0)
+        for name in ("service", winapi.token_sid()):
+            folder = os.path.join(paths.P.sessions, name)
+            os.makedirs(folder)
+            with open(os.path.join(folder, "session_%s.jsonl" % day), "w", encoding="utf-8") as f:
+                f.write("[]\n")                                                       # not a record
+                f.write(line(kind="winevent", source="Microsoft-Windows-Kernel-Power", id=41, at=now.isoformat()))
+                f.write(line(kind="display", before=5, after=6))                      # wrong types
+                f.write(json.dumps({"ts": "2099-01-01T00:00:00", "kind": "startup", "version": "x"}) + "\n")
+                f.write(line(kind="startup", version="1.0.6", data_dir="x"))
         texts = [e["text"] for e in server.api_events({})["events"]]
-        self.assertEqual(texts, ["HW Blackbox's service started (1.0.6)", "The session agent (service) started (1.0.6)"])
+        self.assertEqual(texts, ["HW Blackbox's service started (1.0.6)",
+                                 "The session agent (%s) started (1.0.6)" % winapi.user_name()])
 
     def test_app_reports_are_capped_and_pruned(self):
         from hwblackbox import watcher
@@ -681,13 +685,38 @@ class HardeningTest(TempData):
         import _winapi
         from hwblackbox.dashboard import server
         from hwblackbox.util import is_link
+        from hwblackbox import winapi
         target = os.path.join(self.dir, "elsewhere")
         os.makedirs(target)
-        os.makedirs(os.path.join(paths.P.sessions, "alice"))
-        _winapi.CreateJunction(target, os.path.join(paths.P.sessions, "bob"))
-        self.assertTrue(is_link(os.path.join(paths.P.sessions, "bob")))
-        self.assertFalse(is_link(os.path.join(paths.P.sessions, "alice")))
-        self.assertEqual([n for n, _ in server.session_dirs()], ["alice"])
+        me = winapi.token_sid()
+        os.makedirs(os.path.join(paths.P.sessions, me))
+        os.makedirs(os.path.join(paths.P.sessions, "alice"))           # (an older version's folder: not read)
+        _winapi.CreateJunction(target, os.path.join(paths.P.sessions, "S-1-5-21-1-2-3-1009"))
+        self.assertTrue(is_link(os.path.join(paths.P.sessions, "S-1-5-21-1-2-3-1009")))
+        self.assertEqual([p for _, p in server.session_dirs()], [os.path.join(paths.P.sessions, me)])
+        self.assertEqual(server.session_dirs()[0][0], winapi.user_name())        # (named by the account)
+
+    def test_each_users_folder_is_theirs(self):
+        # the service's side: a folder another user made first (anyone could, before 1.1.0) is moved aside; an older
+        # version's folder, named by the user and made by them, moves to the SID with its history
+        from hwblackbox import agents, winapi
+        me, name = winapi.token_sid(), winapi.user_name()
+        old = paths.P.session_dir(name)
+        os.makedirs(old)
+        with open(os.path.join(old, "session_20261101.jsonl"), "w") as f:
+            f.write("{}\n")
+        jr = Recorder()
+        path = agents.make_user_folder(me, name, jr)
+        self.assertEqual(path, paths.P.session_dir(me))
+        self.assertTrue(os.path.exists(os.path.join(path, "session_20261101.jsonl")))
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(jr.recs[0]["event"], "folder moved")
+        # (made unelevated here, so owned by this user; the real service's are the administrators')
+        if agents.owner_of(path) not in (agents.SYSTEM, agents.ADMINS):
+            self.assertIsNone(agents.make_user_folder("S-1-5-21-1-2-3-1009", None) and None)
+            os.makedirs(paths.P.session_dir("S-1-5-21-1-2-3-1010"))      # someone else's, made first
+            agents.make_user_folder("S-1-5-21-1-2-3-1010", None, jr)
+            self.assertTrue([f for f in os.listdir(paths.P.sessions) if f.startswith("S-1-5-21-1-2-3-1010.untrusted-")])
 
     def test_the_data_only_for_the_page_itself(self):
         import urllib.error
@@ -1586,6 +1615,116 @@ class NewIn110Test(TempData):
         self.assertEqual(w.flood_skipped[("Microsoft-Windows-WHEA-Logger", 17)], 5)
         self.assertEqual(w.notes["last_hardware_error"], "2026-11-10 12:00:00: a corrected hardware error in a PCI "
                                                          "Express link (WHEA 17)")
+
+    def test_notifications(self):
+        from hwblackbox import notify
+        folder = os.path.join(paths.P.sessions, "S-1-5-21-1-2-3-1001")
+        os.makedirs(folder)
+        sent, now = [], [1000.0]
+        n = notify.Notifier(folder, 9070, send=lambda t, b, link: sent.append((t, b, link)), clock=lambda: now[0])
+        st = {"problems": [], "attributes": {"last_incident": "2026-11-09 18:54:10: Windows Explorer ended: exit code 1",
+                                             "last_hardware_error": None}, "last_dirty_shutdown": {"incident": "a.txt"}}
+        self.assertEqual(n.check(st), [])                       # the first look: what's there isn't news
+        self.assertEqual(n.check(st), [])
+        st["last_dirty_shutdown"] = {"incident": "incident_20261111_080000.txt"}
+        st["attributes"]["last_incident"] = "2026-11-11 08:05:00: Discord.exe ended: crash: access violation"
+        self.assertEqual(n.check(st), ["The PC went off without shutting down", "Discord.exe ended: crash: access violation"])
+        self.assertEqual(sent[0][2], "http://127.0.0.1:9070/#incidents:incident_20261111_080000.txt")
+        self.assertEqual(sent[1][1], "At 08:05. Its report is on the Incidents tab.")
+        # one of a kind every 10 minutes: a second crash 5 minutes later is passed over (and not told later either)
+        now[0] += 300
+        st["attributes"]["last_incident"] = "2026-11-11 08:10:00: Discord.exe ended: crash: access violation"
+        self.assertEqual(n.check(st), [])
+        # a problem is told once it has lasted a minute; this user turned hardware errors off
+        notify.save_setting(folder, "hardware", False)
+        st["problems"] = ["The sensors aren't logging"]
+        st["attributes"]["last_hardware_error"] = "2026-11-11 08:11:00: a corrected hardware error in the CPU (WHEA 19)"
+        self.assertEqual(n.check(st), [])
+        now[0] += 61
+        self.assertEqual(n.check(st), ["HW Blackbox: a problem"])
+        self.assertEqual(n.check(st), [])                        # (told once)
+        now[0] += 700
+        self.assertEqual(n.check(st, status_age=400), [])                            # (no status for minutes...)
+        now[0] += 61
+        self.assertEqual(n.check(st, status_age=460), ["HW Blackbox: a problem"])     # (... for a minute more)
+        self.assertIn("service isn't running", sent[-1][1])
+        # what was told survives a restart of the agent
+        n2 = notify.Notifier(folder, 9070, send=lambda *a: sent.append(a), clock=lambda: now[0])
+        self.assertEqual(n2.check(st), [])
+        self.assertEqual(notify.user_settings(folder), {"power_off": True, "crash": True, "hardware": False,
+                                                         "problem": True})
+        with self.assertRaises(ValueError):
+            notify.save_setting(folder, "anything", True)
+        with self.assertRaises(ValueError):
+            notify.save_setting(folder, "crash", "yes")
+        import xml.etree.ElementTree as ET
+        x = ET.fromstring(notify.toast_xml("A <b>title</b>", "x & y", "http://127.0.0.1:9070/#a\"b'c"))
+        self.assertEqual([t.text for t in x.iter("text")], ["A <b>title</b>", "x & y"])
+        self.assertEqual(x.get("launch"), "http://127.0.0.1:9070/#a\"b'c")
+        self.assertEqual(x.find("actions/action").get("arguments"), "http://127.0.0.1:9070/#a\"b'c")
+
+    def test_the_page_actions(self):
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+        from hwblackbox import notify, winapi
+        from hwblackbox.dashboard import server
+        os.makedirs(paths.P.session_dir(winapi.token_sid()))
+        port = free_port()
+        httpd = server.start(port)
+        try:
+            def post(path, body, site="same-origin", hwb="1"):
+                req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), method="POST",
+                                             data=json.dumps(body).encode(),
+                                             headers={"Sec-Fetch-Site": site, "X-HWB": hwb})
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        return r.status, json.loads(r.read())
+                except urllib.error.HTTPError as e:
+                    return e.code, None
+            self.assertEqual(post("/api/settings/notify", {"kind": "crash", "on": False}, site="cross-site")[0], 403)
+            self.assertEqual(post("/api/settings/notify", {"kind": "crash", "on": False}, hwb="0")[0], 403)
+            code, r = post("/api/settings/notify", {"kind": "crash", "on": False})
+            self.assertEqual((code, r["notify"]["crash"]), (200, False))
+            self.assertIn("error", post("/api/settings/notify", {"kind": "crash", "on": "no"})[1])
+            self.assertEqual(post("/api/nothing", {})[0], 404)
+            with mock.patch.object(notify, "send", return_value=None) as s:
+                self.assertEqual(post("/api/notify/test", {})[1], {"ok": True, "error": None})
+                self.assertTrue(s.call_args.kwargs.get("wait"))
+            # (a copy run from a checkout: the elevated commands aren't offered)
+            self.assertIn("isn't the installed", post("/api/homeassistant/setup", {})[1]["error"])
+            with urllib.request.urlopen("http://127.0.0.1:%d/api/settings" % port, timeout=10) as r:
+                d = json.loads(r.read())
+            self.assertEqual((d["notify"]["crash"], d["ha"]["enabled"], d["installed"]), (False, False, False))
+            self.assertEqual([k for k, _ in d["kinds"]], list(notify.KINDS))
+        finally:
+            httpd.shutdown()
+
+    def test_home_assistant_setup(self):
+        from unittest import mock
+        from hwblackbox import config, homeassistant
+        config.write_default()
+        answers = iter(["", "http://ha.local:8123", "sensor.my_pc"])
+        tokens = iter(["bad token", "abc.def"])
+        tried = []
+
+        def try_it(url, token):
+            tried.append((url, token))
+            return (True, '{"message": "API running."}') if token == "abc.def" else (False, "refused")
+        out = []
+        with mock.patch.object(homeassistant, "try_it", try_it):
+            code = homeassistant.setup(ask=lambda q: next(answers), secret=lambda q: next(tokens), out=out.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(tried[-1], ("http://ha.local:8123", "abc.def"))
+        cfg = json.load(open(paths.P.config))
+        self.assertEqual((cfg["home_assistant"]["enabled"], cfg["home_assistant"]["entity"]), (True, "sensor.my_pc"))
+        env = homeassistant.read_env(cfg["home_assistant"]["env_file"])
+        self.assertEqual(env, {"HA_URL": "http://ha.local:8123", "HA_TOKEN": "abc.def"})
+        self.assertFalse(any("abc.def" in line for line in out))              # (the token is never printed)
+        code = homeassistant.setup(off=True, ask=lambda q: "y", out=out.append)
+        self.assertEqual(code, 0)
+        self.assertFalse(json.load(open(paths.P.config))["home_assistant"]["enabled"])
+        self.assertFalse(os.path.exists(cfg["home_assistant"]["env_file"]))
 
     def test_which_program_an_exe_is(self):
         from hwblackbox.winapi import program_of

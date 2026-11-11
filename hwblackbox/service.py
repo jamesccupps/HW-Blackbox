@@ -70,7 +70,7 @@ class Service:
         self.poweroff_checked = False
         self.ha = HaReporter()
         self.ports = PortWatch(self.jrnl, paths.P.ports)
-        self.agents = Agents(self.jrnl, restart=not test)
+        self.agents = Agents(self.jrnl, restart=not test, folders=not test)
         self.watcher = Watcher(self.jrnl, self.cfg, self.ports, self.agents, test)
         self.disks = DiskWatch(self.jrnl, self.cfg["sensors"]["keep_days"])
         self.drives = DriveWatch(self.jrnl, self.cfg["sensors"]["keep_days"])
@@ -297,6 +297,10 @@ class Service:
                                         "user": user})
             if event in (5, 10):
                 self.agents.first_seen[sid] = time.time()        # (its agent starts now: the restart grace begins)
+                try:
+                    self.agents.make_folder_now(sid)              # (and needs its folder, which only the service makes)
+                except Exception:
+                    pass
             elif event == 6:
                 self.watcher.signed_out[sid] = time.time()       # (its apps ending now are expected)
         elif kind == "power":

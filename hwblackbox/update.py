@@ -156,19 +156,27 @@ def installed_python():
 
 
 def launch():
-    """The page's "Update": the installed updater, elevated. Windows asks for an admin first (through PowerShell, so
-    the prompt names Microsoft's PowerShell, as Install.cmd's does, rather than Python). Returns {"started": True} or
-    {"error": ...}. The command is always the same: nothing from the page goes into it."""
+    """The page's "Update": the installed updater, elevated. Returns {"started": True} or {"error": ...}."""
+    return launch_elevated("update", "the update", "update it with the new version's Install.cmd")
+
+
+# the commands the page may start elevated (fixed: nothing from a request goes into one)
+ELEVATED = {"update": "update", "homeassistant": "homeassistant", "homeassistant-off": "homeassistant --off"}
+
+
+def launch_elevated(name, what, otherwise):
+    """One of HW Blackbox's own commands (ELEVATED[name]), from the installed program, in a window of its own, as
+    admin. Windows asks for an admin first (through PowerShell, so the prompt names Microsoft's PowerShell, as
+    Install.cmd's does, rather than Python). Returns {"started": True} or {"error": ...}."""
     import ctypes
     from ctypes import wintypes
     py = installed_python()
     if py is None:
-        return {"error": "This isn't the installed HW Blackbox (it runs from %s): update it with the new version's "
-                         "Install.cmd" % paths.APP}
+        return {"error": "This isn't the installed HW Blackbox (it runs from %s): %s" % (paths.APP, otherwise)}
     ps = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0",
                       "powershell.exe")
-    params = "-NoProfile -ExecutionPolicy Bypass -Command \"& '%s' -m hwblackbox update; exit $LASTEXITCODE\"" % (
-        py.replace("'", "''"))
+    params = "-NoProfile -ExecutionPolicy Bypass -Command \"& '%s' -m hwblackbox %s; exit $LASTEXITCODE\"" % (
+        py.replace("'", "''"), ELEVATED[name])
 
     class SEI(ctypes.Structure):
         _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
@@ -185,7 +193,7 @@ def launch():
     err = ctypes.get_last_error()
     if err == 1223:                                      # ERROR_CANCELLED: no to the admin prompt
         return {"error": "Windows didn't get admin rights, so nothing changed"}
-    return {"error": "Windows couldn't start the update (error %d)" % err}
+    return {"error": "Windows couldn't start %s (error %d)" % (what, err)}
 
 
 # the update itself (elevated, from the installed program) ------------------------------------------------------------

@@ -82,13 +82,33 @@ def settings():
     return config.load()
 
 
+_names = {}
+
+
+def account_name(sid):
+    """A SID's account name ("james"), or the SID when it has none."""
+    if sid not in _names:
+        try:
+            import win32security
+            _names[sid] = win32security.LookupAccountSid(None, win32security.ConvertStringSidToSid(sid))[0]
+        except Exception:
+            _names[sid] = sid
+    return _names[sid]
+
+
 def session_dirs():
-    """[(user folder name, path)] for every session agent's folder (not one that's a link to somewhere else)."""
+    """[(user, path)] for every session agent's folder this page can read: sessions\\<SID>, made by the service (or,
+    in a data folder of the user's own, by its agent), never a link to somewhere else. Each user's folder is theirs
+    alone, so this is the page's own user's (and an admin's page reads them all). An older version's folder, named by
+    a user and made by anyone, isn't read: the service moves the real one to its SID at that user's next sign-in."""
+    from ..agents import ADMINS, SID_NAME, SYSTEM, owner_of
+    mine = winapi.token_sid()
     try:
-        return [(e.name, e.path) for e in os.scandir(paths.P.sessions)
-                if e.is_dir(follow_symlinks=False) and not e.is_junction()]
+        found = [(e.name, e.path) for e in os.scandir(paths.P.sessions)
+                 if SID_NAME.match(e.name) and e.is_dir(follow_symlinks=False) and not e.is_junction()]
     except OSError:
         return []
+    return [(account_name(name), path) for name, path in found if owner_of(path) in (SYSTEM, ADMINS, mine)]
 
 
 # the 5-second log, parsed once per file and then only its new rows ------------------------------------------------
@@ -1081,7 +1101,7 @@ def checker():
     """The update check for this page's user, kept in their session folder (when the agent has made it)."""
     c = _checkers.get(paths.P.data)
     if c is None:
-        d = paths.P.session_dir(winapi.user_name())
+        d = paths.P.session_dir(winapi.token_sid() or winapi.user_name())
         c = _checkers[paths.P.data] = update.Checker(os.path.join(d, "update.json") if os.path.isdir(d) else None)
     return c
 
@@ -1098,6 +1118,61 @@ def api_config(q):
     return cfg
 
 
+def my_folder():
+    """This page's user's own folder (sessions\\<SID>), or None while there's none."""
+    from ..util import is_link
+    d = paths.P.session_dir(winapi.token_sid() or winapi.user_name())
+    return d if os.path.isdir(d) and not is_link(d) else None
+
+
+def api_settings(q):
+    """The Settings tab: this user's notifications, and the add-ons (Home Assistant) with how they're doing."""
+    from .. import notify
+    cfg = settings()
+    ha = cfg.get("home_assistant") or {}
+    st = read_json(paths.P.status) or {}
+    folder = my_folder()
+    return {"user": winapi.user_name(), "version": VERSION, "data_dir": paths.P.data,
+            "installed": update.installed_python() is not None,
+            "notify": notify.user_settings(folder) if folder else None,
+            "kinds": [[k, label] for k, label in notify.KINDS.items()],
+            "toasts": "own" if notify.app_id() == notify.AUMID else "powershell",
+            "ha": {"enabled": bool(ha.get("enabled")), "entity": ha.get("entity"),
+                   "result": st.get("ha") if isinstance(st.get("ha"), dict) else None},
+            "updates": bool((cfg.get("updates") or {}).get("check", True))}
+
+
+def post_notify_setting(body):
+    from .. import notify
+    folder = my_folder()
+    if not folder:
+        return {"error": "This user's folder isn't there yet: the service makes it at sign-in"}
+    try:
+        return {"notify": notify.save_setting(folder, body.get("kind"), body.get("on"))}
+    except (ValueError, OSError) as e:
+        return {"error": str(e)}
+
+
+def post_notify_test(body):
+    from .. import notify
+    port = int((settings().get("dashboard") or {}).get("port") or 9070)
+    err = notify.send("HW Blackbox: notifications work", "You'll get one like this when the PC goes off without "
+                      "shutting down, an app crashes, the hardware reports an error, or something stops working.",
+                      "http://127.0.0.1:%d/#settings" % port, wait=True)
+    return {"ok": err is None, "error": err}
+
+
+# what the page may ask for with a POST: each a fixed action (nothing from a request goes into a command)
+POSTS = {"/api/update/install": lambda body: update.launch(),
+         "/api/settings/notify": post_notify_setting,
+         "/api/notify/test": post_notify_test,
+         "/api/homeassistant/setup": lambda body: update.launch_elevated(
+             "homeassistant", "the Home Assistant setup", "set it up with: python -m hwblackbox homeassistant, as admin"),
+         "/api/homeassistant/off": lambda body: update.launch_elevated(
+             "homeassistant-off", "turning Home Assistant off", "turn it off with: python -m hwblackbox homeassistant "
+                                                                 "--off, as admin")}
+
+
 def page():
     """index.html with this version stamped in: an open page compares it with the API's version, and after an update
     it offers a reload instead of running an old page against the new program."""
@@ -1110,7 +1185,7 @@ ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/hist
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
           "/api/processes": lambda q: PROCESSES.sample(), "/api/programs": api_programs,
           "/api/diagnose": lambda q: cached("diagnose", 0 if q.get("fresh") else 60, diagnose_now),
-          "/api/config": api_config, "/api/update": api_update,
+          "/api/config": api_config, "/api/update": api_update, "/api/settings": api_settings,
           "/api/ping": lambda q: {"app": APP, "version": VERSION, "pid": os.getpid(), "user": winapi.user_name()}}
 
 
@@ -1168,9 +1243,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(500, json.dumps({"error": "%s: %s" % (type(e).__name__, e)}).encode(), "application/json")
 
     def do_POST(self):
-        """The page's one action: Update. Only from this page itself: the browser says where a request comes from, and
-        the X-HWB header makes any other site's page ask first (which this server never answers). Windows' admin
-        prompt is the real gate, and the command it starts is fixed: nothing from the request goes into it."""
+        """The page's actions (POSTS): Update, this user's notification settings and a test one, and setting up or
+        turning off Home Assistant. Only from this page itself: the browser says where a request comes from, and the
+        X-HWB header makes any other site's page ask first (which this server never answers). For anything that
+        needs an admin, Windows' admin prompt is the real gate, and the command it starts is fixed: nothing from the
+        request goes into it."""
+        # (the body first, a small one: a refusal sent before it's read resets the connection under the sender)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        raw = self.rfile.read(n) if 0 < n <= 4096 else b""
+        if n > 4096:
+            self.close_connection = True
         host = (self.headers.get("Host") or "").lower()
         if host not in self.server.allowed_hosts:
             self.send(421, b"Misdirected request", "text/plain")
@@ -1179,17 +1264,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send(403, b"Only from the page itself", "text/plain")
             return
         Handler.last_request = time.time()
-        n = int(self.headers.get("Content-Length") or 0)
-        if 0 < n <= 4096:
-            self.rfile.read(n)
-        if urllib.parse.urlsplit(self.path).path != "/api/update/install":
+        fn = POSTS.get(urllib.parse.urlsplit(self.path).path)
+        if not fn:
             self.send(404, b"Not found", "text/plain")
             return
         try:
-            body = update.launch()
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            body = body if isinstance(body, dict) else {}
+        except ValueError:
+            body = {}
+        try:
+            out = fn(body)
         except Exception as e:
-            body = {"error": "%s: %s" % (type(e).__name__, e)}
-        self.send(200, json.dumps(body).encode("utf-8"), "application/json")
+            out = {"error": "%s: %s" % (type(e).__name__, e)}
+        self.send(200, json.dumps(out).encode("utf-8"), "application/json")
 
 
 def clean(o):

@@ -1,0 +1,10 @@
+# What a release ships, at the versions it's tested with (tools\build.py stops on any other). Python 3.12, 64-bit.
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+pythonnet==3.1.0
+clr_loader==0.3.1
+cffi==2.0.0
+pycparser==3.0
+psutil==7.2.2
+pywin32==312
+nvidia-ml-py==13.610.43

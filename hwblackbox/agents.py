@@ -1,7 +1,15 @@
-r"""The session agents, seen from the service: what each one last said (sessions\<user>\agent.json and front.json),
-and starting one again, through its scheduled task, when a signed-in session's agent has stopped."""
+r"""The session agents, seen from the service: what each one last said (sessions\<SID>\agent.json and front.json),
+and starting one again, through its scheduled task, when a signed-in session's agent has stopped.
+
+Each user's folder is named by their account's SID and made by the service (since 1.1.0), for SYSTEM, the
+administrators and that user only: users can't make folders in sessions\, so nobody can make another user's folder
+first, write in it, or read it. Until 1.1.0 each agent made its own folder, named by the user's name, and any user
+could make any name's (the 2026-11-05 review's M2): such a folder, made by its own user, is moved to the new name."""
+import datetime as dt
 import os
+import re
 import sys
+import threading
 import time
 
 import psutil
@@ -14,12 +22,110 @@ STALE = 150          # seconds without a heartbeat
 GRACE = 180          # seconds a session gets after it first appears (its agent starts at sign-in)
 RETRY = 300          # seconds between restarts of the same session's agent
 TASK_RUN_USE_SESSION_ID = 4
+SID_NAME = re.compile(r"^S-1-\d+(-\d+)+$")
+SYSTEM, ADMINS = "S-1-5-18", "S-1-5-32-544"
 
 
-def session_folder(user):
-    """A session agent's folder, or None when it's a link to somewhere else (users make their own folders there)."""
-    folder = paths.P.session_dir(user)
+def session_folder(name):
+    """A session agent's folder (by the user's SID; a name for an older version's), or None when it's a link to
+    somewhere else."""
+    if not name:
+        return None
+    folder = paths.P.session_dir(name)
     return None if is_link(folder) else folder
+
+
+_sids = {}
+
+
+def sid_of(domain, user):
+    """The account's SID as text ("S-1-5-21-...-1001"), or None."""
+    key = (domain or "", user or "")
+    if key not in _sids:
+        try:
+            import win32security
+            account = "%s\\%s" % (domain, user) if domain else user
+            _sids[key] = win32security.ConvertSidToStringSid(win32security.LookupAccountName(None, account)[0])
+        except Exception:
+            return None
+    return _sids[key]
+
+
+def owner_of(path):
+    """A file's or folder's owner's SID as text, or None."""
+    try:
+        import win32security
+        sd = win32security.GetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION)
+        return win32security.ConvertSidToStringSid(sd.GetSecurityDescriptorOwner())
+    except Exception:
+        return None
+
+
+def folder_security(sid, owner=True):
+    """The security for a user's folder: SYSTEM and the administrators everything, the user modify (theirs to
+    write, not to give away: the owner is the administrators), protected from what sessions\\ would pass down."""
+    import win32security
+    sddl = "%sD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;%s)" % ("O:BAG:SY" if owner else "", sid)
+    return win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1)
+
+
+_folder_lock = threading.Lock()
+
+
+def make_user_folder(sid, user, jrnl=None):
+    """sessions\\<sid>, made with the user's own permissions (the service, as SYSTEM, calls this for each signed-in
+    user): the path, or None when it can't be. A folder of that name that someone else made first (before 1.1.0
+    anyone could) is moved aside, never used; an older version's folder named by the user, made by that user's own
+    agent, is moved here with its history. (One at a time: a sign-in and the 30-second look can come together.)"""
+    with _folder_lock:
+        return _make_user_folder(sid, user, jrnl)
+
+
+def _make_user_folder(sid, user, jrnl):
+    import win32file
+    import win32security
+    path = paths.P.session_dir(sid)
+    if os.path.lexists(path):
+        if not is_link(path) and os.path.isdir(path) and owner_of(path) in (SYSTEM, ADMINS):
+            return path
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            os.rename(path, path + ".untrusted-" + stamp)
+            if jrnl:
+                jrnl.write("error", {"where": "session folders", "error": "%s wasn't made by HW Blackbox: moved aside "
+                                     "to %s.untrusted-%s" % (path, sid, stamp)})
+        except OSError:
+            return None
+    old = paths.P.session_dir(user) if user else None
+    elevated = winapi.is_system() or winapi.is_admin()         # (only then can the owner be the administrators)
+    try:
+        moved = old and os.path.isdir(old) and not is_link(old) and owner_of(old) == sid
+        if moved:
+            os.rename(old, path)
+    except OSError:
+        moved = False
+    if moved:
+        try:
+            sd = folder_security(sid, owner=elevated)
+            flags = win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+            win32security.SetNamedSecurityInfo(
+                path, win32security.SE_FILE_OBJECT, flags | (win32security.OWNER_SECURITY_INFORMATION if elevated
+                                                             else 0),
+                sd.GetSecurityDescriptorOwner() if elevated else None, None, sd.GetSecurityDescriptorDacl(), None)
+        except Exception as e:
+            if jrnl:
+                jrnl.write("error", {"where": "session folders", "error": "%s: its permissions: %s" % (path, e)})
+        if jrnl:
+            jrnl.write("agent", {"event": "folder moved", "user": user, "why": "sessions\\%s is now sessions\\%s "
+                                 "(named by the account, for that user only)" % (os.path.basename(old), sid)})
+        return path
+    try:
+        sa = win32security.SECURITY_ATTRIBUTES()
+        sa.SECURITY_DESCRIPTOR = folder_security(sid, owner=elevated)
+        win32file.CreateDirectory(path, sa)
+        return path
+    except Exception:
+        return None
 
 
 def agent_procs(session):
@@ -82,9 +188,10 @@ def get_task():
 
 
 class Agents:
-    def __init__(self, jrnl, restart=True):
+    def __init__(self, jrnl, restart=True, folders=False):
         self.jrnl = jrnl
         self.restart = restart             # (off for a test instance: it never touches the real agents)
+        self.folders = folders             # (the real service makes each signed-in user's folder)
         self.first_seen = {}               # session id -> when this service first saw it signed in
         self.last_restart = {}             # session id -> time
         self.view = []                     # [{session, user, state, agent, age, ...}], refreshed every 30 s
@@ -99,7 +206,10 @@ class Agents:
         for s in current:
             sid, user = s["id"], s["user"]
             self.first_seen.setdefault(sid, now)
-            folder = session_folder(user)
+            account = sid_of(s.get("domain"), user)
+            if self.folders and account:
+                make_user_folder(account, user, self.jrnl)
+            folder = session_folder(account or user)
             path = os.path.join(folder, "agent.json") if folder else None
             hb = (read_json(path, limit=1 << 20) if path else None) or {}
             if not isinstance(hb, dict):
@@ -121,7 +231,7 @@ class Agents:
             good = beats.get(sid) or {}
             view.append({"session": sid, "user": user, "state": s["state"], "agent": state,
                          "age": None if age is None else round(age), "pid": good.get("pid"),
-                         "version": good.get("version")})
+                         "version": good.get("version"), "folder": account or user})
             if state != "running" and s["state"] == "active" and self.restart:
                 self.maybe_restart(sid, user, state, age, now)
         for sid in list(self.first_seen):
@@ -129,6 +239,16 @@ class Agents:
                 del self.first_seen[sid]
                 self.last_beat.pop(sid, None)
         self.view, self.heartbeats = view, beats
+
+    def make_folder_now(self, session):
+        """A session that has just signed in: its user's folder now, so its agent (starting this moment) has it."""
+        if not self.folders:
+            return
+        for s in winapi.sessions():
+            if s["id"] == session:
+                account = sid_of(s.get("domain"), s["user"])
+                if account:
+                    make_user_folder(account, s["user"], self.jrnl)
 
     def maybe_restart(self, sid, user, state, age, now):
         if now - self.first_seen.get(sid, now) < GRACE or now - self.last_restart.get(sid, 0) < RETRY:
@@ -174,7 +294,7 @@ class Agents:
         out = {}
         cutoff = time.time() - seconds
         for s in self.view:
-            folder = session_folder(s["user"])
+            folder = session_folder(s.get("folder") or s["user"])
             data = (read_json(os.path.join(folder, "front.json"), limit=1 << 20) if folder else None) or {}
             if isinstance(data, dict) and data.get("session") == s["session"]:
                 ring = data.get("ring") if isinstance(data.get("ring"), list) else []
@@ -186,7 +306,7 @@ class Agents:
         """The agents' own records from the last `seconds` (display changes, the taskbar, shutdown requests)."""
         out = []
         for s in self.view:
-            folder = session_folder(s["user"])
+            folder = session_folder(s.get("folder") or s["user"])
             if not folder:
                 continue
             path = os.path.join(folder, "session_%s.jsonl" % time.strftime("%Y%m%d"))

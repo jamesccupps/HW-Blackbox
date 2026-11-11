@@ -8,9 +8,10 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121620'/%3E%3Cpath d='M4 19h6l3-9 5 15 3-8h7' fill='none' stroke='%235cc8ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root {
+  color-scheme: dark;             /* (the browser's own controls, checkboxes and scrollbars, dark too) */
   --bg: #0d1016; --bg2: #11151d; --panel: #151a23; --panel2: #1a202b; --line: #252c39; --line2: #2f3747;
   --text: #e6e9ef; --muted: #8d96a7; --dim: #7d8698; --accent: #5cc8ff; --good: #3ecf8e; --warn: #f0b429;
-  --bad: #ff5d5d; --violet: #a78bfa; --hdr: 86px;
+  --bad: #ff5d5d; --bad-solid: #c42b2b; --violet: #a78bfa; --hdr: 86px;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
@@ -52,7 +53,10 @@ nav button { background: none; border: 0; border-bottom: 2px solid transparent; 
 nav button:hover { color: var(--text); }
 nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 nav .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px; border-radius: 9px; font-size: 11px;
-  background: var(--bad); color: #fff; text-align: center; }
+  background: var(--bad-solid); color: #fff; text-align: center; font-weight: 650; }
+/* (for screen readers only: what a coloured dot says) */
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0; }
 
 main { padding: 18px 22px 40px; max-width: 1600px; margin: 0 auto; }
 section { display: none; } section.on { display: block; }
@@ -114,7 +118,7 @@ tr.group td .dev { color: var(--muted); font-weight: 500; margin-left: 8px; }
 tr.group td .caret { display: inline-block; width: 14px; color: var(--muted); transition: transform .15s; }
 tr.group.closed td .caret { transform: rotate(-90deg); }
 .tag { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 6px; background: var(--panel2);
-  color: var(--dim); margin-left: 8px; border: 1px solid var(--line); }
+  color: var(--muted); margin-left: 8px; border: 1px solid var(--line); }
 .note { color: var(--warn); cursor: help; margin-left: 6px; }
 td.wrap { white-space: normal; word-break: break-all; color: var(--muted); max-width: 520px; }
 .flash { animation: flash 1s ease-out; }
@@ -207,6 +211,16 @@ tr.pick { cursor: pointer; }
 .hbar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .8; }
 .foot { color: var(--dim); font-size: 12px; margin-top: 8px; }
 .err { color: var(--bad); }
+/* the Settings tab */
+.set { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; margin-bottom: 14px;
+  max-width: 900px; }
+.set h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; display: flex; gap: 8px; align-items: center; }
+.set h3 .tag { margin-left: 4px; }
+.set p { color: var(--muted); margin: 4px 0 10px; }
+.set label.opt { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; cursor: pointer; }
+.set label.opt input { margin-top: 3px; }
+.set .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.chart svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 640px) {
   main { padding: 14px 16px 30px; } .bar { padding: 10px 16px 0; gap: 8px 18px; } .updated { display: none; }
   .newver { padding: 7px 16px; }
@@ -247,10 +261,11 @@ tr.pick { cursor: pointer; }
     <button role="tab" data-tab="ports" aria-controls="tab-ports">Ports</button>
     <button role="tab" data-tab="incidents" aria-controls="tab-incidents">Incidents</button>
     <button role="tab" data-tab="processes" aria-controls="tab-processes">Processes</button>
+    <button role="tab" data-tab="settings" aria-controls="tab-settings">Settings</button>
   </nav>
 </header>
 <main>
-  <div id="offline" class="banner bad" style="display:none"></div>
+  <div id="offline" class="banner bad" role="alert" style="display:none"></div>
 
   <section id="tab-overview" role="tabpanel">
     <div id="ov-problems"></div>
@@ -272,7 +287,7 @@ tr.pick { cursor: pointer; }
 
   <section id="tab-sensors" role="tabpanel">
     <div class="toolbar">
-      <input type="search" id="s-search" placeholder="Filter sensors…">
+      <input type="search" id="s-search" placeholder="Filter sensors…" aria-label="Filter the sensors">
       <div class="seg" id="s-mode"><button data-v="page" class="on">Since this page opened</button><button data-v="logger">Since the logger started</button></div>
       <button class="btn" id="s-reset" title="Start the minimum, maximum and average again">Reset</button>
       <span class="spacer"></span>
@@ -311,8 +326,8 @@ tr.pick { cursor: pointer; }
   <section id="tab-events" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="e-range"><button data-h="24">24 hours</button><button data-h="48" class="on">48 hours</button><button data-h="168">7 days</button><button data-h="720">30 days</button></div>
-      <div class="seg" id="e-group"><button data-g="" class="on">All</button><button data-g="apps">Apps</button><button data-g="power">Power &amp; shutdowns</button><button data-g="sessions">Sessions</button><button data-g="windows">Windows</button><button data-g="ports">Ports</button><button data-g="monitor">HW Blackbox</button></div>
-      <input type="search" id="e-search" placeholder="Search…">
+      <div class="seg" id="e-group"><button data-g="" class="on">All</button><button data-g="apps">Apps</button><button data-g="power">Power &amp; shutdowns</button><button data-g="hardware">Hardware</button><button data-g="sessions">Sessions</button><button data-g="windows">Windows</button><button data-g="ports">Ports</button><button data-g="monitor">HW Blackbox</button></div>
+      <input type="search" id="e-search" placeholder="Search…" aria-label="Search the events">
       <span class="spacer"></span><span class="dim" id="e-info"></span>
     </div>
     <div class="tablewrap long"><table id="e-table"><thead><tr><th style="width:90px">Time</th><th style="width:24px"></th><th>What happened</th></tr></thead><tbody><tr><td colspan="3" class="dim">Loading…</td></tr></tbody></table></div>
@@ -321,7 +336,7 @@ tr.pick { cursor: pointer; }
   <section id="tab-ports" role="tabpanel">
     <div id="pt-problems"></div>
     <div class="toolbar">
-      <input type="search" id="pt-search" placeholder="Filter by port, program…">
+      <input type="search" id="pt-search" placeholder="Filter by port, program…" aria-label="Filter the ports">
       <label class="chk"><input type="checkbox" id="pt-system"> Show Windows' own</label>
       <span class="spacer"></span><span class="dim" id="pt-info"></span>
     </div>
@@ -332,7 +347,7 @@ tr.pick { cursor: pointer; }
   <section id="tab-incidents" role="tabpanel">
     <div class="toolbar">
       <div class="seg" id="i-src"><button data-s="" class="on">All</button><button data-s="power">Power-offs</button><button data-s="app">Apps</button></div>
-      <input type="search" id="i-search" placeholder="Search…">
+      <input type="search" id="i-search" placeholder="Search…" aria-label="Search the reports">
       <span class="spacer"></span><span class="dim" id="i-info"></span>
     </div>
     <div class="inc-layout">
@@ -358,6 +373,12 @@ tr.pick { cursor: pointer; }
     <div class="tablewrap"><table class="bars" id="pc-table"><thead></thead><tbody><tr><td class="dim">Loading…</td></tr></tbody></table></div>
     <div class="foot" id="pc-foot"></div>
   </section>
+
+  <section id="tab-settings" role="tabpanel">
+    <div class="set" id="st-notify"><span class="dim">Loading…</span></div>
+    <div class="set" id="st-ha"></div>
+    <div class="set" id="st-about"></div>
+  </section>
 </main>
 <div class="tip" id="tip"></div>
 
@@ -374,15 +395,27 @@ const PAGE_VERSION = (v => /^\d/.test(v) ? v : null)($('meta[name="hwb-version"]
 async function api(path) {
   const r = await fetch(path, {cache: "no-store"});
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  // (it answered, with an error: say what it said, not that it can't be reached)
+  if (!r.ok) throw Object.assign(new Error(j.error || r.status + " " + r.statusText), {answered: true});
   lastOk = Date.now();
   $("#offline").style.display = "none";
   return j;
+}
+// POST one of the page's actions (the server takes them only from this page: the X-HWB header)
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"X-HWB": "1", "Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  return r.json();
 }
 function offline(e) {
   console.error("HW Blackbox:", e);
   const b = $("#offline");
   b.style.display = "";
+  if (e && e.answered) {
+    // the page's server is there: one of its answers went wrong (the rest of the page still works)
+    b.innerHTML = "<b>HW Blackbox answered with an error:</b> " + esc(e.message || e) + ". <span class='dim'>The rest of the page still works; this tab tries again by itself.</span>";
+    return;
+  }
   b.innerHTML = "<b>Can't reach HW Blackbox.</b> The session agent serves this page; if it was restarting, this clears by itself. Otherwise open <b>HW Blackbox</b> from the Start menu or the desktop again. <span class='dim'>(" + esc(e.message || e) + ")</span>";
   // what the header showed is old now: grey it out rather than leave green dots up
   $("header").classList.add("stale");
@@ -522,6 +555,9 @@ function segment(el, on) {
     on(b);
   });
 }
+// a segment's buttons say which is pressed to a screen reader too, however their "on" changes (a click, a link)
+const syncPressed = b => b.setAttribute("aria-pressed", b.classList.contains("on"));
+$$(".seg button").forEach(b => { syncPressed(b); new MutationObserver(() => syncPressed(b)).observe(b, {attributes: true, attributeFilter: ["class"]}); });
 
 // the header: the parts' health, every 5 s whatever the tab --------------------------------------------------------
 function healthOf(o) {
@@ -533,10 +569,13 @@ function healthOf(o) {
   const sv_ = !svOk ? "bad" : (sv.state === "problem" ? "warn" : "good");
   const agents = (o.agents || []).filter(x => x.age != null && x.age < 150);
   const ag_ = agents.length ? "good" : (o.agents || []).length ? "bad" : "warn";
-  const ha = sv.ha || {};
-  const haAge = ha.at ? (Date.now() / 1000 - isoT(ha.at)) : null;
-  const ha_ = !o.ha.enabled || ha === "off" ? "" : ha.ok === true && haAge != null && haAge < 180 ? "good" : ha.ok === false ? "bad" : "warn";
-  return {sv: sv_, sens: sens_, ag: ag_, ha: ha_, haAge, svOk, sensOk, agents};
+  return {sv: sv_, sens: sens_, ag: ag_, svOk, sensOk, agents};
+}
+// Home Assistant (an add-on, on the Settings tab): "good", "warn", "bad", or "" when it's off
+function haHealth(enabled, ha) {
+  ha = ha || {};
+  const ago = ha.at ? (Date.now() / 1000 - isoT(ha.at)) : null;
+  return {st: !enabled || ha === "off" ? "" : ha.ok === true && ago != null && ago < 180 ? "good" : ha.ok === false ? "bad" : "warn", ago};
 }
 async function header() {
   try {
@@ -555,17 +594,20 @@ async function header() {
     const h = healthOf(o);
     // (a chip's short name is for a phone's width; its title says what the colour means)
     const WORD = {good: "OK", warn: "needs a look", bad: "not working", "": "off"};
-    const chip = (st, label, short, title) => `<span class="chip" title="${esc(label + ": " + WORD[st] + ". " + title)}"><span class="dot ${st}"></span><span class="long">${esc(label)}</span><span class="short">${esc(short)}</span></span>`;
+    // (the dot's colour is said in words too, for a screen reader)
+    const chip = (st, label, short, title) => `<span class="chip" title="${esc(label + ": " + WORD[st] + ". " + title)}"><span class="dot ${st}"></span><span class="long">${esc(label)}</span><span class="short">${esc(short)}</span><span class="sr">: ${esc(WORD[st])}</span></span>`;
     $("#chips").innerHTML =
       chip(h.sv, "Service", "Service", h.svOk ? "Running as a Windows service; status " + fmtAgo(o.ages.status) : "The service isn't reporting") +
       chip(h.sens, "Sensors", "Sensors", "Every sensor every 5 s, the rails 4 times a second; last sample " + fmtAgo(o.ages.flight)) +
-      chip(h.ag, "Session agent", "Agent", h.agents.length ? "Watching the screens, the app in front and sign-outs" : "Not running in any session") +
-      (o.ha.enabled ? chip(h.ha, "Home Assistant", "HA", "Last report " + (h.haAge != null ? fmtAgo(h.haAge) : "unknown")) : "");
+      chip(h.ag, "Session agent", "Agent", h.agents.length ? "Watching the screens, the app in front and sign-outs" : "Not running in any session");
     $("header").classList.remove("stale");
     $("#updated").classList.remove("bad-t");
     const n = (o.problems || []).length;
     const btn = $('nav button[data-tab="overview"]');
     btn.innerHTML = "Overview" + (n ? `<span class="count">${n}</span>` : "");
+    // (Home Assistant, set up but not getting the status: the Settings tab says why)
+    const hh = haHealth(o.ha && o.ha.enabled, (o.service || {}).ha);
+    $('nav button[data-tab="settings"]').innerHTML = "Settings" + (hh.st === "bad" ? `<span class="count" title="Home Assistant isn't getting this PC's status: see Settings">!</span>` : "");
     $("#updated").textContent = "Updated " + fmtTime(o.now);
   } catch (e) { offline(e); }
 }
@@ -592,15 +634,20 @@ TABS.overview = {every: 5000, async load() {
   // problems
   const probs = o.problems || [];
   $("#ov-problems").innerHTML = probs.length
-    ? `<div class="banner bad"><b>${probs.length === 1 ? "A problem" : probs.length + " problems"}</b>${o.ha.enabled ? " (Home Assistant hears about them every minute)" : ""}<ul>${probs.map(p => "<li>" + esc(p) + "</li>").join("")}</ul></div>`
-    : h.svOk ? `<div class="banner info">No problems. The service is watching${o.ha.enabled ? ", and Home Assistant hears from this PC every minute" : ""}.</div>` : "";
+    ? `<div class="banner bad"><b>${probs.length === 1 ? "A problem" : probs.length + " problems"}</b><ul>${probs.map(p => "<li>" + esc(p) + "</li>").join("")}</ul></div>`
+    : h.svOk ? `<div class="banner info">No problems. The service is watching.</div>` : "";
   // what the Diagnose tab found worth a look (beyond the problems above)
   const found = ((ovDiag && ovDiag.checks) || []).filter(c => (c.level === "warn" || c.level === "bad") && c.id !== "problems");
   if (found.length) $("#ov-problems").insertAdjacentHTML("beforeend", `<div class="banner warn"><b>Diagnose found ${found.length === 1 ? "something" : found.length + " things"} worth a look:</b> ${found.slice(0, 4).map(c => esc(c.title)).join("; ")}${found.length > 4 ? "…" : ""}. <a href="#diagnose">What to do</a></div>`);
   // health cards
   const sessions = sv.agents || [];
-  const ha = sv.ha || {};
   const threads = sv.threads || {};
+  // the hardware's own error reports and the drives (the Diagnose tab's two checks, and the drives' last look)
+  const chk = id => ((ovDiag && ovDiag.checks) || []).find(c => c.id === id) || null;
+  const hwc = chk("hardware"), drc = chk("drives"), drives = o.drives || [];
+  const LV = {ok: "good", info: "good", warn: "warn", bad: "bad"};
+  const hw_ = !hwc && !drc ? "" : ["bad", "warn", "good"].find(l => [hwc, drc].some(c => c && LV[c.level] === l)) || "good";
+  const temps = drives.map(d => d.temp_c).filter(t => t);
   $("#ov-health").innerHTML = [
     card(h.sv, "Service", h.svOk ? (sv.test ? "Running (test)" : "Running") : "Not reporting",
       h.svOk ? `Version ${esc(sv.version || "?")} · up ${fmtDur(now - (isoT(sv.started) || now))}<br>` +
@@ -620,9 +667,10 @@ TABS.overview = {every: 5000, async load() {
     card(h.ag, "Session agent", h.agents.length ? h.agents.map(x => x.user).join(", ") : (o.agents || []).length ? "Stopped" : "Nobody signed in",
       sessions.length ? sessions.map(s => `Session ${s.session} (${esc(s.user)}, ${esc(s.state)}): ${s.agent === "running" ? "running" : "<span class='warn-t'>" + esc(s.agent) + "</span>"}`).join("<br>")
         : "Runs in each signed-in session: the screens, the app in front, sign-outs, this page"),
-    o.ha.enabled ? card(h.ha, "Home Assistant", ha.ok ? "Reporting" : ha.ok === false ? "Failing" : "Waiting",
-      `Last report ${h.haAge != null ? fmtAgo(h.haAge) : "unknown"}${ha.error ? "<br><span class='bad-t'>" + esc(ha.error) + "</span>" : ""}<br>${esc(o.ha.entity || "")}`)
-      : card("", "Home Assistant", "Off", "Not set up: see \"home_assistant\" in config.json"),
+    card(hw_, "Hardware", !hwc ? "Checking…" : hwc.level === "ok" ? "No errors" : hwc.summary.replace(/ in the last 7 days/, " this week"),
+      (hwc && hwc.level !== "ok" ? `<a href="#diagnose">What it means</a><br>` : "Errors the CPU, memory and PCIe report, the last 7 days<br>") +
+      (drives.length ? `Drives: ${drc && drc.level !== "ok" ? `<span class="${drc.level === "bad" ? "bad" : "warn"}-t">${esc(drc.summary)}</span>` : drives.length + " healthy"}` +
+        (temps.length ? ` · ${Math.min(...temps)}${temps.length > 1 ? "–" + Math.max(...temps) : ""} °C` : "") : "Drives: not looked at yet (once an hour)")),
   ].join("");
   // now
   const S = {}; for (const x of s.sensors || []) S[x.id] = x;
@@ -704,7 +752,11 @@ TABS.overview = {every: 5000, async load() {
         // (one with no readings before it, as when it came before HW Blackbox was installed: when the PC came back)
         : po.length && isoT(po[po.length - 1].boot) ? `<div class="reading"><span class="l">Last</span><span class="r" title="No readings from before it: this is when the PC came back on">before ${fmtDateTime(isoT(po[po.length - 1].boot), true)}</span></div>` : "") +
       since + `</div>` +
-    `<div class="card"><h3>Disks<span class="right"><a href="#charts:168:${(o.disks || []).map(diskId).join(",")}">chart</a></span></h3>${disks}</div>` +
+    `<div class="card"><h3>Disks<span class="right"><a href="#charts:168:${(o.disks || []).map(diskId).join(",")}">chart</a></span></h3>${disks}` +
+      // the drives themselves (Windows' own health check, the temperature and wear: once an hour)
+      drives.map(d => `<div class="reading"><span class="l" title="${esc((d.bus || "") + " " + (d.media || "") + ", " + d.size_gb + " GB")}">Disk ${esc(d.disk)} · ${esc(d.model)}</span>` +
+        `<span class="r ${d.health === "healthy" ? "" : d.health === "unhealthy" ? "bad-t" : "warn-t"}" style="font-size:12.5px">${esc(d.health)}${d.temp_c ? " · " + d.temp_c + " °C" : ""}${d.wear_pct != null ? " · " + d.wear_pct + " % worn" : ""}</span></div>`).join("") +
+    `</div>` +
     `<div class="card"><h3>This PC</h3>` +
       `<div class="reading"><span class="l">Windows</span><span class="r" style="font-size:13px">${esc(o.windows)}</span></div>` +
       (/^waiting/.test(attrs.windows_update || "") ? `<div class="reading"><span class="l">Windows Update</span><span class="r warn-t" style="font-size:13px" title="An update is installed and finishes at the next restart">waiting for a restart since ${fmtDateTime(isoT(attrs.windows_update.replace(/^.* since /, "").replace(" ", "T")))}</span></div>` : "") +
@@ -858,7 +910,7 @@ TABS.sensors = {every: 2500, async load() {
   for (const [g, list] of groups) {
     const [grp, dev] = g.split("|");
     const closed = sClosed.has(g);
-    rows.push(`<tr class="group${closed ? " closed" : ""}" data-g="${esc(g)}" tabindex="0" aria-expanded="${!closed}"><td colspan="5"><span class="caret">▾</span>${esc(grp)}<span class="dev">${esc(dev)}</span><span class="tag">${list.length}</span></td></tr>`);
+    rows.push(`<tr class="group${closed ? " closed" : ""}" data-g="${esc(g)}" tabindex="0" role="button" aria-expanded="${!closed}"><td colspan="5"><span class="caret">▾</span>${esc(grp)}<span class="dev">${esc(dev)}</span><span class="tag">${list.length}</span></td></tr>`);
     if (closed) continue;
     for (const x of list) {
       const st = sMode === "page" ? sess.stats[x.id] : {min: x.min, max: x.max, avg: x.avg};
@@ -938,7 +990,7 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
   const yLab = v => v.toLocaleString("en-US", {minimumFractionDigits: dec, maximumFractionDigits: dec});
   // time labels no closer than ~76 px: on a narrow chart every second (or third) one
   const every = Math.max(1, Math.ceil(76 / (xt.ticks.length > 1 ? x(xt.ticks[1]) - x(xt.ticks[0]) : 999)));
-  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="${esc(series.map(s => s.name).join(", "))}">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" tabindex="0" aria-label="${esc(series.map(s => s.name).join(", "))}: a chart; the left and right arrow keys read its values">`;
   for (const v of yt.ticks) svg += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${yLab(v)}</text>`;
   xt.ticks.forEach((t, i) => { svg += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" stroke-dasharray="2 4"/>` + (i % every ? "" : `<text class="axis" x="${x(t)}" y="${H - 6}" text-anchor="middle">${xt.label(t)}</text>`); });
   for (const m of marks) if (m.t >= t0 && m.t <= t1) svg += `<line x1="${x(m.t)}" x2="${x(m.t)}" y1="${T}" y2="${H - B}" stroke="${m.color}" stroke-width="1.5" stroke-dasharray="${m.dash || ""}"><title>${esc(m.text)}</title></line>`;
@@ -980,6 +1032,19 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
   sv.addEventListener("pointermove", e => { pointer = {clientX: e.clientX, clientY: e.clientY}; move(e); });
   sv.addEventListener("pointerdown", move);
   sv.addEventListener("pointerleave", () => { pointer = null; tip.style.display = "none"; xh.style.display = "none"; });
+  // the keyboard: Tab to a chart, then the arrow keys step through its points (Page Up / Down ten at a time, Home and
+  // End the ends); the values show as the mouse's would, and a screen reader reads them out
+  let at = null;
+  sv.addEventListener("keydown", e => {
+    const ref = series[0].t, step = {ArrowLeft: -1, ArrowRight: 1, PageUp: -10, PageDown: 10}[e.key];
+    if (!ref.length || (step == null && e.key !== "Home" && e.key !== "End")) return;
+    e.preventDefault();
+    at = e.key === "Home" ? 0 : e.key === "End" ? ref.length - 1 : Math.max(0, Math.min(ref.length - 1, (at == null ? ref.length - 1 : at) + step));
+    tip.setAttribute("aria-live", "polite");
+    const r = sv.getBoundingClientRect();
+    move({clientX: r.left + x(ref[at]) * r.width / W, clientY: r.top + r.height / 3});
+  });
+  sv.addEventListener("blur", () => { tip.style.display = "none"; xh.style.display = "none"; tip.removeAttribute("aria-live"); });
   // redrawn under the mouse (the Power tab every 5 s): keep the tooltip, with the new values
   if (pointer) {
     const r = sv.getBoundingClientRect();
@@ -1123,7 +1188,7 @@ TABS.events = {every: 15000, async load() {
     const dkey = new Date(e.t * 1000).toDateString();
     if (dkey !== day) { day = dkey; rows.push(`<tr class="ev-day"><td colspan="3">${DAY[new Date(e.t * 1000).getDay()]} ${fmtDate(e.t)}</td></tr>`); }
     const id = e.t + "|" + e.kind + "|" + e.text.slice(0, 60);
-    rows.push(`<tr class="ev" data-id="${esc(id)}" tabindex="0" aria-expanded="${eOpen.has(id)}"><td class="mono">${fmtTime(e.t)}</td><td><span class="dot ${e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : ""}"></span></td><td class="text">${esc(e.text)}</td></tr>`);
+    rows.push(`<tr class="ev" data-id="${esc(id)}" tabindex="0" role="button" aria-expanded="${eOpen.has(id)}"><td class="mono">${fmtTime(e.t)}</td><td><span class="dot ${e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : ""}"></span></td><td class="text">${esc(e.text)}</td></tr>`);
     if (eOpen.has(id)) rows.push(`<tr class="raw"><td></td><td colspan="2"><pre>${esc(JSON.stringify(e.rec, null, 1))}</pre></td></tr>`);
   });
   redraw($("#e-table tbody"), rows.join("") || `<tr><td colspan="3" class="dim">Nothing in this range.</td></tr>`, "data-id");
@@ -1173,7 +1238,7 @@ TABS.incidents = {every: 60000, async load() { iData = await api("/api/incidents
   const q = $("#i-search").value.trim().toLowerCase();
   const list = iData.incidents.filter(x => (!iSrc || x.src === iSrc) && (!q || (x.title + " " + x.name).toLowerCase().includes(q)));
   // (the title in two lines at most; the file's name is in the tooltip and at the top of the report)
-  redraw($("#i-list"), list.map(x => `<div class="inc-item${iOpen === x.src + "|" + x.name ? " on" : ""}" data-k="${esc(x.src + "|" + x.name)}" tabindex="0" title="${esc(x.name)}">` +
+  redraw($("#i-list"), list.map(x => `<div class="inc-item${iOpen === x.src + "|" + x.name ? " on" : ""}" data-k="${esc(x.src + "|" + x.name)}" tabindex="0" role="button" title="${esc(x.name)}">` +
     `<div class="h"><span class="dot ${x.src === "power" ? "bad" : "warn"}"></span><span>${esc(x.src === "power" ? "Power-off" : x.title)}</span></div>` +
     `<div class="t">${DAY[new Date(x.t * 1000).getDay()]} ${fmtDateTime(x.t, true)} · ${x.src === "power" ? "power-off report" : "app report"}</div></div>`).join("") ||
     `<div class="inc-item dim" style="cursor:default">${iData.incidents.length ? "Nothing matches." : "No reports yet. One is written after a power-off, and when an app you watch crashes or closes unexpectedly."}</div>`, "data-k");
@@ -1333,6 +1398,71 @@ setInterval(async () => {
   dgAt = Date.now();
   try { ovDiag = await api("/api/diagnose"); badge(); } catch (_) {}
 }, 5000);
+
+// Settings -----------------------------------------------------------------------------------------------------
+// This user's notifications (theirs alone: sessions\<their SID>\settings.json), and the add-ons. Home Assistant is
+// one: off unless it's set up, and set up here (Windows asks for an admin, then a window asks for the address and a
+// token, and tries them before keeping them).
+let stData = null, stMsg = {};
+TABS.settings = {every: 10000, async load() {
+  stData = await api("/api/settings");
+  if (!$("#tab-settings").contains(document.activeElement) || document.activeElement.type !== "checkbox") this.render();
+}, render() {
+  const d = stData; if (!d) return;
+  const n = d.notify;
+  $("#st-notify").innerHTML = `<h3>Notifications <span class="tag">for ${esc(d.user)}</span></h3>` +
+    `<p>Windows notifications when HW Blackbox finds something, so you hear of it without opening this page. Each signed-in user chooses their own. At most one of a kind every 10 minutes, and six an hour.</p>` +
+    (n ? d.kinds.map(([k, label]) => `<label class="opt"><input type="checkbox" data-notify="${esc(k)}" ${n[k] ? "checked" : ""}><span>${esc(label)}</span></label>`).join("")
+       : `<p class="warn-t">This user's folder isn't there yet (the service makes it at sign-in): try again in a minute.</p>`) +
+    `<div class="row"><button class="btn" id="st-test">Send a test notification</button><span id="st-test-msg" class="muted" role="status">${esc(stMsg.test || "")}</span></div>` +
+    (d.toasts === "own" ? "" : `<p class="dim" style="margin-top:10px">This copy isn't the installed HW Blackbox, so its notifications show as Windows PowerShell's.</p>`) +
+    `<p class="dim" style="margin-top:10px">Not showing up? Windows' Settings → System → Notifications: notifications on, HW Blackbox allowed, and Do not disturb off.</p>`;
+  const ha = d.ha || {}, h = haHealth(ha.enabled, ha.result), r = ha.result || {};
+  $("#st-ha").innerHTML = `<h3>Home Assistant <span class="tag">optional add-on</span>${ha.enabled ? `<span class="dot ${h.st}" title="${{good: "Reporting", warn: "Waiting", bad: "Failing"}[h.st] || ""}"></span>` : ""}</h3>` +
+    `<p>If you run <a href="https://www.home-assistant.io/" target="_blank" rel="noopener noreferrer">Home Assistant</a>, HW Blackbox can send it this PC's status every minute, as one sensor: OK or a problem, the last power-off, crash and hardware error. Your automations can then alert you, on your phone too, or notice a PC that has gone quiet. Nothing else leaves the PC, and only to your own Home Assistant.</p>` +
+    (ha.enabled
+      ? `<div class="kv" style="max-width:520px"><span class="k">Sensor</span><span class="v">${esc(ha.entity || "?")}</span>` +
+          `<span class="k">Last report</span><span class="v ${h.st === "bad" ? "bad-t" : ""}">${r.at ? fmtAgo(h.ago) + (r.ok ? "" : r.ok === false ? ", failed" : "") : "none yet"}</span>` +
+          (r.error ? `<span class="k">Error</span><span class="v bad-t" style="white-space:normal">${esc(r.error)}</span>` : "") + `</div>` +
+        `<div class="row"><button class="btn" data-ha="setup">Change…</button><button class="btn" data-ha="off">Turn off…</button><span class="muted" id="st-ha-msg" role="status">${esc(stMsg.ha || "")}</span></div>`
+      : `<div class="row"><button class="btn" data-ha="setup">Set up Home Assistant…</button><span class="muted" id="st-ha-msg" role="status">${esc(stMsg.ha || "")}</span></div>`) +
+    `<p class="dim" style="margin-top:10px">${d.installed ? "Windows asks for an admin first (the settings and the token are kept where only admins and the service can read them); then a window of its own asks for the address and a long-lived token, and tries them before keeping them." : "This copy isn't the installed HW Blackbox: as admin, run python -m hwblackbox homeassistant from the installed program."}</p>`;
+  $("#st-about").innerHTML = `<h3>About</h3><div class="kv" style="max-width:640px">` +
+    `<span class="k">Version</span><span class="v">${esc(d.version)}</span>` +
+    `<span class="k">Updates</span><span class="v">${d.updates ? "asks GitHub once a day" : "off (config.json: updates.check)"}</span>` +
+    `<span class="k">Data</span><span class="v" style="white-space:normal">${esc(d.data_dir)}</span></div>` +
+    `<p style="margin-top:10px">The other settings (the apps to watch, the ports, the disk warnings, how long the logs are kept) are in config.json in the data folder: see <a href="https://github.com/jamesccupps/HW-Blackbox#settings" target="_blank" rel="noopener noreferrer">Settings</a> in the README.</p>`;
+}};
+$("#tab-settings").addEventListener("change", async e => {
+  const k = e.target.dataset.notify; if (!k) return;
+  e.target.disabled = true;
+  try {
+    const r = await post("/api/settings/notify", {kind: k, on: e.target.checked});
+    if (r.error) throw new Error(r.error);
+    stData.notify = r.notify;
+  } catch (err) { e.target.checked = !e.target.checked; stMsg.test = "Not saved: " + (err.message || err); }
+  e.target.disabled = false;
+  TABS.settings.render();
+  const again = $(`[data-notify="${k}"]`); if (again) again.focus();
+});
+$("#tab-settings").addEventListener("click", async e => {
+  const b = e.target.closest("#st-test, [data-ha]"); if (!b) return;
+  b.disabled = true;
+  if (b.id === "st-test") {
+    stMsg.test = "Sending…"; $("#st-test-msg").textContent = stMsg.test;
+    try { const r = await post("/api/notify/test"); stMsg.test = r.ok ? "Sent: it shows at the bottom right, and in the notification center." : "It didn't show: " + (r.error || "no answer"); }
+    catch (err) { stMsg.test = "It didn't show: " + (err.message || err); }
+  } else {
+    const off = b.dataset.ha === "off";
+    stMsg.ha = "Windows is asking for an admin…"; $("#st-ha-msg").textContent = stMsg.ha;
+    try {
+      const r = await post(off ? "/api/homeassistant/off" : "/api/homeassistant/setup");
+      stMsg.ha = r.started ? (off ? "Turning it off in a window of its own." : "Carry on in the window that opened: it asks for the address and a token.") : (r.error || "It didn't start.");
+    } catch (err) { stMsg.ha = err.message || String(err); }
+  }
+  TABS.settings.render();
+  setTimeout(() => TABS.settings.load().catch(() => {}), 3000);
+});
 
 // go
 header().then(() => { show(location.hash.slice(1) || "overview"); updates(false); });
