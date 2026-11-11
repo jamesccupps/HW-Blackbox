@@ -49,29 +49,33 @@ def look():
     # (COM stays set up on the calling thread: undone here, the objects released after it print an error each)
     pythoncom.CoInitialize()
     wmi = win32com.client.GetObject(r"winmgmts:{impersonationLevel=impersonate}!\\.\root\Microsoft\Windows\Storage")
-    out, by_id = [], {}
-    for d in wmi.ExecQuery("SELECT DeviceId, FriendlyName, MediaType, BusType, HealthStatus, Size "
-                           "FROM MSFT_PhysicalDisk"):
+    out = []
+    for d in wmi.ExecQuery("SELECT * FROM MSFT_PhysicalDisk"):
         e = {"disk": _num(d.DeviceId), "model": (d.FriendlyName or "?").strip()[:80],
              "media": MEDIA.get(_num(d.MediaType)), "bus": BUS.get(_num(d.BusType)),
              "size_gb": round(int(d.Size or 0) / 1e9), "health": HEALTH.get(_num(d.HealthStatus), "unknown")}
-        out.append(e)
-        by_id[str(d.DeviceId)] = e
-    error = None
-    try:
-        for r in wmi.ExecQuery("SELECT * FROM MSFT_StorageReliabilityCounter"):
-            e = by_id.get(str(r.DeviceId))
-            if e is None:
-                continue
-            e.update(temp_c=_num(r.Temperature) or None, temp_max_c=_num(r.TemperatureMax) or None,
-                     wear_pct=_num(r.Wear), read_err_unc=_num(r.ReadErrorsUncorrected),
-                     write_err_unc=_num(r.WriteErrorsUncorrected), read_err_total=_num(r.ReadErrorsTotal),
-                     write_err_total=_num(r.WriteErrorsTotal), power_on_h=_num(r.PowerOnHours))
-    except Exception as ex:                      # (a standard user: WBEM_E_ACCESS_DENIED)
-        denied = "0x80041003" in str(ex) or "-2147217405" in str(ex)
-        error = "the drives' counters need SYSTEM or an admin" if denied else ("the drives' counters: %s" % ex)[:200]
-    out.sort(key=lambda e: (e["disk"] is None, e["disk"]))
-    return out, error
+        out.append((d, e))
+    # Each drive's counters, through its association (as Get-StorageReliabilityCounter reaches them): listing
+    # MSFT_StorageReliabilityCounter by itself gives none, even as SYSTEM (seen 2026-11-10; 1.1.0's first build did
+    # that, and showed no temperature or wear). A standard user gets none either way.
+    error, found = None, 0
+    for d, e in out:
+        try:
+            for r in d.Associators_("MSFT_PhysicalDiskToStorageReliabilityCounter"):
+                found += 1
+                hdd = e["media"] == "HDD"                       # (a hard disk's "wear" is always 0: not a measure)
+                e.update(temp_c=_num(r.Temperature) or None, temp_max_c=_num(r.TemperatureMax) or None,
+                         wear_pct=None if hdd else _num(r.Wear), read_err_unc=_num(r.ReadErrorsUncorrected),
+                         write_err_unc=_num(r.WriteErrorsUncorrected), read_err_total=_num(r.ReadErrorsTotal),
+                         write_err_total=_num(r.WriteErrorsTotal), power_on_h=_num(r.PowerOnHours))
+        except Exception as ex:
+            denied = "0x80041003" in str(ex) or "-2147217405" in str(ex)
+            error = "the drives' counters need SYSTEM or an admin" if denied else ("the drives' counters: %s" % ex)[:200]
+    if out and not found and not error:
+        error = "no drive reported its counters (they need SYSTEM or an admin)"
+    drives = [e for _d, e in out]
+    drives.sort(key=lambda e: (e["disk"] is None, e["disk"]))
+    return drives, error
 
 
 def read_rows(path):

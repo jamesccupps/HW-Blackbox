@@ -1546,6 +1546,10 @@ class DiagnoseTest(unittest.TestCase):
         c = self.run_(records=[rec, dict(rec, t=now - 300)])["crashes"]
         self.assertEqual(c["seen"][0].split(": ")[0], "python.exe (QGIS 3.44.15)")
         self.assertIn("Windows recorded a crash in gdal313.dll (0xc0000005)", c["seen"][0])
+        # (as Windows writes the code: without the 0x)
+        real = dict(rec, inserts=ins[:6] + ["c0000005"] + ins[7:])
+        c = self.run_(records=[real])["crashes"]
+        self.assertIn("Windows recorded a crash in gdal313.dll (0xc0000005)", c["seen"][0])
 
 
 class NewIn110Test(TempData):

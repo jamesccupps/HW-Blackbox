@@ -308,7 +308,10 @@ def check_crashes(x):
             if prog and prog.lower() not in app.lower():
                 app = "%s (%s)" % (app, prog)
             module = str(ins[3]) if len(ins) > 3 else ""
+            # (the exception code: Application Error's 7th field, "c0000005" without the 0x on most Windows builds)
             code = next((i for i in ins if re.fullmatch(r"0x[0-9a-fA-F]{8}", str(i))), "")
+            if not code and len(ins) > 6 and re.fullmatch(r"[0-9a-fA-F]{8}", str(ins[6])):
+                code = "0x" + str(ins[6]).lower()
             crashes[app].append((r["t"], "Windows recorded a crash" +
                                  (" in %s" % module if module and module.lower() not in (exe, "unknown") else "") +
                                  (" (%s)" % code if code else "")))
