@@ -32,15 +32,15 @@ switch off, or why did that app close?*
 
 1. Download **[HWBlackbox-win64.zip](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
    and unzip it.
-2. Double-click **`Install.cmd`**. It asks for admin rights, installs the service and the agent, and shows what it
-   did. The scripts aren't code-signed, so Windows may show *Windows protected your PC*: click **More info**, then
-   **Run anyway**.
+2. Double-click **`Setup.exe`**. Windows asks for an administrator, naming the publisher, **James Cupps**; then it
+   installs the service and the agent, and shows what it did as it goes.
    - If the PawnIO driver isn't installed (the CPU and motherboard sensors need it), it asks whether to install it,
      with winget. Press **Y** (or Enter) to install it, or **N** to go on without it.
 3. Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`.
 
-Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`), and the installer checks every file
-against the release's manifest. More options are under [Install, in detail](#install-in-detail).
+Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`). From 1.1.1 the release is built on
+GitHub and signed by James Cupps: Setup.exe, the installer script, and a catalog of every file, which the installer
+checks every file against. More options are under [Install, in detail](#install-in-detail).
 
 ## A closer look
 
@@ -135,7 +135,7 @@ What keeps it reliable:
 
 - **Windows 10 or 11, 64-bit, and an administrator account** to install.
 - **PawnIO** for the CPU and motherboard sensors (temperatures, voltages, fans). It's the signed driver
-  LibreHardwareMonitor uses for low-level hardware access (freeware, by namazso), installed separately: `Install.cmd`
+  LibreHardwareMonitor uses for low-level hardware access (freeware, by namazso), installed separately: `Setup.exe`
   offers to install it with winget when it's missing, or `winget install namazso.PawnIO`. Without it you still get the
   GPU, the CPU load, memory and everything that isn't a sensor; the page says the driver is missing, and Diagnose says
   how to install it.
@@ -147,12 +147,15 @@ What keeps it reliable:
 
 ## Install, in detail
 
-`Install.cmd`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), runs
-`install.ps1`:
+`Setup.exe`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), asks Windows
+for an administrator and runs `install.ps1` in its window (a signed Setup.exe runs only an `install.ps1` signed by
+the same publisher):
 - If the PawnIO driver is missing, it asks whether to install it (with winget, in the installer's window).
 - It copies the program into a folder of its own in Program Files (`HWBlackbox.new`) and checks every file against
   the release's manifest, while an installed HW Blackbox keeps running. Only the build's files are copied: anything
-  else in the release folder is left out. If a file doesn't match, it stops there, with nothing installed changed.
+  else in the release folder is left out. A signed release's files must also match its catalog, `HWBlackbox.cat`,
+  signed by the same publisher as the script. If a file doesn't match, it stops there, with nothing installed
+  changed.
   Then it stops the running HW Blackbox and puts the new one in `C:\Program Files\HWBlackbox`.
 - It sets up the data folder.
 - It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu and to
@@ -178,7 +181,7 @@ From 1.0.10 on, HW Blackbox updates itself from the page:
 - Once a day the page's program asks GitHub for the latest release. When there's a newer one, the top of the page says
   so, with **What's new** (the release's page) and **Update**. The Overview's Service card says when it last asked,
   with **check now**.
-- **Update** asks Windows for an admin (the same prompt as `Install.cmd`), then opens a window that downloads the
+- **Update** asks Windows for an admin, then opens a window that downloads the
   release's zip into `C:\ProgramData\HWBlackbox\update` (where only SYSTEM and admins can write), checks it against
   the SHA-256 GitHub gives for it and the one in the release notes, unpacks it, checks it's the version offered, and
   runs that version's installer. The settings and the history are kept; the download is deleted afterwards. Done,
@@ -361,8 +364,9 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
   and a laptop (Framework, Intel Core i7-1260P, Intel Iris Xe graphics). Other CPUs, sensor chips and GPUs go through
   LibreHardwareMonitor and should work. Which readings show up, and what they're called, varies by board; the rails
   need a sensor chip that reports them, which laptops don't have.
-- **It isn't code-signed.** Windows SmartScreen may warn about `Install.cmd` the first time. Check the zip's SHA-256
-  against the release notes; the installer then checks every file against the release's manifest.
+- **Signed from 1.1.1 only.** Earlier releases aren't code-signed (Windows may show *Windows protected your PC* for
+  their `Install.cmd`: **More info**, then **Run anyway**); check their zip's SHA-256 against the release notes. A new
+  publisher's signature can still meet a SmartScreen warning for a while, until Windows has seen the file enough.
 - **Times before 1.1.0 have no time zone.** Since 1.1.0 every time in the logs and records carries its offset from
   UTC (`2026-11-10T18:23:02-05:00`). Older ones are local time: when daylight saving ended, the repeated hour was
   written twice the same way, and they're read in order to tell the two apart.
@@ -398,9 +402,8 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 ```powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-# lib\: LibreHardwareMonitorLib.dll and its dependencies (HidSharp, RAMSPDToolkit-NDD, System.*), from a
-# LibreHardwareMonitor release or the LibreHardwareMonitorLib NuGet package (net472)
+.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+.venv\Scripts\python.exe tools\fetch_lib.py      # lib\: LibreHardwareMonitorLib and its DLLs, from NuGet, by SHA-256
 .venv\Scripts\python.exe tools\build.py --zip    # -> build\HWBlackbox, and dist\HWBlackbox-<version>-win64.zip
 ```
 
@@ -412,9 +415,15 @@ What `build.py` does:
   the release notes say.
 - A `python312._pth` file fixes the module path to those folders only.
 - It compiles everything and checks that the result runs on its own.
+- It compiles `Setup.exe` (`tools\setup`) with the C# compiler that comes with Windows (.NET Framework 4's).
 - It writes `MANIFEST.json` with every file's SHA-256 for the installer to check.
-- `--zip` names the zip by version (`dist\HWBlackbox-<version>-win64.zip`); a release uploads it as
-  `HWBlackbox-win64.zip`, the name the download links and the updater expect.
+- `--zip` names the zip by version (`dist\HWBlackbox-<version>-win64.zip`): a build to try.
+
+A release is built on GitHub (`.github/workflows/release.yml`, from a `v*` tag): the same build, then Setup.exe,
+`install.ps1` and a catalog of every file signed as James Cupps (`tools\sign_release.ps1`, Azure Artifact Signing
+through GitHub's own sign-in: no password or key is kept anywhere), the program run once as shipped, the zip, a
+statement of where it came from (`gh attestation verify`), and a draft release with the zip as
+`HWBlackbox-win64.zip`, the name the download links and the updater expect.
 
 The tests: `.venv\Scripts\python.exe -m unittest discover -s tests`.
 

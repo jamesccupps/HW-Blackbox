@@ -1,10 +1,18 @@
-# What a release ships, at the versions it's tested with (tools\build.py stops on any other). Python 3.12, 64-bit.
+# What a release ships, at the versions it's tested with, each pinned to its wheel's SHA-256 (from PyPI): tools\build.py
+# stops on any other version. Python 3.12, 64-bit Windows.
 #   py -3.12 -m venv .venv
-#   .venv\Scripts\python.exe -m pip install -r requirements.txt
-pythonnet==3.1.0
-clr_loader==0.3.1
-cffi==2.0.0
-pycparser==3.0
-psutil==7.2.2
-pywin32==312
-nvidia-ml-py==13.610.43
+#   .venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+pythonnet==3.1.0 \
+    --hash=sha256:698dd88edc198819ad63b624a6ebe76208c7b46e4fe13626f65e484f0358d6ba
+clr_loader==0.3.1 \
+    --hash=sha256:cbad189de20d202a7d621956b0fc38049e13c9bf7ca2923441eff725cd121aa1
+cffi==2.0.0 \
+    --hash=sha256:da68248800ad6320861f129cd9c1bf96ca849a2771a59e0344e88681905916f5
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+psutil==7.2.2 \
+    --hash=sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988
+pywin32==312 \
+    --hash=sha256:b457f6d628a47e8a7346ce22acb7e1a46a4a78b52e1d17e1af56871bd19a93bc
+nvidia-ml-py==13.610.43 \
+    --hash=sha256:f13c72698edef492f985cc225f14faafe68ae065a2e407f45bdf6f4b9b43fde8

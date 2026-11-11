@@ -390,7 +390,7 @@ def main(console=False, test=False, sensors=True, run_for=None):
 
     links = [p for p in (paths.P.logs, paths.P.state, paths.P.incidents, paths.P.secrets) if is_link(p)]
     if links:
-        note("refusing to start: %s is a link to somewhere else (run Install.cmd again)" % ", ".join(links))
+        note("refusing to start: %s is a link to somewhere else (run Setup.exe again)" % ", ".join(links))
         print("%s is a link to somewhere else: HW Blackbox won't write through it." % ", ".join(links))
         return 3
     # Started by the service manager, which never runs a service twice, there's no lock: a lock's name is one any

@@ -157,7 +157,7 @@ def installed_python():
 
 def launch():
     """The page's "Update": the installed updater, elevated. Returns {"started": True} or {"error": ...}."""
-    return launch_elevated("update", "the update", "update it with the new version's Install.cmd")
+    return launch_elevated("update", "the update", "update it with the new version's Setup.exe")
 
 
 # the commands the page may start elevated (fixed: nothing from a request goes into one)
@@ -166,8 +166,8 @@ ELEVATED = {"update": "update", "homeassistant": "homeassistant", "homeassistant
 
 def launch_elevated(name, what, otherwise):
     """One of HW Blackbox's own commands (ELEVATED[name]), from the installed program, in a window of its own, as
-    admin. Windows asks for an admin first (through PowerShell, so the prompt names Microsoft's PowerShell, as
-    Install.cmd's does, rather than Python). Returns {"started": True} or {"error": ...}."""
+    admin. Windows asks for an admin first (through PowerShell, so the prompt names Microsoft's PowerShell, a
+    publisher people know, rather than Python). Returns {"started": True} or {"error": ...}."""
     import ctypes
     from ctypes import wintypes
     py = installed_python()

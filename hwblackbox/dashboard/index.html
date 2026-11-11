@@ -655,7 +655,7 @@ TABS.overview = {every: 5000, async load() {
         (sv.attributes && sv.attributes.ports_listening != null ? ` and ${sv.attributes.ports_listening} ports` : "") +
         (Object.values(sv.event_logs || {}).some(x => !x) ? "<br><span class='warn-t'>Some of Windows' event logs can't be read</span>" : "") +
         updLine()
-        : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It's the Windows service "HW Blackbox": start it in Services (services.msc), or run Install.cmd again.`),
+        : `Its status file is ${a.status != null ? fmtAgo(a.status).replace(" ago", " old") : "missing"}. It's the Windows service "HW Blackbox": start it in Services (services.msc), or run Setup.exe again.`),
     card(h.sens, "Sensors", h.sensOk ? "Logging" : "Not logging",
       `Last sample ${fmtAgo(a.flight)} · rails ${a.rails != null ? fmtAgo(a.rails) : "–"}<br>` +
       `${sens.fast_hz ? sens.fast_hz + ((sv.attributes || {}).rails === "none on this PC" ? " fast rows a second · " : " rails rows a second · ") : ""}${sens.sensors ?? "?"} sensors` +
@@ -778,7 +778,7 @@ async function updates(check) {
     $("#upd").hidden = !off || !$("#newver").hidden;
     if (off) {
       $("#upd-text").innerHTML = `<b>HW Blackbox ${esc(off.version)} is out.</b> This PC has ${esc(upd.current)}.` +
-        (upd.installable ? "" : " Install it with the new version's Install.cmd.");
+        (upd.installable ? "" : " Install it with the new version's Setup.exe.");
       $("#upd-notes").hidden = !off.page;
       if (off.page) $("#upd-notes").href = off.page;
       $("#upd-go").hidden = !upd.installable;

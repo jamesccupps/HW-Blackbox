@@ -16,15 +16,34 @@ changing or releasing it.
 
 ## Releasing
 
-- Tag `vX.Y.Z` (annotated) and publish as the latest release, not a pre-release, titled `HW Blackbox X.Y.Z`. The notes
-  are `release-notes/vX.Y.Z.md` without their title line; they carry the zip's SHA-256.
-- The zip is uploaded as `HWBlackbox-win64.zip`, whatever the build named it: the download links and the updater
-  look for that name. The updater installs a release only when GitHub's digest for the zip and the SHA-256 in the
-  notes agree. Never replace a file on a release that's out: publish a new version instead.
+- From 1.1.1 a release is built on GitHub: bump `hwblackbox.VERSION`, write `release-notes/vX.Y.Z.md` with
+  `{SHA256}` where the zip's hash goes, commit, and push an annotated tag `vX.Y.Z`. `.github/workflows/release.yml`
+  builds, signs (see Code signing), checks and zips it, attests it, and makes a draft release titled
+  `HW Blackbox X.Y.Z` with the notes (their title line dropped, `{SHA256}` filled in) and the zip as
+  `HWBlackbox-win64.zip`. Look at the draft, then publish it as the latest release, not a pre-release. Never build the
+  release zip on a PC: it wouldn't be signed.
+- The zip's name stays `HWBlackbox-win64.zip`: the download links and the updater look for it. The updater installs a
+  release only when GitHub's digest for the zip and the SHA-256 in the notes agree. Never replace a file on a release
+  that's out: publish a new version instead.
 - `.github/workflows/checksums.yml` adds `SHA256SUMS.txt` to every published release (it never replaces one): keep
   its `contents: write`.
 - After publishing: the public download's hash, a dry run of the updater from the previous version
   (`python -m hwblackbox update --dry-run --pretend-version X`), the tests' run on GitHub, the site.
+
+## Code signing
+
+From 1.1.1, release.yml's `authenticode` job signs `Setup.exe`, `install.ps1` and `HWBlackbox.cat` (a catalog of every
+file, made after the manifest) as James Cupps: Azure Artifact Signing, the account and certificate the other apps use
+(account `SlateAccount`, profile `Slate`, endpoint `https://eus.codesigning.azure.net/`). Azure trusts GitHub's OIDC
+token through a federated credential on the "Slate signing" app registration for this repository's `release`
+environment, which admits `v*` tags only. This repository sends GitHub's immutable subject format, so the credential's
+subject is `repo:jamesccupps@148652101/HW-Blackbox@1443134825:environment:release` (not the classic
+`repo:jamesccupps/HW-Blackbox:...`). The environment's secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_SUBSCRIPTION_ID` name the app; no password or key is stored. The job runs only when the repository variable
+`SIGNING` is `on`; it runs only pinned actions, Microsoft's ArtifactSigning module and `tools/sign_release.ps1`, never
+Python, pip or the program (`test_the_signing_job_runs_nothing_else`). Setup.exe runs only an `install.ps1` signed by
+its own publisher, and a signed `install.ps1` installs only files that match the signed catalog. A tag
+`vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag.
 
 ## Not in the Scoop bucket (deliberate)
 

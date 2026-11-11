@@ -20,5 +20,5 @@ Once it's fixed, the release notes say what was fixed (and who found it, if you'
   service, the session agent and the dashboard on `127.0.0.1`;
 - the website at `https://jamesccupps.github.io/HW-Blackbox/`.
 
-Only the latest release gets fixes. To update, run the new release's `Install.cmd`: it keeps the settings and the
-history.
+Only the latest release gets fixes. To update, click **Update** on its page, or run the new release's `Setup.exe`:
+both keep the settings and the history.

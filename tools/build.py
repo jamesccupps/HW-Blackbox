@@ -58,6 +58,19 @@ LIB_SHA256 = {
     "System.Threading.AccessControl.dll": "f2ea3a373dd4964e9e98ca9f3d9d3de21ca4dbe870483a2765892b0cafb954a9",
     "System.Threading.Tasks.Extensions.dll": "af4e13ef418fd89b432de20cd1dfb7fa10a7179c8dd049c9856316e50c5949ca",
 }
+# Where each comes from: its NuGet package and version (tools\fetch_lib.py takes them from nuget.org for a build on
+# GitHub, keeping only a file whose SHA-256 is the one above)
+LIB_PACKAGES = {
+    "HidSharp.dll": ("HidSharp", "2.6.4"),
+    "LibreHardwareMonitorLib.dll": ("LibreHardwareMonitorLib", "0.9.6"),
+    "RAMSPDToolkit-NDD.dll": ("RAMSPDToolkit-NDD", "1.4.2"),
+    "System.Buffers.dll": ("System.Buffers", "4.6.1"),
+    "System.Memory.dll": ("System.Memory", "4.6.3"),
+    "System.Numerics.Vectors.dll": ("System.Numerics.Vectors", "4.6.1"),
+    "System.Runtime.CompilerServices.Unsafe.dll": ("System.Runtime.CompilerServices.Unsafe", "6.1.2"),
+    "System.Threading.AccessControl.dll": ("System.Threading.AccessControl", "10.0.9"),
+    "System.Threading.Tasks.Extensions.dll": ("System.Threading.Tasks.Extensions", "4.6.3"),
+}
 
 
 def copytree(src, dst, skip=()):
@@ -70,6 +83,40 @@ def copytree(src, dst, skip=()):
             copytree(e.path, target, {"__pycache__"})
         else:
             shutil.copy2(e.path, target)
+
+
+CSC = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "Microsoft.NET", "Framework64", "v4.0.30319",
+                   "csc.exe")
+
+
+def build_setup(target):
+    """Setup.exe (tools\\setup): compiled with the C# compiler every Windows has (.NET Framework 4's), with the
+    version and the publisher in its file details, its manifest (it asks for an administrator) and its icon."""
+    sys.path.insert(0, ROOT)
+    import hwblackbox
+    src = os.path.join(ROOT, "tools", "setup")
+    tmp = tempfile.mkdtemp(prefix="hwb-setup-")
+    try:
+        info = os.path.join(tmp, "AssemblyInfo.cs")
+        v = hwblackbox.VERSION
+        with open(info, "w", encoding="utf-8") as f:
+            f.write("using System.Reflection;\n"
+                    "[assembly: AssemblyTitle(\"HW Blackbox setup\")]\n"
+                    "[assembly: AssemblyDescription(\"Installs or updates HW Blackbox\")]\n"
+                    "[assembly: AssemblyProduct(\"HW Blackbox\")]\n"
+                    "[assembly: AssemblyCompany(\"James Cupps\")]\n"
+                    "[assembly: AssemblyCopyright(\"MIT License\")]\n"
+                    "[assembly: AssemblyVersion(\"%s.0\")]\n"
+                    "[assembly: AssemblyFileVersion(\"%s.0\")]\n"
+                    "[assembly: AssemblyInformationalVersion(\"%s\")]\n" % (v, v, v))
+        r = subprocess.run([CSC, "/nologo", "/target:exe", "/platform:anycpu", "/optimize+",
+                            "/win32manifest:" + os.path.join(src, "Setup.manifest"),
+                            "/win32icon:" + os.path.join(src, "hwblackbox.ico"), "/out:" + target,
+                            os.path.join(src, "Setup.cs"), info], capture_output=True, text=True)
+        if r.returncode:
+            sys.exit("Setup.exe didn't compile:\n" + r.stdout + r.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def sha256(path):
@@ -142,10 +189,11 @@ def main():
         f.write(PTH)
     copytree(os.path.join(ROOT, "hwblackbox"), os.path.join(out, "app", "hwblackbox"), {"__pycache__"})
     copytree(os.path.join(ROOT, "lib"), os.path.join(out, "app", "lib"))
-    for name in ("install.ps1", "Install.cmd", "Uninstall.cmd", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+    for name in ("install.ps1", "Uninstall.cmd", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         if os.path.exists(os.path.join(ROOT, name)):
             shutil.copy2(os.path.join(ROOT, name), os.path.join(out, name))
     copytree(os.path.join(ROOT, "licenses"), os.path.join(out, "licenses"))     # (the bundled DLLs' license texts)
+    build_setup(os.path.join(out, "Setup.exe"))
     exe = os.path.join(py, "python.exe")
     # compiled now, so nothing is written next to the program at run time
     subprocess.run([exe, "-m", "compileall", "-q", "-j", "0", os.path.join(py, "Lib"), os.path.join(out, "app")],

@@ -976,7 +976,7 @@ class LaptopTest(TempData):
         probs, a = self.problems(driver="missing", portable=True)
         self.assertEqual(len(probs), 1)
         self.assertTrue(probs[0].startswith("The PawnIO driver isn't installed, so there's no reading of the CPU's "
-                                            "temperature and power: run Install.cmd again"), probs)
+                                            "temperature and power: run Setup.exe again"), probs)
         self.assertEqual((a["rails"], a["cpu_temperature"]), ("none on this PC", "missing"))
         self.assertEqual(a["board_note"], "A laptop: no power supply rails to read")
 
@@ -1771,6 +1771,55 @@ class NewIn110Test(TempData):
         self.assertEqual(code, 0)
         self.assertFalse(json.load(open(paths.P.config))["home_assistant"]["enabled"])
         self.assertFalse(os.path.exists(cfg["home_assistant"]["env_file"]))
+
+    def test_the_signing_job_runs_nothing_else(self):
+        # While signed in to Azure, anything running in the job could sign whatever it liked: so the authenticode job
+        # runs only actions pinned to a commit, the ArtifactSigning module and tools/sign_release.ps1, which runs
+        # nothing but PowerShell. (The workflow is read as text: the job is the lines under "authenticode:".)
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, ".github", "workflows", "release.yml"), encoding="utf-8") as f:
+            wf = f.read()
+        job = re.search(r"\n  authenticode:\n(.*?)(?=\n  \w[\w-]*:\n)", wf, re.S).group(1)
+        uses = re.findall(r"uses: (\S+)", job)
+        self.assertTrue(uses and all(re.fullmatch(r"[\w./-]+@[0-9a-f]{40}", u) for u in uses), uses)
+        runs = [r.strip() for r in re.findall(r"run: (.+)", job)]
+        self.assertEqual(runs, ["Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Repository PSGallery "
+                                "-Scope CurrentUser -Force", "./tools/sign_release.ps1 -Folder build\\HWBlackbox"])
+        self.assertIn("environment: release", job)
+        self.assertIn("vars.SIGNING == 'on'", job)
+        with open(os.path.join(root, "tools", "sign_release.ps1"), encoding="utf-8") as f:
+            script = "\n".join(ln for ln in f.read().splitlines() if not ln.lstrip().startswith("#"))
+        for word in ("python", "pip", "-m hwblackbox", "Invoke-Expression", "iex ", "Start-Process", "&"):
+            self.assertNotIn(word, script.lower() if word.islower() else script, word)
+        # and the other jobs never get the signing environment or Azure's secrets
+        self.assertEqual(wf.count("environment: release"), 1)
+        self.assertEqual(len(re.findall(r"secrets\.AZURE_", wf)), 3)
+
+    def test_setup_runs_the_installer_beside_it(self):
+        # Setup.exe's own code, compiled here without its manifest (which asks for an administrator), so it runs as
+        # is: install.ps1 from its folder, with -Pause, in its window, and its exit code passed back
+        import subprocess
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        import build
+        if not os.path.exists(build.CSC):
+            self.skipTest("no .NET Framework C# compiler")
+        src = os.path.join(os.path.dirname(build.__file__), "setup", "Setup.cs")
+        d = os.path.join(self.dir, "release")
+        os.makedirs(d)
+        exe = os.path.join(d, "Setup.exe")
+        r = subprocess.run([build.CSC, "/nologo", "/target:exe", "/out:" + exe, src], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        with open(os.path.join(d, "install.ps1"), "w") as f:
+            f.write("param([switch]$Pause)\n'pause:' + $Pause | Out-File (Join-Path $PSScriptRoot 'ran.txt')\nexit 7\n")
+        r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        with open(os.path.join(d, "ran.txt"), encoding="utf-16") as f:
+            self.assertEqual(f.read().strip(), "pause:True")
+        os.remove(os.path.join(d, "install.ps1"))                         # (unzipped without it)
+        r = subprocess.run([exe], capture_output=True, text=True, timeout=60, input="x")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("install.ps1 isn't next to Setup.exe", r.stdout)
 
     def test_which_program_an_exe_is(self):
         from hwblackbox.winapi import program_of

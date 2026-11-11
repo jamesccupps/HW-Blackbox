@@ -1,0 +1,220 @@
+name: release
+
+# A release, from a v* tag: built on GitHub, Authenticode-signed, tested as shipped, attested, and left as a draft to
+# publish by hand. Five jobs, so that the signing identity never meets PyPI code or the program:
+#   build         the release folder (tools/build.py), from the hash-pinned packages (requirements.txt) and the NuGet
+#                 DLLs checked by SHA-256 (tools/fetch_lib.py); no secrets, no tokens
+#   authenticode  signs Setup.exe, install.ps1 and a catalog of every file (tools/sign_release.ps1) as James Cupps in
+#                 Azure Artifact Signing (the account and certificate Slate, NoteForge, PingerPlot, UniFi Stock
+#                 Watcher, Protect Panes and HVAC Network Scanner sign with). Azure accepts GitHub's OIDC token for it
+#                 only from this repository's "release" environment, which admits v* tags only: no password or key
+#                 anywhere. But while signed in, anything running in the job could sign whatever it liked, so it runs
+#                 only pinned actions, Microsoft's ArtifactSigning module and that script. It runs once the
+#                 repository variable SIGNING is "on" (set when Azure trusts the environment); until then releases
+#                 are unsigned, as before 1.1.1.
+#   package       the signatures and the catalog checked, the built program run once, the zip and its SHA-256
+#   attest        a signed statement (Sigstore) that the zip came from this workflow and this commit:
+#                   gh attestation verify HWBlackbox-win64.zip --repo jamesccupps/HW-Blackbox
+#   draft         the draft release: the notes (release-notes/vX.Y.Z.md, its {SHA256} filled in) and the zip as
+#                 HWBlackbox-win64.zip. Publishing it is by hand, after a look (CLAUDE.md: Releasing).
+# A tag vX.Y.Z-signtest.N (the version in the source plus the suffix) runs all but the draft, for trying a change to
+# signing. Don't release from it, and delete the tag afterwards. A run by hand builds and packages, unsigned.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # No pip cache: this job builds what people install, and a cache is shared state another run could have written.
+      # The exact Python: build.py ships its runtime, and the release notes say which.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12.10"
+
+      - name: A tag must match the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=$(python -c "import hwblackbox; print(hwblackbox.VERSION)")
+          case "$TAG" in
+            "v$v") ;;
+            "v$v-signtest."*) echo "::notice::$TAG is a signing test of $v: built, signed and tested; don't release it" ;;
+            *) echo "::error::$TAG doesn't match hwblackbox.VERSION ($v)"; exit 1 ;;
+          esac
+
+      - name: The packages, pinned by hash
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+
+      - name: lib\ from NuGet, checked by SHA-256
+        run: .venv\Scripts\python.exe tools\fetch_lib.py
+
+      - name: Build
+        run: .venv\Scripts\python.exe tools\build.py
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: HWBlackbox-unsigned
+          path: build/HWBlackbox
+          if-no-files-found: error
+          retention-days: 7
+
+  authenticode:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.SIGNING == 'on'
+    environment: release
+    permissions:
+      contents: read
+      id-token: write       # the OIDC token Azure signs in with
+    steps:
+      # For tools/sign_release.ps1. Nothing is installed from PyPI, and the program is never run here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: HWBlackbox-unsigned
+          path: build/HWBlackbox
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # The version tools/sign_release.ps1 imports
+      - name: Install the ArtifactSigning module
+        shell: pwsh
+        run: Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Repository PSGallery -Scope CurrentUser -Force
+
+      - name: Sign Setup.exe, install.ps1 and the catalog
+        shell: pwsh
+        run: ./tools/sign_release.ps1 -Folder build\HWBlackbox
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: HWBlackbox-signed
+          path: build/HWBlackbox
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: [build, authenticode]
+    # Unsigned when signing isn't on (or for a run by hand): the same checks, but the signatures'
+    if: ${{ !cancelled() && needs.build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.authenticode.result) }}
+    env:
+      SIGNED: ${{ needs.authenticode.result == 'success' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.authenticode.result == 'success' && 'HWBlackbox-signed' || 'HWBlackbox-unsigned' }}
+          path: build/HWBlackbox
+
+      - name: Signed by James Cupps, and timestamped; every file in the catalog
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          ./tools/check_signatures.ps1 -Publisher 'CN=James Cupps, O=James Cupps' -Path build\HWBlackbox\Setup.exe, build\HWBlackbox\install.ps1, build\HWBlackbox\HWBlackbox.cat
+          $r = Test-FileCatalog -Path build\HWBlackbox -CatalogFilePath build\HWBlackbox\HWBlackbox.cat -FilesToSkip 'HWBlackbox.cat'
+          if ("$r" -ne 'Valid') { throw "the files don't match the catalog: $r" }
+          "every file matches HWBlackbox.cat"
+
+      - name: The program runs on its own, as shipped
+        shell: pwsh
+        run: |
+          $out = & build\HWBlackbox\python\python.exe -m hwblackbox once --no-sensors --data-dir "$env:RUNNER_TEMP\hwb" 2>&1
+          if ($LASTEXITCODE -or -not ($out -match '"kind": "watching"')) { $out; throw "the built program's 'once' failed" }
+          & build\HWBlackbox\python\python.exe -c "import hwblackbox; print('HW Blackbox', hwblackbox.VERSION)"
+          if (-not (Test-Path build\HWBlackbox\Setup.exe)) { throw "Setup.exe is missing" }
+
+      - name: The zip, and its SHA-256
+        shell: pwsh
+        # (with the shipped Python's standard library, as build.py zips: paths with forward slashes, under HWBlackbox/,
+        # which the updater reads. Some versions of Compress-Archive write backslashes.)
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          & build\HWBlackbox\python\python.exe -c "import shutil; shutil.make_archive('dist/HWBlackbox-win64', 'zip', 'build', 'HWBlackbox')"
+          if ($LASTEXITCODE) { throw "zipping failed" }
+          $h = (Get-FileHash dist\HWBlackbox-win64.zip -Algorithm SHA256).Hash.ToLower()
+          "HWBlackbox-win64.zip: {0:N1} MB, SHA-256 $h" -f ((Get-Item dist\HWBlackbox-win64.zip).Length / 1MB)
+          "$h  HWBlackbox-win64.zip" | Out-File -Encoding ascii -NoNewline dist\HWBlackbox-win64.zip.sha256
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: HWBlackbox-release
+          path: |
+            dist/HWBlackbox-win64.zip
+            dist/HWBlackbox-win64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: package
+    if: ${{ !cancelled() && needs.package.result == 'success' }}
+    permissions:
+      contents: read
+      id-token: write       # signing the build attestation (Sigstore)
+      attestations: write   # storing it with the repository
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: HWBlackbox-release
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: dist/HWBlackbox-win64.zip
+
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [package, attest]
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs.attest.result == 'success' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-signtest') }}
+    permissions:
+      contents: write       # the draft release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: HWBlackbox-release
+          path: dist
+      - name: The draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="release-notes/$TAG.md"
+          [ -f "$notes" ] || { echo "::error::$notes is missing"; exit 1; }
+          h=$(cut -d' ' -f1 dist/HWBlackbox-win64.zip.sha256)
+          grep -q '{SHA256}' "$notes" || { echo "::error::$notes has no {SHA256} for the zip's hash"; exit 1; }
+          tail -n +2 "$notes" | sed "s/{SHA256}/$h/" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "HW Blackbox ${TAG#v}" --notes-file "$RUNNER_TEMP/notes.md" dist/HWBlackbox-win64.zip
+          echo "::notice::Draft release $TAG: HWBlackbox-win64.zip, SHA-256 $h. Publish it by hand after a look."

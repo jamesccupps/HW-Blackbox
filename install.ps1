@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Install, update or remove HW Blackbox. Run it in an elevated PowerShell, from the release folder (python\, app\),
-  or double-click Install.cmd / Uninstall.cmd there, which ask for admin rights themselves.
+  or double-click Setup.exe / Uninstall.cmd there, which ask for admin rights themselves.
 
 .DESCRIPTION
   .\install.ps1                         install, or update an installed one (settings and history are kept)
@@ -221,6 +221,26 @@ function Get-Mismatches([string]$Root, $Manifest) {
   }
   return ,$bad
 }
+# A signed release (from 1.1.1: this script signed by its publisher): every file in $Root must match its catalog,
+# HWBlackbox.cat, signed by the same publisher as this script. $null when it does, or when this script isn't signed (a
+# build made on a PC: the manifest's check is all there is); else why not, in words. The manifest comes from the
+# same zip as the files, so it catches damage; the signed catalog also catches a file changed on purpose.
+function Test-Catalog([string]$Root) {
+  if (-not $PSCommandPath) { return $null }
+  $me = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
+  if ($me.Status -ne 'Valid') { return $null }
+  $who = $me.SignerCertificate.GetNameInfo('SimpleName', $false)
+  $cat = Join-Path $Root 'HWBlackbox.cat'
+  if (-not (Test-Path -LiteralPath $cat)) { return "the release's signed catalog (HWBlackbox.cat) is missing" }
+  $s = Get-AuthenticodeSignature -LiteralPath $cat
+  if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -ne $me.SignerCertificate.Subject) {
+    return "the release's catalog isn't signed by $who ($($s.Status))"
+  }
+  $r = Test-FileCatalog -Path $Root -CatalogFilePath $cat -FilesToSkip 'HWBlackbox.cat'
+  if ("$r" -ne 'Valid') { return "the release's files don't match its catalog, signed by $who" }
+  Say "signed by ${who}: every file matches the release's catalog"
+  return $null
+}
 # The new program into $To (a folder of its own in Program Files), the build's files only, each checked. Returns how
 # many, or $null (having said why) when one doesn't match: nothing installed has been touched then.
 function Copy-Staged([string]$From, [string]$To, $Manifest) {
@@ -230,7 +250,7 @@ function Copy-Staged([string]$From, [string]$To, $Manifest) {
   if ($LASTEXITCODE -ge 8) { Say "copying failed (robocopy $LASTEXITCODE)"; return $null }
   # anything that isn't the build's (added to the folder it came from) is left out: it never reaches Program Files,
   # where the service would load it (a .pth file there would run as SYSTEM)
-  $want = @{ 'manifest.json' = $true }
+  $want = @{ 'manifest.json' = $true; 'hwblackbox.cat' = $true }
   foreach ($p in $Manifest.sha256.PSObject.Properties) { $want[($p.Name -replace '/', '\').ToLowerInvariant()] = $true }
   $extra = @()
   foreach ($f in Get-ChildItem -LiteralPath $To -Recurse -File -Force) {
@@ -244,9 +264,15 @@ function Copy-Staged([string]$From, [string]$To, $Manifest) {
     & cmd.exe /c rmdir /s /q "$To"
     return $null
   }
+  $why = Test-Catalog $To
+  if ($why) {
+    Say "$why. Nothing was changed: download the release again"
+    & cmd.exe /c rmdir /s /q "$To"
+    return $null
+  }
   # (a downloaded release carries Windows' "from the internet" mark, which would make the shortcut ask before it runs)
   Get-ChildItem -LiteralPath $To -Recurse -File | Unblock-File
-  return ($want.Count - 1)
+  return ($want.Count - 2)
 }
 # The checked copy in place of the installed program: the installed one moved aside, the new one renamed in, the old
 # one removed. If the installed folder can't be moved (a window open in it), the new files go over it instead and are
@@ -354,7 +380,7 @@ Say "HW Blackbox $($manifest.version), built $($manifest.built), $($manifest.fil
 if ($PSScriptRoot.TrimEnd('\') -ieq $Dest) { Say 'run the install from the built folder, not from the installed one'; exit 1 }
 # the CPU and motherboard sensors need the PawnIO driver (LibreHardwareMonitor reads them through it)
 $pawn = Get-PawnIO
-$pawnHint = 'install the PawnIO driver (winget install namazso.PawnIO, or run Install.cmd again and answer yes), then restart the PC'
+$pawnHint = 'install the PawnIO driver (winget install namazso.PawnIO, or run Setup.exe again and answer yes), then restart the PC'
 if ($pawn) { Say "PawnIO driver: $($pawn.State)" }
 else {
   Say "the PawnIO driver isn't installed: without it there are no CPU or motherboard sensors (the CPU temperature and power, the rails)"

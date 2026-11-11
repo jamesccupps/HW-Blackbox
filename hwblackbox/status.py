@@ -68,7 +68,7 @@ HA_KEYS = ("sensors", "rails", "cpu_temperature", "watcher", "session_agent", "b
            "last_drive_error", "drives")
 
 
-PAWNIO_HOW = ("run Install.cmd again and answer yes to installing it (or, as admin: winget install namazso.PawnIO, "
+PAWNIO_HOW = ("run Setup.exe again and answer yes to installing it (or, as admin: winget install namazso.PawnIO, "
               "then restart the PC)")
 
 

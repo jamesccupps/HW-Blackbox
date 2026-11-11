@@ -174,7 +174,7 @@ def cores(c):
 
 PROBLEM_ADVICE = [
     (r"The PawnIO driver isn't",
-     ["Run Install.cmd again (from the folder you installed from) and answer yes when it offers to install PawnIO: it "
+     ["Run Setup.exe again (from the folder you installed from) and answer yes when it offers to install PawnIO: it "
       "installs the driver, then starts HW Blackbox again with the settings and history kept. PawnIO is the signed "
       "driver LibreHardwareMonitor reads the CPU's and the board's sensors through.",
       "Or install it yourself, in a terminal run as admin: winget install namazso.PawnIO (or its installer from "
@@ -207,7 +207,7 @@ def check_problems(x):
                        ["Its status file is %s." % ("missing" if x.status_age is None else
                                                     "%s old" % span(x.status_age))],
                        ["Start it: Services (services.msc) → HW Blackbox → Start, or restart the PC.",
-                        "If it won't stay running, run Install.cmd again: it repairs the install and keeps the data."],
+                        "If it won't stay running, run Setup.exe again: it repairs the install and keeps the data."],
                        "#overview")
     probs = [p for p in x.status.get("problems") or [] if not DISK_PROBLEM.search(p)]
     if not probs:
