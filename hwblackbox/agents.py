@@ -69,6 +69,30 @@ def folder_security(sid, owner=True):
     return win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1)
 
 
+def inherit_children(path, sid):
+    """Every file and folder in a user's folder takes its permissions from that folder again (a DACL of its own that's
+    empty, and inherits). Files moved in from an older version's folder keep the permissions of where they were, and
+    on 2026-11-10 the first 1.1.0 install left them read-only for their own user: the agent couldn't open its own
+    crash log, and exited at every start. Only what the user owns and has one name for (a hard link to someone
+    else's file is never handed to them), never through a link."""
+    import win32security
+    empty = win32security.ACL()
+    flags = win32security.DACL_SECURITY_INFORMATION | win32security.UNPROTECTED_DACL_SECURITY_INFORMATION
+    done = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if not is_link(os.path.join(root, d))]
+        for name in dirs + files:
+            p = os.path.join(root, name)
+            try:
+                if is_link(p) or owner_of(p) != sid or (name in files and os.stat(p).st_nlink != 1):
+                    continue
+                win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT, flags, None, None, empty, None)
+                done += 1
+            except Exception:
+                continue
+    return done
+
+
 _folder_lock = threading.Lock()
 
 
@@ -115,6 +139,7 @@ def _make_user_folder(sid, user, jrnl):
         except Exception as e:
             if jrnl:
                 jrnl.write("error", {"where": "session folders", "error": "%s: its permissions: %s" % (path, e)})
+        inherit_children(path, sid)                   # (and the files in it, which kept their old permissions)
         if jrnl:
             jrnl.write("agent", {"event": "folder moved", "user": user, "why": "sessions\\%s is now sessions\\%s "
                                  "(named by the account, for that user only)" % (os.path.basename(old), sid)})
@@ -192,6 +217,7 @@ class Agents:
         self.jrnl = jrnl
         self.restart = restart             # (off for a test instance: it never touches the real agents)
         self.folders = folders             # (the real service makes each signed-in user's folder)
+        self.checked = set()               # SIDs whose folder's files this run has given back their permissions
         self.first_seen = {}               # session id -> when this service first saw it signed in
         self.last_restart = {}             # session id -> time
         self.view = []                     # [{session, user, state, agent, age, ...}], refreshed every 30 s
@@ -208,7 +234,11 @@ class Agents:
             self.first_seen.setdefault(sid, now)
             account = sid_of(s.get("domain"), user)
             if self.folders and account:
-                make_user_folder(account, user, self.jrnl)
+                made = make_user_folder(account, user, self.jrnl)
+                if made and account not in self.checked:
+                    # once a run: the files in it take their permissions from it (see inherit_children)
+                    self.checked.add(account)
+                    inherit_children(made, account)
             folder = session_folder(account or user)
             path = os.path.join(folder, "agent.json") if folder else None
             hb = (read_json(path, limit=1 << 20) if path else None) or {}

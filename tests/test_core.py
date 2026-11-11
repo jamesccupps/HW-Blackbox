@@ -711,6 +711,35 @@ class HardeningTest(TempData):
         self.assertTrue(os.path.exists(os.path.join(path, "session_20261101.jsonl")))
         self.assertFalse(os.path.exists(old))
         self.assertEqual(jr.recs[0]["event"], "folder moved")
+        # 2026-11-10: the moved files kept the permissions of where they were, read-only for their own user (the
+        # installer had taken the old folder's grants off), and the agent couldn't open its own crash log
+        import win32security
+        ro = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x1200a9;;;%s)" % me, 1)
+
+        def read_only(p):
+            win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT,
+                                               win32security.DACL_SECURITY_INFORMATION |
+                                               win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                                               None, None, ro.GetSecurityDescriptorDacl(), None)
+        old_file = os.path.join(path, "agent_crash.log")
+        open(old_file, "w").close()
+        read_only(old_file)
+        linked = os.path.join(path, "linked.txt")
+        open(linked, "w").close()
+        os.link(linked, os.path.join(self.dir, "elsewhere.txt"))           # (two names: never handed over)
+        read_only(linked)
+        with self.assertRaises(PermissionError):
+            open(old_file, "a").close()
+        self.assertGreaterEqual(agents.inherit_children(path, me), 1)
+        with open(old_file, "a") as f:                                       # its own again
+            f.write("x")
+        with self.assertRaises(PermissionError):
+            open(linked, "a").close()
+        for p in (linked, os.path.join(self.dir, "elsewhere.txt")):          # (so the clean-up can remove them)
+            win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT,
+                                               win32security.DACL_SECURITY_INFORMATION |
+                                               win32security.UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                               None, None, win32security.ACL(), None)
         # (made unelevated here, so owned by this user; the real service's are the administrators')
         if agents.owner_of(path) not in (agents.SYSTEM, agents.ADMINS):
             self.assertIsNone(agents.make_user_folder("S-1-5-21-1-2-3-1009", None) and None)
