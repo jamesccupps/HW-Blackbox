@@ -56,7 +56,7 @@ h1 { font-size: 44px; line-height: 1.15; margin: 14px 0 10px; letter-spacing: -.
 .btn small { font-weight: 400; opacity: .8; margin-left: 6px; }
 .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
 .meta { color: var(--dim); font-size: 14px; margin-top: 12px; }
-.shot { display: block; width: 100%; border-radius: 12px; border: 1px solid var(--line); box-shadow: var(--shadow); }
+.shot { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); box-shadow: var(--shadow); }
 .caption { color: var(--dim); font-size: 14px; text-align: center; margin: 8px 0 0; }
 section { padding: 44px 0 8px; }
 h2 { font-size: 28px; margin: 0 0 18px; }
@@ -96,8 +96,8 @@ footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: c
       <div class="card"><h3>The rails, four times a second</h3><p>+12 / +5 / +3.3 V, Vcore, SoC, CPU power and temperature, on their own high-priority thread. Each row is on disk before the next is taken.</p></div>
       <div class="card"><h3>A report after every power-off</h3><p>When the PC really went down (the last logged row, not Windows' guess), how long it was off, and the last two minutes of readings.</p></div>
       <div class="card"><h3>Apps closing and crashing</h3><p>Starts, exits and exit codes in words for the apps you choose, and an incident report with the last three minutes of everything.</p></div>
-      <div class="card"><h3>Windows' own records</h3><p>Crashes, hangs, display driver resets, who asked for a shutdown or restart, sign-ins and sign-outs, sleep, and updates waiting for a restart.</p></div>
-      <div class="card"><h3>Ports and disk space</h3><p>Who listens on which port, and clashes; every drive's free space, with a warning when the Windows drive fills up fast.</p></div>
+      <div class="card"><h3>Windows' own records</h3><p>Crashes, hangs, display driver resets, who asked for a shutdown or restart, sign-ins and sign-outs, sleep, updates waiting for a restart, and the errors the CPU, memory and PCIe report.</p></div>
+      <div class="card"><h3>Ports, disks and drives</h3><p>Who listens on which port, and clashes; every drive's free space, with a warning when the Windows drive fills up fast; each drive's health, temperature and wear.</p></div>
     </div>
   </section>
 
@@ -116,7 +116,7 @@ footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: c
     <div class="grid">
       <div class="card"><h3>A real Windows service</h3><p>Runs from boot, whether or not anyone signs in, and Windows restarts it within seconds if it ever fails.</p></div>
       <div class="card"><h3>A dead man's switch</h3><p>If any part of it stops moving, a native timer ends the service so Windows starts it fresh, even when Python itself is stuck.</p></div>
-      <div class="card"><h3>Home Assistant, if you like</h3><p>A status every minute, for alerts on a problem, a power loss, or a PC that has gone quiet.</p></div>
+      <div class="card"><h3>It tells you</h3><p>A Windows notification for a power-off, a crash, a hardware error, or something that stopped working. If you run Home Assistant, an optional add-on sends it a status every minute.</p></div>
     </div>
   </section>
 
@@ -127,14 +127,14 @@ footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: c
       <li>Double-click <code>Install.cmd</code> and allow admin rights. It isn't code-signed, so Windows may show <em>Windows protected your PC</em>: click <b>More info</b>, then <b>Run anyway</b>. If the PawnIO driver isn't installed (the CPU and motherboard sensors need it), it offers to install it: press <b>Y</b>.</li>
       <li>Open <b>HW Blackbox</b> from the Start menu.</li>
     </ol>
-    <p>Each <a href="https://github.com/jamesccupps/HW-Blackbox/releases">release</a> lists the zip's SHA-256, and the installer checks every file against the release's manifest. Running a newer <code>Install.cmd</code> updates it and keeps your settings and history.</p>
+    <p>Each <a href="https://github.com/jamesccupps/HW-Blackbox/releases">release</a> lists the zip's SHA-256, and the installer checks every file against the release's manifest. It updates itself from its page (click <b>Update</b>), or run a newer <code>Install.cmd</code>: either keeps your settings and history.</p>
   </section>
 
   <section>
     <h2>Private by design</h2>
     <ul>
-      <li>The dashboard listens on <code>127.0.0.1</code> only. Nothing leaves the PC unless you turn on Home Assistant, and then only a status goes to your own server.</li>
-      <li>The app in front is kept for three minutes only, for incident reports. There's no history of what you use.</li>
+      <li>The dashboard listens on <code>127.0.0.1</code> only. Nothing leaves the PC unless you set up the Home Assistant add-on, and then only a status goes to your own server.</li>
+      <li>The app in front is kept for three minutes only, copied into a report after a crash or a shutdown. Each user's own records are in a folder only they can read.</li>
       <li>The program and its Python live in Program Files, where only admins can write, because the service runs as SYSTEM.</li>
     </ul>
   </section>

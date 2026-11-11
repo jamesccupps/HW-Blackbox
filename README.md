@@ -16,11 +16,13 @@ switch off, or why did that app close?*
   and the last two minutes of readings. After an app crash: the exit code in words, and the last three minutes of
   everything.
 - **Tells you what's wrong, and what to do.** The Diagnose tab checks what it has recorded (power-offs, crashes,
-  heat, the rails, a program stuck busy or growing without end, memory, a laptop's battery, disk space) and says what
-  to do about each.
+  the hardware's own error reports, the drives' health, heat, the rails, a program stuck busy or growing without end,
+  memory, a laptop's battery, disk space) and says what to do about each.
+- **Tells you when it happens.** A Windows notification for a power-off, a crash, a hardware or drive error, or
+  something that stopped working, so you hear of it without opening the page.
 - **Runs from boot, as a Windows service,** whether or not anyone signs in. Windows restarts it if it ever fails.
-- **Stays on your PC.** A local dashboard on `127.0.0.1`; optionally a status for your own Home Assistant, with
-  alerts for a problem, a power loss or a PC that has gone quiet.
+- **Stays on your PC.** A local dashboard on `127.0.0.1`. If you run Home Assistant, an optional add-on sends it a
+  status, for alerts on your phone or a PC that has gone quiet.
 
 ## Install
 
@@ -58,16 +60,24 @@ against the release's manifest. More options are under [Install, in detail](#ins
   - the time the PC really went down: the last logged row, which can be half an hour off Windows' own guess;
   - how long it was off;
   - the last two minutes of both logs, the rails trace last;
-  - whether the service had seen a shutdown begin.
+  - whether the service had seen a shutdown begin;
+  - how Windows says it went off (a blue screen and its stop code, by name; the power button held; sleep), and the
+    hardware's own error reports around it.
 - **Shutdowns.** Who asked for a shutdown or restart (User32 1074). Windows asking each session to end, with the
   idle time and the app in front. The service's own goodbye as services stop, so a missing goodbye means the power
   went.
 - **Apps.** The apps on a watch list, in every session: when they start and end, the exit code and what it means
   (clean, crash, killed by another program), and their memory every minute. A crash gets an incident report with the
   last 3 minutes of everything and the app that was in front.
-- **Windows' records.** Crashes, hangs and error reports for any app, display driver resets, low memory, services
-  ending unexpectedly, boots and shutdowns. Records written while the service wasn't running are read at its next
-  start.
+- **Windows' records.** Crashes, hangs and error reports for any app (named by the program its exe belongs to: a
+  `python.exe` can be anyone's), display driver resets, low memory, services ending unexpectedly, boots and
+  shutdowns. Records written while the service wasn't running are read at its next start.
+- **Hardware errors.** The errors the CPU, the memory and PCI Express report to Windows (WHEA), corrected or fatal.
+  A corrected one did no harm, but keeps happening on a part or a setting on the edge (an overclock, XMP / EXPO, a
+  riser cable); a fatal one is a blue screen. And the drives' own: bad blocks, retries, a controller reset, a damaged
+  file system.
+- **Drives.** Once an hour, each drive's health as Windows judges it, its temperature, its wear, and the errors it
+  has counted (Windows' storage counters, as `Get-StorageReliabilityCounter` shows them).
 - **Ports.** Who listens on which TCP port, every 15 s. It flags two programs on one port where their addresses
   overlap (one on all addresses and one on 127.0.0.1, say), a known port held by the wrong program, and a server
   that should always be listening but isn't.
@@ -82,15 +92,19 @@ against the release's manifest. More options are under [Install, in detail](#ins
   when it gets low or fills up fast (an update unpacking, a download, a runaway log). It also notes a Windows update
   that's waiting for a restart.
 
-Optionally, it sends a status to **Home Assistant** every minute, so you can be alerted to a problem, a power loss, or
-a PC that has gone quiet.
+**Notifications:** each signed-in user gets Windows notifications for what's new: a power-off, an app's crash
+report, a hardware or drive error, a problem that lasts a minute. Each kind can be turned off on the page's Settings
+tab. They're rationed (one of a kind every 10 minutes, six an hour), and nothing from before the install is announced.
+
+**Home Assistant** is an optional add-on: a status every minute, so your automations can alert you (see
+[Home Assistant](#home-assistant)).
 
 ## How it's built
 
 | Part | Runs as | Does |
 |---|---|---|
-| **Service** `HWBlackbox` | LocalSystem, from boot, whether or not anyone signs in | sensors, power-offs, apps, Windows' records, ports, status, Home Assistant |
-| **Session agent** (task `HWBlackboxAgent`) | each signed-in user, not elevated | what only a session can see: the screens, the app in front, the taskbar, sign-outs; serves the dashboard |
+| **Service** `HWBlackbox` | LocalSystem, from boot, whether or not anyone signs in | sensors, power-offs, apps, Windows' records, hardware errors, the drives, ports, status, Home Assistant (if it's set up) |
+| **Session agent** (task `HWBlackboxAgent`) | each signed-in user, not elevated | what only a session can see: the screens, the app in front, the taskbar, sign-outs; serves the dashboard; shows that user's notifications |
 | **Dashboard** | a page in your browser, from the agent, on `127.0.0.1` | everything above |
 
 What keeps it reliable:
@@ -132,10 +146,13 @@ What keeps it reliable:
 `Install.cmd`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), runs
 `install.ps1`:
 - If the PawnIO driver is missing, it asks whether to install it (with winget, in the installer's window).
-- It copies the program to `C:\Program Files\HWBlackbox` and checks every file against the release's manifest.
+- It copies the program into a folder of its own in Program Files (`HWBlackbox.new`) and checks every file against
+  the release's manifest, while an installed HW Blackbox keeps running. Only the build's files are copied: anything
+  else in the release folder is left out. If a file doesn't match, it stops there, with nothing installed changed.
+  Then it stops the running HW Blackbox and puts the new one in `C:\Program Files\HWBlackbox`.
 - It sets up the data folder.
 - It registers and starts the service and the agent's task, and adds **HW Blackbox** to the Start menu and to
-  **Settings → Apps → Installed apps**.
+  **Settings → Apps → Installed apps**, and its name to Windows' notifications.
 - It checks that everything reports.
 
 Its log is `%TEMP%\hwblackbox-install.txt`. Running it again updates an installed HW Blackbox and keeps the settings
@@ -183,20 +200,23 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 
 | Tab | Shows |
 |---|---|
-| **Overview** | the service and the agents, any problems, the key readings now, power-offs, disks (with their last week) |
-| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, crashes, display driver resets, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, a laptop's battery (its wear, how fast it drains, how low it ran), disk space, a waiting update, uptime |
+| **Overview** | the service and the agents, any problems, hardware errors, the key readings now, power-offs, disks (with their last week) and the drives' health |
+| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, hardware errors, crashes, display driver resets, the drives, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, a laptop's battery (its wear, how fast it drains, how low it ran), disk space, a waiting update, uptime |
 | **Sensors** | every sensor: current, minimum, maximum and average, since the page opened or since the service started |
 | **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
 | **Power** | the 4-a-second rails over the last minutes, and every power-off caught |
-| **Events** | the records: apps closing and crashing, shutdowns and who asked, sessions, ports, Windows' records |
+| **Events** | the records: apps closing and crashing, shutdowns and who asked, hardware and drive errors, sessions, ports, Windows' records |
 | **Ports** | who listens where, and port problems |
 | **Incidents** | the power-off and crash reports |
 | **Processes** | what's using the CPU and memory right now, and every program's CPU, memory, graphics memory and GPU use over the last week (pick the programs to chart) |
+| **Settings** | your notifications (and a test one), and the add-ons: Home Assistant, set up or turned off from here |
 
 The header shows the page's version. After an update, a page that was already open says so and offers a reload.
 
-The dashboard only reads. It listens on `127.0.0.1` alone and answers only requests addressed that way, so a web page
-can't reach it through DNS rebinding.
+The dashboard reads; the only things it changes are your own notification settings, and anything that needs an
+admin (an update, Home Assistant) is started in a window of its own after Windows' admin prompt. It listens on
+`127.0.0.1` alone and answers only requests addressed that way (and changes only from the page itself), so a web page
+can't reach it through DNS rebinding. Charts can be read with the keyboard: Tab to one, then the arrow keys.
 
 ## Settings
 
@@ -263,21 +283,19 @@ counts the power-offs since the newest one.
 
 ## Home Assistant
 
-1. In Home Assistant, create a long-lived access token (your profile → Security).
-2. As admin, write `C:\ProgramData\HWBlackbox\secrets\home_assistant.env`. Only SYSTEM and admins can read that
-   folder.
-
-   ```
-   HA_URL=http://homeassistant.local:8123
-   HA_TOKEN=eyJ...
-   ```
-
-3. Set `home_assistant.enabled` to `true` (and `entity` and `name` if you like).
+An optional add-on, off unless you set it up: on the page, **Settings → Home Assistant → Set up…**. Windows asks for
+an admin, then a window asks for Home Assistant's address and a long-lived access token (in Home Assistant: your
+profile → Security → Long-lived access tokens), tries them, and only then keeps them: the token in
+`C:\ProgramData\HWBlackbox\secrets\home_assistant.env`, which only SYSTEM and admins can read. **Turn off…** there
+stops it (and offers to delete the token). The same from an elevated prompt:
+`& "C:\Program Files\HWBlackbox\python\python.exe" -m hwblackbox homeassistant` (`--off` to turn it off). Or by
+hand: that file with `HA_URL=...` and `HA_TOKEN=...` lines, and `home_assistant.enabled` set to `true`.
 
 Every minute the entity gets state `ok` or `problem`, with these attributes:
 - `problems`: a list, in words;
 - `sensors`, `rails`, `cpu_temperature`, `watcher`, `session_agent`;
 - `last_incident`, `last_shutdown`, `last_power_loss`, `last_power_loss_died_at`;
+- `last_hardware_error`, `last_drive_error`, `drives` (from 1.1.0);
 - `windows_update`: "waiting for a restart since ..." or "no restart waiting";
 - `disk_free_gb`, `logs_gb`, `boot`, `version`.
 
@@ -308,12 +326,15 @@ triggers:
 | `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
 | `logs\programs_YYYYMMDD.csv` | every minute: each busy or big program's CPU time, memory, graphics memory and GPU share, a row per program (kept 183 days, about 1.5 MB a day). 1.0.7 wrote `cpu_YYYYMMDD.csv` (the CPU alone); it's still read |
 | `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
+| `logs\drives_YYYYMMDD.csv` | every hour: each drive's health, temperature, wear and error counts (kept 183 days) |
+| `logs\*.csv.gz` | the day logs above once they're two days old, packed to about a tenth of the size (from 1.1.0); read as before |
 | `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line |
 | `state\status.json` | the status, every 30 s |
 | `state\sensors.json` | every sensor, with its minimum, maximum and average since the service started |
 | `state\ports.json` | who listens where |
+| `state\drives.json` | the drives' last look |
 | `incidents\incident_*.txt` | `incident_<boot>.txt` for a power-off, `incident_<time>_<app>.txt` for an app |
-| `sessions\<user>\` | each user's agent: `session_YYYYMMDD.jsonl`, `agent.json` (its heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes), `update.json` (the last update check) |
+| `sessions\<SID>\` | each user's own, named by their account's SID (the service makes it at sign-in, for that user alone): `session_YYYYMMDD.jsonl`, `agent.json` (its agent's heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes), `update.json` (the last update check), `settings.json` (their notifications), `notified.json` (what they've been told). Before 1.1.0 these were named by the user; the service moves them at the next sign-in |
 | `update\` | an update's download while it installs (removed after), and `install-report.txt`, the installer's report |
 | `crash.log` | anything the service couldn't put anywhere else |
 
@@ -338,9 +359,9 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
   need a sensor chip that reports them, which laptops don't have.
 - **It isn't code-signed.** Windows SmartScreen may warn about `Install.cmd` the first time. Check the zip's SHA-256
   against the release notes; the installer then checks every file against the release's manifest.
-- **Times are local, without a time zone.** The logs and records use the PC's local time, so when daylight saving
-  ends, the repeated hour appears twice in the logs and on the charts. The checks that raise problems aren't
-  affected: they use a steady clock.
+- **Times before 1.1.0 have no time zone.** Since 1.1.0 every time in the logs and records carries its offset from
+  UTC (`2026-11-10T18:23:02-05:00`). Older ones are local time: when daylight saving ended, the repeated hour was
+  written twice the same way, and they're read in order to tell the two apart.
 - **Windows 10 and 11, 64-bit only.** Ports are TCP only.
 
 ## Privacy and security
@@ -355,13 +376,17 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
   the same, power-off reports until you delete them).
 - **The program history names programs:** each minute, the busiest and biggest programs by exe name (`chrome.exe`,
   `game.exe`), kept 183 days. It doesn't say which account ran them, or what they had open.
-- **On a PC with several accounts, everyone signed in sees the same dashboard:** every account's sessions, the app
-  in front included, and every listening program's command line (with password-like values hidden as `***`).
+- **On a PC with several accounts,** the service's records (apps, ports, power, Windows' records) are on every
+  user's dashboard, with every listening program's command line (password-like values hidden as `***`). What each
+  user's own agent records (the app in front, their screens, their notification settings) is in a folder only they,
+  admins and the service can read.
 - **The program can only be changed by admins:** Program Files, with a Python of its own. The service runs as
   SYSTEM, so nothing it loads can be in a folder a normal account can write. The data folder is the same: it belongs
-  to Administrators and users can only read it, except that each session agent makes a folder of its own in
-  `sessions\`. The token in `secrets\` is for SYSTEM and admins only. The installer moves aside a data folder anyone
-  else made first, and the service never writes through a link.
+  to Administrators and users can only read it, except each user's own folder in `sessions\`, which the service
+  makes for them (users can't make folders there, so nobody can make another's first). The token in `secrets\` is
+  for SYSTEM and admins only. The installer moves aside a data folder anyone else made first, and the service never
+  writes through a link.
+- **Notifications** are shown by Windows on this PC; nothing is sent anywhere.
 - **Watching is reading only:** other processes are opened for their exit code and nothing more. HW Blackbox changes
   no settings and never blocks a shutdown.
 
@@ -369,18 +394,23 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 ```powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install pythonnet psutil pywin32 nvidia-ml-py
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 # lib\: LibreHardwareMonitorLib.dll and its dependencies (HidSharp, RAMSPDToolkit-NDD, System.*), from a
 # LibreHardwareMonitor release or the LibreHardwareMonitorLib NuGet package (net472)
 .venv\Scripts\python.exe tools\build.py --zip    # -> build\HWBlackbox, and dist\HWBlackbox-<version>-win64.zip
 ```
 
 What `build.py` does:
-- It copies the interpreter and its standard library (without tests, tkinter or IDLE), plus this venv's packages,
-  into `build\HWBlackbox\python\`.
+- It checks the venv's packages are the versions in `requirements.txt`, and that `lib\`'s DLLs are the ones shipped
+  (by SHA-256): it stops otherwise.
+- It copies the interpreter and its standard library (without tests, tkinter or IDLE), plus the packages the program
+  uses (and nothing else installed in the venv), into `build\HWBlackbox\python\`. It prints the Python version, which
+  the release notes say.
 - A `python312._pth` file fixes the module path to those folders only.
 - It compiles everything and checks that the result runs on its own.
 - It writes `MANIFEST.json` with every file's SHA-256 for the installer to check.
+- `--zip` names the zip by version (`dist\HWBlackbox-<version>-win64.zip`); a release uploads it as
+  `HWBlackbox-win64.zip`, the name the download links and the updater expect.
 
 The tests: `.venv\Scripts\python.exe -m unittest discover -s tests`.
 

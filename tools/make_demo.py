@@ -25,6 +25,7 @@ from hwblackbox.disks import COLUMNS as DISK_COLUMNS  # noqa: E402
 from hwblackbox.sensors import COLUMNS, FAST_COLUMNS  # noqa: E402
 
 HOST, USER = "DEMO-PC", "alex"
+USER_SID = "S-1-5-21-1000000000-2000000000-3000000000-1001"   # (each user's folder is named by their SID)
 CPU, BOARD, CHIP, GPU = "AMD Ryzen 7 7700X", "ASUS TUF GAMING B650-PLUS", "Nuvoton NCT6799D", "NVIDIA GeForce RTX 4070"
 RAM_GB = 31.6
 rnd = random.Random(7)
@@ -124,7 +125,7 @@ def main():
     out = os.path.abspath(args.out)
     if os.path.exists(out):
         shutil.rmtree(out)
-    for d in ("logs", "state", "incidents", "sessions/" + USER):
+    for d in ("logs", "state", "incidents", "sessions/" + USER_SID):
         os.makedirs(os.path.join(out, d))
     logs, inc = os.path.join(out, "logs"), os.path.join(out, "incidents")
     now = dt.datetime.now().replace(microsecond=0)
@@ -137,7 +138,7 @@ def main():
     crash_at = dt.datetime.combine(start.date(), dt.time(20, 14, 5))         # Blender crashes
     m = Machine()
     svc = Records(logs, "events")
-    agent = Records(os.path.join(out, "sessions", USER), "session")
+    agent = Records(os.path.join(out, "sessions", USER_SID), "session")
     with open(os.path.join(out, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"watch": [{"exe": "explorer.exe", "label": "Windows Explorer"},
                              {"exe": "obs64.exe", "label": "OBS Studio"}, {"exe": "blender.exe", "label": "Blender"},
@@ -282,6 +283,9 @@ def main():
          "00000000001a7e2c", "2e60", "01db2f0c8a4b1e77"], app="blender.exe"))
     svc.add(dt.datetime.combine(day0, dt.time(21, 30, 2)), "winevent", **winevent(
         dt.datetime.combine(day0, dt.time(21, 30, 1)), "Display", 4101, inserts=["nvlddmkm", "", ""]))
+    # a corrected PCI Express error during the evening's game: no harm done, but the Diagnose tab has a note on it
+    whea_at = dt.datetime.combine(day0, dt.time(21, 47, 33))
+    svc.add(whea_at, "winevent", level="warning", **winevent(whea_at, "Microsoft-Windows-WHEA-Logger", 17))
     agent.add(dt.datetime.combine(day0, dt.time(21, 30, 3)), "display",
               before=["\\\\.\\DISPLAY1 0,0 2560x1440 at 125%"], after=["\\\\.\\DISPLAY1 0,0 2560x1440 at 125%",
                                                                        "\\\\.\\DISPLAY2 2560,180 1920x1080 at 100%"])
@@ -481,7 +485,10 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
              "last_shutdown": "%s: restart by explorer.exe (Other (Planned))" % (booted - dt.timedelta(seconds=77)).isoformat(sep=" "),
              "last_power_loss": (back_at + dt.timedelta(seconds=2)).isoformat(sep=" "),
              "last_power_loss_died_at": off_at.isoformat(timespec="milliseconds"),
-             "windows_update": "waiting for a restart since %s" % (now - dt.timedelta(hours=27)).strftime("%Y-%m-%d %H:%M")}
+             "windows_update": "waiting for a restart since %s" % (now - dt.timedelta(hours=27)).strftime("%Y-%m-%d %H:%M"),
+             "drives": "2 healthy", "last_drive_error": None,
+             "last_hardware_error": "%s: a corrected hardware error in a PCI Express link (WHEA 17)" % dt.datetime.combine(
+                 crash_at.date(), dt.time(21, 47, 33)).isoformat(sep=" ")}
     status = {"ts": now.isoformat(timespec="seconds"), "version": VERSION, "pid": 3180,
               "started": booted.isoformat(timespec="seconds"), "test": False, "state": "ok", "problems": [],
               "attributes": attrs,
@@ -502,7 +509,16 @@ def write_live(out, now, booted, back_at, off_at, report, crash_at):
                                       "time_of_death": off_at.isoformat(timespec="milliseconds"), "incident": report}}
     with open(os.path.join(st, "status.json"), "w", encoding="utf-8") as f:
         json.dump(status, f)
-    with open(os.path.join(out, "sessions", USER, "agent.json"), "w", encoding="utf-8") as f:
+    # the drives, as the service's hourly look leaves them
+    with open(os.path.join(st, "drives.json"), "w", encoding="utf-8") as f:
+        json.dump({"ts": now.isoformat(timespec="seconds"), "error": None, "drives": [
+            {"disk": 0, "model": "Samsung SSD 990 PRO 1TB", "media": "SSD", "bus": "NVMe", "size_gb": 1000,
+             "health": "healthy", "temp_c": 41, "temp_max_c": 70, "wear_pct": 3, "read_err_unc": 0, "write_err_unc": 0,
+             "read_err_total": 0, "write_err_total": 0, "power_on_h": 3912},
+            {"disk": 1, "model": "WDC WD20EZBX-00AYRA0", "media": "HDD", "bus": "SATA", "size_gb": 2000,
+             "health": "healthy", "temp_c": 36, "temp_max_c": 55, "wear_pct": None, "read_err_unc": 0,
+             "write_err_unc": 0, "read_err_total": None, "write_err_total": None, "power_on_h": 15022}]}, f)
+    with open(os.path.join(out, "sessions", USER_SID, "agent.json"), "w", encoding="utf-8") as f:
         json.dump({"ts": now.isoformat(timespec="seconds"), "pid": 7344, "version": VERSION, "user": USER, "session": 1,
                    "started": booted.isoformat(timespec="seconds"),
                    "screens": ["\\\\.\\DISPLAY1 0,0 2560x1440 at 125%", "\\\\.\\DISPLAY2 2560,180 1920x1080 at 100%"],

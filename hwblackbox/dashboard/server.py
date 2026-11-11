@@ -108,7 +108,16 @@ def session_dirs():
                  if SID_NAME.match(e.name) and e.is_dir(follow_symlinks=False) and not e.is_junction()]
     except OSError:
         return []
-    return [(account_name(name), path) for name, path in found if owner_of(path) in (SYSTEM, ADMINS, mine)]
+    out = []
+    for name, path in found:
+        if owner_of(path) not in (SYSTEM, ADMINS, mine):
+            continue
+        label = account_name(name)
+        if label == name:                     # (an account this PC doesn't know: a copied data folder's)
+            hb = read_json(os.path.join(path, "agent.json"), limit=1 << 20)
+            label = str(hb.get("user"))[:64] if isinstance(hb, dict) and hb.get("user") else name
+        out.append((label, path))
+    return out
 
 
 # the 5-second log, parsed once per file and then only its new rows ------------------------------------------------
