@@ -699,10 +699,19 @@ class HardeningTest(TempData):
     def test_each_users_folder_is_theirs(self):
         # the service's side: a folder another user made first (anyone could, before 1.1.0) is moved aside; an older
         # version's folder, named by the user and made by them, moves to the SID with its history
+        import win32security
         from hwblackbox import agents, winapi
         me, name = winapi.token_sid(), winapi.user_name()
+        my_sid = win32security.ConvertStringSidToSid(me)
+
+        def mine(p):
+            # (an agent runs unelevated, so what it makes is its user's; run elevated, as on GitHub's runner, a new
+            # file's owner would be the administrators: made the user's here, as an agent's are)
+            win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT,
+                                               win32security.OWNER_SECURITY_INFORMATION, my_sid, None, None, None)
         old = paths.P.session_dir(name)
         os.makedirs(old)
+        mine(old)
         with open(os.path.join(old, "session_20261101.jsonl"), "w") as f:
             f.write("{}\n")
         jr = Recorder()
@@ -713,7 +722,6 @@ class HardeningTest(TempData):
         self.assertEqual(jr.recs[0]["event"], "folder moved")
         # 2026-11-10: the moved files kept the permissions of where they were, read-only for their own user (the
         # installer had taken the old folder's grants off), and the agent couldn't open its own crash log
-        import win32security
         ro = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x1200a9;;;%s)" % me, 1)
 
         def read_only(p):
@@ -723,9 +731,11 @@ class HardeningTest(TempData):
                                                None, None, ro.GetSecurityDescriptorDacl(), None)
         old_file = os.path.join(path, "agent_crash.log")
         open(old_file, "w").close()
+        mine(old_file)
         read_only(old_file)
         linked = os.path.join(path, "linked.txt")
         open(linked, "w").close()
+        mine(linked)
         os.link(linked, os.path.join(self.dir, "elsewhere.txt"))           # (two names: never handed over)
         read_only(linked)
         with self.assertRaises(PermissionError):
