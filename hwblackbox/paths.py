@@ -6,10 +6,13 @@ C:\Program Files\HWBlackbox\app, which only admins can change.
 The data: %ProgramData%\HWBlackbox. Windows (the service, as SYSTEM) and admins write there; everyone can read.
   config.json   the settings
   logs\         flight_YYYYMMDD.csv (every 5 s), rails_YYYYMMDD.csv (4 a second), events_YYYYMMDD.jsonl (the records),
-                disks_YYYYMMDD.csv (free space) and programs_YYYYMMDD.csv (each program's use), every minute
-  state\        status.json, sensors.json, ports.json, ...: what's true now, rewritten as it changes
+                disks_YYYYMMDD.csv (free space) and programs_YYYYMMDD.csv (each program's use), every minute;
+                drives_YYYYMMDD.csv (the drives' health), every hour. The CSVs are packed into .csv.gz once they're
+                two days old.
+  state\        status.json, sensors.json, ports.json, drives.json, ...: what's true now, rewritten as it changes
   incidents\    a report for every power-off and app crash
-  sessions\     one folder per user, written by that user's session agent (users may create their own folder here)
+  sessions\     one folder per user, sessions\<their SID>, made by the service as they sign in, for that user alone;
+                their session agent writes there (users can't make folders here)
   secrets\      the Home Assistant token (admins and SYSTEM only)
 
 --data-dir points all of it at another folder (tests, a second instance)."""
