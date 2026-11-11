@@ -32,7 +32,8 @@
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "Windows 10, Windows 11 (64-bit)",
   "license": "https://opensource.org/licenses/MIT",
-  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+  "author": {"@type": "Person", "name": "James Cupps", "url": "https://jamesccupps.github.io/"}
 }
 </script>
 <style>
@@ -71,6 +72,14 @@ ol li, ul li { margin: 6px 0; }
 code { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 14px; }
 footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: center; }
 @media (max-width: 520px) { h1 { font-size: 34px; } .gallery { grid-template-columns: 1fr; } }
+
+  /* More tools from James Cupps */
+  .jc-more-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .jc-more-grid a { display: block; text-decoration: none; background: var(--panel, var(--card, transparent)); border: 1px solid var(--line, rgba(127,127,127,.3));
+                    border-radius: 10px; padding: 14px 16px; color: var(--text, inherit); }
+  .jc-more-grid a:hover { border-color: var(--accent, currentColor); }
+  .jc-more-grid b { display: block; color: var(--accent, inherit); }
+  .jc-more-grid span { color: var(--muted, inherit); font-size: 14px; }
 </style>
 </head>
 <body>
@@ -137,6 +146,17 @@ footer { color: var(--dim); font-size: 14px; padding: 48px 0 40px; text-align: c
       <li>The app in front is kept for three minutes only, copied into a report after a crash or a shutdown. Each user's own records are in a folder only they can read.</li>
       <li>The program and its Python live in Program Files, where only admins can write, because the service runs as SYSTEM.</li>
     </ul>
+  </section>
+
+  <section aria-labelledby="jc-more">
+    <h2 id="jc-more">More tools from James Cupps</h2>
+    <div class="jc-more-grid">
+      <a href="https://jamesccupps.github.io/PingerPlot/"><b>PingerPlot</b><span>Continuous traceroute: where on the path it goes wrong</span></a>
+      <a href="https://jamesccupps.github.io/NetSentinel/"><b>NetSentinel</b><span>Network monitor and intrusion detection for Windows</span></a>
+      <a href="https://jamesccupps.github.io/Slate/"><b>Slate</b><span>A text editor for files of any size</span></a>
+      <a href="https://jamesccupps.github.io/NoteForge/"><b>NoteForge</b><span>Encrypted, offline notes for Windows</span></a>
+      <a href="https://jamesccupps.github.io/"><b>Everything else</b><span>Every project, on one page</span></a>
+    </div>
   </section>
 </main>
 

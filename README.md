@@ -1,10 +1,14 @@
 # HW Blackbox
 
+[![Tests](https://github.com/jamesccupps/HW-Blackbox/actions/workflows/tests.yml/badge.svg)](https://github.com/jamesccupps/HW-Blackbox/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/jamesccupps/HW-Blackbox?label=release)](https://github.com/jamesccupps/HW-Blackbox/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A hardware monitor and a black box for a Windows PC. It answers the question Windows leaves open: *why did the PC
 switch off, or why did that app close?*
 
 **[⬇ Download for Windows](https://github.com/jamesccupps/HW-Blackbox/releases/latest/download/HWBlackbox-win64.zip)**
-(64-bit Windows 10 or 11) · [All releases](https://github.com/jamesccupps/HW-Blackbox/releases) ·
+(64-bit Windows 10 or 11; its SHA-256 is in the release's `SHA256SUMS.txt`) · [All releases](https://github.com/jamesccupps/HW-Blackbox/releases) ·
 [Website](https://jamesccupps.github.io/HW-Blackbox/)
 
 ![The dashboard's overview: the service, the sensors, the key readings now, power-offs, disks and this PC](docs/screenshots/overview.png)

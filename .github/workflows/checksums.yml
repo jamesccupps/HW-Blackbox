@@ -1,0 +1,43 @@
+# SHA256SUMS.txt for every release: HW Blackbox installs a Windows service with
+# admin rights, so the zip people download should be checkable. Releases are made
+# by hand, so this runs when one is published (and by hand for an older release).
+# It adds a file; it never replaces one on a release that's out.
+name: Checksums
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to add SHA256SUMS.txt to (e.g. v1.1.0)
+        required: true
+
+permissions: {}
+
+jobs:
+  sums:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Hash the release's files and attach SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir files && cd files
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing
+          rm -f SHA256SUMS.txt
+          if ls | grep -q .; then
+            sha256sum -- * > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS.txt; then
+              echo "::notice::$TAG already has SHA256SUMS.txt; leaving it as it is"
+            else
+              gh release upload "$TAG" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"
+            fi
+          else
+            echo "::warning::$TAG has no files to hash"
+          fi
