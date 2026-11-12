@@ -37,7 +37,11 @@ def main():
             nupkgs[key] = zipfile.ZipFile(io.BytesIO(fetch(package, version)))
         z, found = nupkgs[key], []
         for name in z.namelist():
+            # lib/<.NET version>/<dll>, or, in a package with a copy per platform (LibreHardwareMonitorLib's),
+            # runtimes/win-x64/lib/<.NET version>/<dll>
             parts = name.split("/")
+            if parts[:2] == ["runtimes", "win-x64"]:
+                parts = parts[2:]
             if len(parts) == 3 and parts[0] == "lib" and parts[2].lower() == dll.lower():
                 data = z.read(name)
                 h = hashlib.sha256(data).hexdigest()

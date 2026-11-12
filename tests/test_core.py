@@ -1812,7 +1812,15 @@ class NewIn110Test(TempData):
         self.assertEqual(r.returncode, 0, r.stdout)
         with open(os.path.join(d, "install.ps1"), "w") as f:
             f.write("param([switch]$Pause)\n'pause:' + $Pause | Out-File (Join-Path $PSScriptRoot 'ran.txt')\nexit 7\n")
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
+        # started from PowerShell 7 (a terminal, or GitHub's runner): its module path comes first, and its
+        # Microsoft.PowerShell.Security doesn't load in Windows PowerShell. Setup.exe gives it Windows' own modules.
+        mods = os.path.join(self.dir, "pwsh7-modules", "Microsoft.PowerShell.Security")
+        os.makedirs(mods)
+        with open(os.path.join(mods, "Microsoft.PowerShell.Security.psd1"), "w") as f:
+            f.write("@{ ModuleVersion = '7.0.0.0'; PowerShellVersion = '7.0'; CompatiblePSEditions = @('Core')\n"
+                    "   CmdletsToExport = @('Get-AuthenticodeSignature') }\n")
+        env = dict(os.environ, PSModulePath=os.path.dirname(mods) + os.pathsep + os.environ.get("PSModulePath", ""))
+        r = subprocess.run([exe], capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
         with open(os.path.join(d, "ran.txt"), encoding="utf-16") as f:
             self.assertEqual(f.read().strip(), "pause:True")

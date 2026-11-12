@@ -38,8 +38,8 @@ static class Setup
                               "the folder it unzipped to.");
             return Wait(1);
         }
-        string ps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
-                                 @"WindowsPowerShell\v1.0\powershell.exe");
+        string system = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        string ps = Path.Combine(system, @"WindowsPowerShell\v1.0\powershell.exe");
         // (encoded: a fixed command, PowerShell's way of taking one whole. The keyboard stays this window's, for the
         // installer's questions and its "press a key")
         string encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(Command));
@@ -47,6 +47,9 @@ static class Setup
         start.UseShellExecute = false;           // (in this window: the install's report shows here as it runs)
         start.EnvironmentVariables["HWB_SETUP"] = Process.GetCurrentProcess().MainModule.FileName;
         start.EnvironmentVariables["HWB_SCRIPT"] = script;
+        // Windows PowerShell's own modules: started from PowerShell 7, the module path it hands down puts 7's first,
+        // and those don't load in Windows PowerShell (Get-AuthenticodeSignature, for one)
+        start.EnvironmentVariables["PSModulePath"] = Path.Combine(system, @"WindowsPowerShell\v1.0\Modules");
         start.WorkingDirectory = here;
         try
         {
