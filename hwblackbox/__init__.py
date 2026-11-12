@@ -13,6 +13,6 @@ Three parts, one install:
 """
 
 NAME = "HW Blackbox"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 SERVICE = "HWBlackbox"                 # the Windows service
 AGENT_TASK = "HWBlackboxAgent"         # the scheduled task that starts the agent at sign-in
