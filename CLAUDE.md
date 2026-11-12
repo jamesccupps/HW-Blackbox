@@ -22,6 +22,11 @@ changing or releasing it.
   `HW Blackbox X.Y.Z` with the notes (their title line dropped, `{SHA256}` filled in) and the zip as
   `HWBlackbox-win64.zip`. Look at the draft, then publish it as the latest release, not a pre-release. Never build the
   release zip on a PC: it wouldn't be signed.
+- The release folder must reach the zip exactly as the manifest and the catalog describe it. The package job runs the
+  shipped Python only with `-B` (otherwise it rewrites the folder's own `__pycache__` files, whose sources have new
+  times after the artifact round trip), and then unpacks the zip and checks it as the installer will
+  (`test_packaging_never_rewrites_the_release`). 1.1.1 shipped 81 rewritten `.pyc` files, so its installer refused
+  every install and update; it was set back to a pre-release within the hour and 1.1.2 replaced it.
 - The zip's name stays `HWBlackbox-win64.zip`: the download links and the updater look for it. The updater installs a
   release only when GitHub's digest for the zip and the SHA-256 in the notes agree. Never replace a file on a release
   that's out: publish a new version instead.

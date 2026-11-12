@@ -1826,6 +1826,22 @@ class NewIn110Test(TempData):
         self.assertEqual(wf.count("environment: release"), 1)
         self.assertEqual(len(re.findall(r"secrets\.AZURE_", wf)), 3)
 
+    def test_packaging_never_rewrites_the_release(self):
+        # The package job runs the shipped Python on the release folder after its manifest and catalog were made. Without
+        # -B it rewrites the folder's own __pycache__ files (the artifact's files have new times), and the installer then
+        # refuses the zip: 1.1.1 shipped that way. And the zip is unpacked and checked as the installer checks it.
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, ".github", "workflows", "release.yml"), encoding="utf-8") as f:
+            wf = f.read()
+        job = re.search(r"\n  package:\n(.*?)(?=\n  \w[\w-]*:\n)", wf, re.S).group(1)
+        runs = [ln for ln in job.splitlines() if re.search(r"build\\HWBlackbox\\python\\python\.exe ", ln)]
+        self.assertGreaterEqual(len(runs), 3, runs)
+        for ln in runs:
+            self.assertIn("python.exe -B ", ln, ln)
+        self.assertIn("name: The zip holds what was checked", job)
+        self.assertLess(job.index("name: The zip, and its SHA-256"), job.index("name: The zip holds what was checked"))
+
     def test_setup_runs_the_installer_beside_it(self):
         # Setup.exe's own code, compiled here without its manifest (which asks for an administrator), so it runs as
         # is: install.ps1 from its folder, with -Pause, in its window, and its exit code passed back. (Unsigned, it

@@ -12,7 +12,8 @@ name: release
 #                 only pinned actions, Microsoft's ArtifactSigning module and that script. It runs when the
 #                 repository variable SIGNING is "on" (set once Azure trusted the environment).
 #   package       the signatures and the catalog checked, the signed Setup.exe and the updater tried on the release
-#                 as made and with install.ps1 changed, the built program run once, the zip and its SHA-256. A tag
+#                 as made and with install.ps1 changed, the built program run once, the zip and its SHA-256, and the
+#                 zip unpacked and checked against the manifest and the catalog, as the installer will. A tag
 #                 that wasn't signed stops here (no zip, no draft): from 1.1.1 every release is signed, and the
 #                 updater installs no other
 #   attest        a signed statement (Sigstore) that the zip came from this workflow and this commit:
@@ -205,12 +206,15 @@ jobs:
           & "$bad\python\python.exe" -c "import sys; from hwblackbox import update`ntry: update.check_signed(sys.argv[1])`nexcept ValueError as e: print('the updater refuses it:', e); sys.exit(0)`nsys.exit('the updater took a changed install.ps1')" $bad
           if ($LASTEXITCODE) { throw "the updater didn't refuse a changed install.ps1" }
 
+      # (-B on every run of the shipped Python here: the downloaded artifact's files have new times, so Python would
+      # otherwise rewrite the release's own __pycache__ files after the manifest and the catalog were made. 1.1.1 shipped
+      # 81 of them rewritten, and its installer refused every install and update.)
       - name: The program runs on its own, as shipped
         shell: pwsh
         run: |
-          $out = & build\HWBlackbox\python\python.exe -m hwblackbox once --no-sensors --data-dir "$env:RUNNER_TEMP\hwb" 2>&1
+          $out = & build\HWBlackbox\python\python.exe -B -m hwblackbox once --no-sensors --data-dir "$env:RUNNER_TEMP\hwb" 2>&1
           if ($LASTEXITCODE -or -not ($out -match '"kind": "watching"')) { $out; throw "the built program's 'once' failed" }
-          & build\HWBlackbox\python\python.exe -c "import hwblackbox; print('HW Blackbox', hwblackbox.VERSION)"
+          & build\HWBlackbox\python\python.exe -B -c "import hwblackbox; print('HW Blackbox', hwblackbox.VERSION)"
           if (-not (Test-Path build\HWBlackbox\Setup.exe)) { throw "Setup.exe is missing" }
 
       - name: The zip, and its SHA-256
@@ -219,11 +223,32 @@ jobs:
         # which the updater reads. Some versions of Compress-Archive write backslashes.)
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          & build\HWBlackbox\python\python.exe -c "import shutil; shutil.make_archive('dist/HWBlackbox-win64', 'zip', 'build', 'HWBlackbox')"
+          & build\HWBlackbox\python\python.exe -B -c "import shutil; shutil.make_archive('dist/HWBlackbox-win64', 'zip', 'build', 'HWBlackbox')"
           if ($LASTEXITCODE) { throw "zipping failed" }
           $h = (Get-FileHash dist\HWBlackbox-win64.zip -Algorithm SHA256).Hash.ToLower()
           "HWBlackbox-win64.zip: {0:N1} MB, SHA-256 $h" -f ((Get-Item dist\HWBlackbox-win64.zip).Length / 1MB)
           "$h  HWBlackbox-win64.zip" | Out-File -Encoding ascii -NoNewline dist\HWBlackbox-win64.zip.sha256
+
+      # The zip itself, unpacked, checked as the installer checks it: every file MANIFEST.json lists, unchanged, and for a
+      # signed build the whole folder against the catalog (nothing added, nothing changed).
+      - name: The zip holds what was checked
+        shell: pwsh
+        run: |
+          $x = Join-Path $env:RUNNER_TEMP 'zipcheck'
+          Expand-Archive -LiteralPath dist\HWBlackbox-win64.zip -DestinationPath $x
+          $root = Join-Path $x 'HWBlackbox'
+          $m = Get-Content -LiteralPath (Join-Path $root 'MANIFEST.json') -Raw | ConvertFrom-Json
+          $bad = @(foreach ($p in $m.sha256.PSObject.Properties) {
+            $f = Join-Path $root ($p.Name -replace '/', '\')
+            if (-not (Test-Path -LiteralPath $f) -or (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $p.Value.ToUpper()) { $p.Name }
+          })
+          if ($bad) { $bad | Select-Object -First 20; throw "$($bad.Count) files in the zip don't match MANIFEST.json: the installer would refuse it" }
+          "the zip's $(@($m.sha256.PSObject.Properties).Count) files match MANIFEST.json"
+          if ($env:SIGNED -eq 'true') {
+            $r = Test-FileCatalog -Path $root -CatalogFilePath (Join-Path $root 'HWBlackbox.cat') -FilesToSkip 'HWBlackbox.cat'
+            if ("$r" -ne 'Valid') { throw "the zip's files don't match HWBlackbox.cat: $r" }
+            "the zip's files match HWBlackbox.cat"
+          }
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
