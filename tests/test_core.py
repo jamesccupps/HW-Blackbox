@@ -1273,7 +1273,7 @@ class UpdateTest(TempData):
         import io
         from unittest import mock
         from hwblackbox import update
-        data = self.zip_of("1.0.10")
+        data = self.zip_of("1.0.10", {"HWBlackbox/HWBlackbox.cat": "the catalog"})
         rel = self.release(data=data)
         staging = os.path.join(self.dir, "update")
         lines = []
@@ -1282,19 +1282,49 @@ class UpdateTest(TempData):
             def _open(url, timeout):
                 return io.BytesIO(json.dumps(rel).encode() if url == update.LATEST else served)
             return _open
-        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"):
+        signed = mock.patch.object(update, "signatures", lambda files: [("Valid", update.PUBLISHER + ", C=US")] * 2)
+        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"), \
+                signed:
             self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 0)
         self.assertTrue(os.path.isfile(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1")))
         with open(os.path.join(staging, "run-install.cmd")) as f:
-            self.assertIn(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1"), f.read())
+            text = f.read()
+        self.assertIn(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1"), text)
+        self.assertIn('set "PSModulePath=%s"' % os.path.join(update.POWERSHELL, "Modules"), text)
+        self.assertIn("signed by James Cupps", lines[-2])
         self.assertIn("dry run", lines[-1])
+        lines.clear()
+        # not signed by James Cupps (Windows' own answer for these unsigned files), or signed by someone else
+        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+        self.assertIn("its install.ps1 isn't signed by James Cupps (NotSigned)", lines[-2])
+        for who in ("CN=Someone Else, O=Someone Else", "CN=James Cupps, O=James Cuppsy Ltd"):
+            with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"), \
+                    mock.patch.object(update, "signatures", lambda files: [("Valid", who)] * 2):
+                self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+            self.assertIn("isn't signed by James Cupps (Valid, by %s)" % who, lines[-2])
+        unsigned = self.zip_of("1.0.10")                                # (a release before signing: no catalog)
+        rel = self.release(data=unsigned)
+        with mock.patch.object(update, "_open", fake_open(unsigned)), mock.patch.object(update, "VERSION", "1.0.9"), \
+                signed:
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+        self.assertIn("no HWBlackbox.cat, so it isn't a signed release", lines[-2])
+        rel = self.release(data=data)
+        # the check is Windows': a Microsoft file reads as Valid, by Microsoft
+        plain = os.path.join(self.dir, "plain.ps1")
+        with open(plain, "w") as f:
+            f.write("'not signed'\n")
+        ms, mine = update.signatures([os.path.join(update.POWERSHELL, "powershell.exe"), plain])
+        self.assertEqual((ms[0], ms[1].split(",")[0]), ("Valid", "CN=Microsoft Windows"))
+        self.assertEqual(mine, ("NotSigned", ""))
+        lines.clear()
         lines.clear()
         tampered = data[:-1] + bytes([data[-1] ^ 1])                    # (one bit changed on the way)
         with mock.patch.object(update, "_open", fake_open(tampered)), mock.patch.object(update, "VERSION", "1.0.9"):
             self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
         self.assertTrue(any("SHA-256 isn't the release's" in x for x in lines), lines)
         self.assertEqual(os.listdir(staging), [])                       # (nothing left to install from)
-        other = self.zip_of("1.0.11")                                   # (the zip of another version)
+        other = self.zip_of("1.0.11", {"HWBlackbox/HWBlackbox.cat": "the catalog"})   # (the zip of another version)
         rel = self.release(data=other)
         with mock.patch.object(update, "_open", fake_open(other)), mock.patch.object(update, "VERSION", "1.0.9"):
             self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
@@ -1798,7 +1828,8 @@ class NewIn110Test(TempData):
 
     def test_setup_runs_the_installer_beside_it(self):
         # Setup.exe's own code, compiled here without its manifest (which asks for an administrator), so it runs as
-        # is: install.ps1 from its folder, with -Pause, in its window, and its exit code passed back
+        # is: install.ps1 from its folder, with -Pause, in its window, and its exit code passed back. (Unsigned, it
+        # doesn't ask for a signed install.ps1: that half is tried on a signing-test tag, signed.)
         import subprocess
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
         import build
@@ -1810,8 +1841,13 @@ class NewIn110Test(TempData):
         exe = os.path.join(d, "Setup.exe")
         r = subprocess.run([build.CSC, "/nologo", "/target:exe", "/out:" + exe, src], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
+        # the script: run with -Pause; while it runs, nothing else can change it; it can check signatures
         with open(os.path.join(d, "install.ps1"), "w") as f:
-            f.write("param([switch]$Pause)\n'pause:' + $Pause | Out-File (Join-Path $PSScriptRoot 'ran.txt')\nexit 7\n")
+            f.write("param([switch]$Pause)\n"
+                    "$held = try { [IO.File]::OpenWrite($PSCommandPath).Dispose(); 'no' } catch { 'yes' }\n"
+                    "$sig = (Get-AuthenticodeSignature -LiteralPath $PSCommandPath).Status\n"
+                    "'pause:' + $Pause + ' held:' + $held + ' sig:' + $sig | Out-File (Join-Path $PSScriptRoot 'ran.txt')\n"
+                    "exit 7\n")
         # started from PowerShell 7 (a terminal, or GitHub's runner): its module path comes first, and its
         # Microsoft.PowerShell.Security doesn't load in Windows PowerShell. Setup.exe gives it Windows' own modules.
         mods = os.path.join(self.dir, "pwsh7-modules", "Microsoft.PowerShell.Security")
@@ -1823,7 +1859,11 @@ class NewIn110Test(TempData):
         r = subprocess.run([exe], capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
         with open(os.path.join(d, "ran.txt"), encoding="utf-16") as f:
-            self.assertEqual(f.read().strip(), "pause:True")
+            self.assertEqual(f.read().strip(), "pause:True held:yes sig:NotSigned")
+        with open(os.path.join(src), encoding="utf-8") as f:
+            code = f.read()
+        self.assertNotIn("-EncodedCommand", code)          # (a dropper's look: antivirus flagged the first Setup.exe)
+        self.assertIn("[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]", code)
         os.remove(os.path.join(d, "install.ps1"))                         # (unzipped without it)
         r = subprocess.run([exe], capture_output=True, text=True, timeout=60, input="x")
         self.assertEqual(r.returncode, 1)

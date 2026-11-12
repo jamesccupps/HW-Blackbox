@@ -149,7 +149,7 @@ What keeps it reliable:
 
 `Setup.exe`, from the unzipped [release](https://github.com/jamesccupps/HW-Blackbox/releases/latest), asks Windows
 for an administrator and runs `install.ps1` in its window (a signed Setup.exe runs only an `install.ps1` signed by
-the same publisher):
+the same publisher, and keeps it locked from that check until the install ends):
 - If the PawnIO driver is missing, it asks whether to install it (with winget, in the installer's window).
 - It copies the program into a folder of its own in Program Files (`HWBlackbox.new`) and checks every file against
   the release's manifest, while an installed HW Blackbox keeps running. Only the build's files are copied: anything
@@ -184,7 +184,8 @@ From 1.0.10 on, HW Blackbox updates itself from the page:
 - **Update** asks Windows for an admin, then opens a window that downloads the
   release's zip into `C:\ProgramData\HWBlackbox\update` (where only SYSTEM and admins can write), checks it against
   the SHA-256 GitHub gives for it and the one in the release notes, unpacks it, checks it's the version offered, and
-  runs that version's installer. The settings and the history are kept; the download is deleted afterwards. Done,
+  runs that version's installer. From 1.1.1, it installs only a release whose installer and catalog are signed by
+  James Cupps (the installer then checks every file against the catalog). The settings and the history are kept; the download is deleted afterwards. Done,
   the window closes by itself and the page reloads into the new version; with problems, the window stays open to
   show them. If any check fails, nothing is installed.
 - Nothing is installed without someone at the PC clicking Update and saying yes to Windows: HW Blackbox runs as

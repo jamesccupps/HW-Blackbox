@@ -9,10 +9,11 @@ name: release
 #                 Watcher, Protect Panes and HVAC Network Scanner sign with). Azure accepts GitHub's OIDC token for it
 #                 only from this repository's "release" environment, which admits v* tags only: no password or key
 #                 anywhere. But while signed in, anything running in the job could sign whatever it liked, so it runs
-#                 only pinned actions, Microsoft's ArtifactSigning module and that script. It runs once the
-#                 repository variable SIGNING is "on" (set when Azure trusts the environment); until then releases
-#                 are unsigned, as before 1.1.1.
-#   package       the signatures and the catalog checked, the built program run once, the zip and its SHA-256
+#                 only pinned actions, Microsoft's ArtifactSigning module and that script. It runs when the
+#                 repository variable SIGNING is "on" (set once Azure trusted the environment).
+#   package       the signatures and the catalog checked, the built program run once, the zip and its SHA-256. A tag
+#                 that wasn't signed stops here (no zip, no draft): from 1.1.1 every release is signed, and the
+#                 updater installs no other
 #   attest        a signed statement (Sigstore) that the zip came from this workflow and this commit:
 #                   gh attestation verify HWBlackbox-win64.zip --repo jamesccupps/HW-Blackbox
 #   draft         the draft release: the notes (release-notes/vX.Y.Z.md, its {SHA256} filled in) and the zip as
@@ -120,11 +121,20 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     needs: [build, authenticode]
-    # Unsigned when signing isn't on (or for a run by hand): the same checks, but the signatures'
+    # Unsigned for a run by hand: the same checks, but the signatures' (a tag unsigned stops at its first step)
     if: ${{ !cancelled() && needs.build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.authenticode.result) }}
     env:
       SIGNED: ${{ needs.authenticode.result == 'success' }}
     steps:
+      - name: A tag is signed
+        if: startsWith(github.ref, 'refs/tags/v') && needs.authenticode.result != 'success'
+        shell: bash
+        env:
+          RESULT: ${{ needs.authenticode.result }}
+        run: |
+          echo "::error::$GITHUB_REF_NAME wasn't signed (the authenticode job: $RESULT; is the repository variable SIGNING 'on'?). No release is made unsigned."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false

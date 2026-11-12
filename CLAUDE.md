@@ -40,10 +40,16 @@ environment, which admits `v*` tags only. This repository sends GitHub's immutab
 subject is `repo:jamesccupps@148652101/HW-Blackbox@1443134825:environment:release` (not the classic
 `repo:jamesccupps/HW-Blackbox:...`). The environment's secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
 `AZURE_SUBSCRIPTION_ID` name the app; no password or key is stored. The job runs only when the repository variable
-`SIGNING` is `on`; it runs only pinned actions, Microsoft's ArtifactSigning module and `tools/sign_release.ps1`, never
-Python, pip or the program (`test_the_signing_job_runs_nothing_else`). Setup.exe runs only an `install.ps1` signed by
-its own publisher, and a signed `install.ps1` installs only files that match the signed catalog. A tag
-`vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag.
+`SIGNING` is `on`, and a `v*` tag it didn't sign stops at `package` (no unsigned release); it runs only pinned actions,
+Microsoft's ArtifactSigning module and `tools/sign_release.ps1`, never Python, pip or the program
+(`test_the_signing_job_runs_nothing_else`). Setup.exe checks with WinVerifyTrust that `install.ps1` is signed by its
+own publisher, holds it locked until the install ends, and runs it with `-File` (no `-EncodedCommand`: the first
+Setup.exe drew 11/70 on VirusTotal, a Bitdefender-family `Gen:Variant.Lazy`, as a dropper's shape). A signed
+`install.ps1` installs only files that match the signed catalog, and from 1.1.1 the updater installs only a release
+whose `install.ps1` and `HWBlackbox.cat` are signed by `CN=James Cupps, O=James Cupps` (`update.PUBLISHER`). A tag
+`vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag. Before a release, scan the
+signtest's signed Setup.exe and zip on VirusTotal; if the Bitdefender family still flags it, report that exact signed
+file to Bitdefender as a false positive, or fall back to Install.cmd beside the signed `install.ps1` and catalog.
 
 ## Not in the Scoop bucket (deliberate)
 

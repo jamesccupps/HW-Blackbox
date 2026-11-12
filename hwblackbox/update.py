@@ -8,7 +8,8 @@ installed only when someone at the PC asks for it and says yes to Windows' admin
 change). It downloads the release's zip into the data folder's update\ (only SYSTEM and admins can write there, so a
 program running as the user can't swap anything between the check and the install), checks it against the SHA-256
 GitHub gives for it (and the one in the release notes, which must agree), unpacks it there, checks that its
-MANIFEST.json is that version, then runs that version's own installer in the same window. The installer keeps the
+MANIFEST.json is that version and that its install.ps1 and HWBlackbox.cat are signed by James Cupps (PUBLISHER; every
+release from 1.1.1 is), then runs that version's own installer in the same window. The installer keeps the
 settings and the history, checks every file against the manifest, and offers the PawnIO driver if it's missing.
 
 What this needs from a release never changes, as every version already out there reads it: the tag vX.Y.Z, published
@@ -33,6 +34,12 @@ LATEST = "https://api.github.com/repos/%s/releases/latest" % REPO
 ASSET = "HWBlackbox-win64.zip"
 DOWNLOADS = "https://github.com/%s/releases/download/" % REPO
 MAX_ZIP = 200 << 20              # (the zip is about 25 MB)
+# From 1.1.1 a release is signed by James Cupps (Azure Artifact Signing; the certificate's subject starts with this,
+# the place follows), and an update installs only a release whose installer and catalog of every file are signed so:
+# the installer then checks every file it installs against the catalog.
+PUBLISHER = "CN=James Cupps, O=James Cupps"
+SIGNED = ("install.ps1", "HWBlackbox.cat")
+POWERSHELL = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0")
 CHECK_EVERY = 24 * 3600          # seconds between the page's checks; after a failed one, an hour
 RETRY_AFTER = 3600
 
@@ -285,7 +292,37 @@ def stage(off, staging, out=print, from_zip=None):
     if not os.path.isfile(os.path.join(build, "install.ps1")):
         raise ValueError("the zip has no install.ps1")
     out("unpacked HW Blackbox %s (%s files) into %s" % (man["version"], man.get("files"), build))
+    check_signed(build)
+    out("signed by James Cupps: its installer, and the catalog it checks every file against")
     return build
+
+
+def signatures(files):
+    """[(status, signer's subject)] for each file: Windows PowerShell's Get-AuthenticodeSignature, with its own modules
+    (the paths in an environment variable, never in the command)."""
+    script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+              "foreach ($p in $env:HWB_FILES.Split('|')) { $s = Get-AuthenticodeSignature -LiteralPath $p; $who = ''; "
+              "if ($s.SignerCertificate) { $who = $s.SignerCertificate.Subject }; [string]$s.Status + '|' + $who }")
+    env = dict(os.environ, HWB_FILES="|".join(files), PSModulePath=os.path.join(POWERSHELL, "Modules"))
+    r = subprocess.run([os.path.join(POWERSHELL, "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script],
+                       env=env, capture_output=True, timeout=120, creationflags=0x08000000)    # (CREATE_NO_WINDOW)
+    got = [tuple(ln.split("|", 1)) for ln in r.stdout.decode("utf-8", "replace").splitlines() if "|" in ln]
+    if len(got) != len(files):
+        raise ValueError("Windows couldn't check the release's signatures: %s"
+                         % (r.stderr.decode("utf-8", "replace").strip()[-200:] or "no answer"))
+    return got
+
+
+def check_signed(build):
+    """The release's installer and catalog signed by PUBLISHER, or ValueError."""
+    files = [os.path.join(build, name) for name in SIGNED]
+    for name, path in zip(SIGNED, files):
+        if not os.path.isfile(path) or _is_link(path):
+            raise ValueError("the zip has no %s, so it isn't a signed release: not installing it" % name)
+    for name, (status, who) in zip(SIGNED, signatures(files)):
+        if status != "Valid" or not (who == PUBLISHER or who.startswith(PUBLISHER + ",")):
+            raise ValueError("its %s isn't signed by James Cupps (%s%s): not installing it"
+                             % (name, status, ", by " + who if who and status == "Valid" else ""))
 
 
 def install_script(build, staging, version):
@@ -296,6 +333,8 @@ def install_script(build, staging, version):
     cmd = os.path.join(staging, "run-install.cmd")
     with open(cmd, "w", encoding="ascii", newline="\r\n") as f:
         f.write("@echo off\ntitle HW Blackbox: updating to %s\n" % version)
+        # (Windows PowerShell's own modules, for the installer's catalog check: PowerShell 7's don't load in it)
+        f.write('set "PSModulePath=%s"\n' % os.path.join(POWERSHELL, "Modules"))
         f.write('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s" -Report "%s"\n'
                 % (os.path.join(build, "install.ps1"), report))
         f.write("set rc=%errorlevel%\n")
