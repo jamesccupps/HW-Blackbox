@@ -46,7 +46,11 @@ Microsoft's ArtifactSigning module and `tools/sign_release.ps1`, never Python, p
 own publisher, holds it locked until the install ends, and runs it with `-File` (no `-EncodedCommand`: the first
 Setup.exe drew 11/70 on VirusTotal, a Bitdefender-family `Gen:Variant.Lazy`, as a dropper's shape). A signed
 `install.ps1` installs only files that match the signed catalog, and from 1.1.1 the updater installs only a release
-whose `install.ps1` and `HWBlackbox.cat` are signed by `CN=James Cupps, O=James Cupps` (`update.PUBLISHER`). A tag
+whose `install.ps1` and `HWBlackbox.cat` are signed by `CN=James Cupps, O=James Cupps` (`update.PUBLISHER`). The
+unsigned tests never reach these signed paths, so a signed build's `package` job tries them: Setup.exe run from a
+copy in Program Files must start the signed `install.ps1` (which stops at its "run the install from the built folder"
+guard, installing nothing) and refuse it with one byte changed (exit 3), and `update.check_signed` must take the one
+and refuse the other. A tag
 `vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag. Before a release, scan the
 signtest's signed Setup.exe and zip on VirusTotal; if the Bitdefender family still flags it, report that exact signed
 file to Bitdefender as a false positive, or fall back to Install.cmd beside the signed `install.ps1` and catalog.

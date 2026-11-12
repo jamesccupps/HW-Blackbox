@@ -11,7 +11,8 @@ name: release
 #                 anywhere. But while signed in, anything running in the job could sign whatever it liked, so it runs
 #                 only pinned actions, Microsoft's ArtifactSigning module and that script. It runs when the
 #                 repository variable SIGNING is "on" (set once Azure trusted the environment).
-#   package       the signatures and the catalog checked, the built program run once, the zip and its SHA-256. A tag
+#   package       the signatures and the catalog checked, the signed Setup.exe and the updater tried on the release
+#                 as made and with install.ps1 changed, the built program run once, the zip and its SHA-256. A tag
 #                 that wasn't signed stops here (no zip, no draft): from 1.1.1 every release is signed, and the
 #                 updater installs no other
 #   attest        a signed statement (Sigstore) that the zip came from this workflow and this commit:
@@ -152,6 +153,57 @@ jobs:
           $r = Test-FileCatalog -Path build\HWBlackbox -CatalogFilePath build\HWBlackbox\HWBlackbox.cat -FilesToSkip 'HWBlackbox.cat'
           if ("$r" -ne 'Valid') { throw "the files don't match the catalog: $r" }
           "every file matches HWBlackbox.cat"
+
+      # The signed paths, which no unsigned build reaches, each tried both ways on a copy of the folder: Setup.exe's own
+      # check of install.ps1 (WinVerifyTrust) and the updater's (update.check_signed). The release as made, in the
+      # folder it installs to, gets through Setup.exe's check and stops at install.ps1's first guard ("run the install
+      # from the built folder"), so nothing is installed; with one byte of install.ps1 changed, both refuse it. Nobody is
+      # at the keyboard (input from an empty file), so install.ps1 asks nothing and Setup.exe doesn't wait for a key.
+      - name: Setup.exe and the updater take the signed release, and refuse it changed
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          $empty = Join-Path $env:RUNNER_TEMP 'empty.txt'
+          New-Item -ItemType File -Path $empty -Force | Out-Null
+          function Invoke-Setup([string]$Folder, [string]$Name) {
+            $out = Join-Path $env:RUNNER_TEMP "setup-$Name.txt"
+            $p = Start-Process -FilePath (Join-Path $Folder 'Setup.exe') -WorkingDirectory $Folder -NoNewWindow -Wait `
+                   -PassThru -RedirectStandardInput $empty -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+            $text = "$(Get-Content -LiteralPath $out -Raw)$(Get-Content -LiteralPath "$out.err" -Raw)"
+            Write-Host "--- Setup.exe, $Name (exit $($p.ExitCode)):"
+            Write-Host $text
+            [pscustomobject]@{ Code = $p.ExitCode; Text = $text }
+          }
+
+          # 1. as made, where it installs to: Setup.exe runs the signed install.ps1, which stops at its guard
+          $dest = Join-Path $env:ProgramFiles 'HWBlackbox'
+          if (Test-Path -LiteralPath $dest) { throw "$dest exists already" }
+          Copy-Item -LiteralPath build\HWBlackbox -Destination $dest -Recurse
+          try {
+            $r = Invoke-Setup $dest 'as-made'
+            if ($r.Text -notmatch 'run the install from the built folder') {
+              throw "Setup.exe didn't run the signed install.ps1 (exit $($r.Code))"
+            }
+            & "$dest\python\python.exe" -c "import sys; from hwblackbox import update; update.check_signed(sys.argv[1]); print('the updater takes it')" $dest
+            if ($LASTEXITCODE) { throw "the updater refused the signed release" }
+          } finally { Remove-Item -LiteralPath $dest -Recurse -Force }
+
+          # 2. one byte of install.ps1 changed (in its opening comment): Setup.exe and the updater both refuse it
+          $bad = Join-Path $env:RUNNER_TEMP 'HWBlackbox-changed'
+          Copy-Item -LiteralPath build\HWBlackbox -Destination $bad -Recurse
+          $ps1 = Join-Path $bad 'install.ps1'
+          $b = [IO.File]::ReadAllBytes($ps1)
+          $i = [Text.Encoding]::ASCII.GetString($b).IndexOf('SYNOPSIS')
+          if ($i -lt 0) { throw "install.ps1 has no SYNOPSIS to change" }
+          $b[$i] = [byte][char]'s'
+          [IO.File]::WriteAllBytes($ps1, $b)
+          if ((Get-AuthenticodeSignature -LiteralPath $ps1).Status -eq 'Valid') { throw "the changed install.ps1 still reads as signed" }
+          $r = Invoke-Setup $bad 'one-byte-changed'
+          if ($r.Code -ne 3 -or $r.Text -notmatch "isn't signed by James Cupps") {
+            throw "Setup.exe didn't refuse a changed install.ps1 (exit $($r.Code))"
+          }
+          & "$bad\python\python.exe" -c "import sys; from hwblackbox import update`ntry: update.check_signed(sys.argv[1])`nexcept ValueError as e: print('the updater refuses it:', e); sys.exit(0)`nsys.exit('the updater took a changed install.ps1')" $bad
+          if ($LASTEXITCODE) { throw "the updater didn't refuse a changed install.ps1" }
 
       - name: The program runs on its own, as shipped
         shell: pwsh
