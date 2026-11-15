@@ -36,10 +36,16 @@ DOWNLOADS = "https://github.com/%s/releases/download/" % REPO
 MAX_ZIP = 200 << 20              # (the zip is about 25 MB)
 # From 1.1.1 a release is signed by James Cupps (Azure Artifact Signing; the certificate's subject starts with this,
 # the place follows), and an update installs only a release whose installer and catalog of every file are signed so:
-# the installer then checks every file it installs against the catalog.
+# the installer then checks every file it installs against the catalog. A subject is only a name, which another
+# certificate authority could put in a certificate too; Artifact Signing's certificates last three days, so there's no
+# certificate to pin, but each carries its signing identity as a key usage that stays the same from one certificate to
+# the next (IDENTITY; Slate's certificates from 2026-10-29 to 11-12 all had this one). From 1.1.3 both must match. If
+# Azure ever gives the account a new identity, change IDENTITY: the versions before that one then can't update by
+# themselves (the package job's check of a signed build fails first, so a signtest shows it).
 PUBLISHER = "CN=James Cupps, O=James Cupps"
+IDENTITY = "1.3.6.1.4.1.311.97.968698399.443447148.280534441.161049353"
 SIGNED = ("install.ps1", "HWBlackbox.cat")
-POWERSHELL = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0")
+POWERSHELL = os.path.join(paths.system_dir(), "WindowsPowerShell", "v1.0")
 CHECK_EVERY = 24 * 3600          # seconds between the page's checks; after a failed one, an hour
 RETRY_AFTER = 3600
 
@@ -154,7 +160,7 @@ class Checker:
 def installed_python():
     """The installed program's python.exe, when this is the installed program (Program Files\\HWBlackbox); else None:
     a copy run from elsewhere (a build, a checkout) isn't what an update would replace."""
-    root = os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "HWBlackbox")
+    root = os.path.join(paths.known_folder(paths.PROGRAM_FILES, r"C:\Program Files"), "HWBlackbox")
     py = os.path.join(root, "python", "python.exe")
     here = os.path.normcase(os.path.abspath(paths.APP))
     if here != os.path.normcase(os.path.join(root, "app")) or not os.path.isfile(py):
@@ -180,8 +186,7 @@ def launch_elevated(name, what, otherwise):
     py = installed_python()
     if py is None:
         return {"error": "This isn't the installed HW Blackbox (it runs from %s): %s" % (paths.APP, otherwise)}
-    ps = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0",
-                      "powershell.exe")
+    ps = os.path.join(POWERSHELL, "powershell.exe")
     params = "-NoProfile -ExecutionPolicy Bypass -Command \"& '%s' -m hwblackbox %s; exit $LASTEXITCODE\"" % (
         py.replace("'", "''"), ELEVATED[name])
 
@@ -207,6 +212,32 @@ def launch_elevated(name, what, otherwise):
 
 def _is_link(p):
     return os.path.islink(p) or (hasattr(os.path, "isjunction") and os.path.isjunction(p))
+
+
+ADMINS_ONLY = "O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+
+
+def _admins_folder(path):
+    """path made again, empty, for SYSTEM and the administrators only, in a folder of theirs (the data folder): the
+    real update's staging folder. Anything there before goes, a link without being followed. Until 1.1.3 the folder
+    was kept as found, which was safe only while the data folder's own permissions were right: a folder a user had
+    made there first, or a data folder elsewhere (the 2026-11-14 review's H1), would have let a program running as the
+    user rewrite the release between its checks and the install."""
+    import win32file
+    import win32security
+    from .agents import ADMINS, SYSTEM, owner_of
+    parent = os.path.dirname(os.path.abspath(path))
+    if _is_link(parent) or owner_of(parent) not in (SYSTEM, ADMINS):
+        raise ValueError("%s isn't HW Blackbox's own data folder (made by SYSTEM or the administrators)" % parent)
+    if _is_link(path):
+        os.unlink(path) if os.path.islink(path) else os.rmdir(path)
+    elif os.path.lexists(path):
+        shutil.rmtree(path)               # (it doesn't go into links: Python 3.12 removes a junction it meets)
+    sa = win32security.SECURITY_ATTRIBUTES()
+    sa.SECURITY_DESCRIPTOR = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(ADMINS_ONLY, 1)
+    win32file.CreateDirectory(path, sa)
+    if _is_link(path) or owner_of(path) not in (SYSTEM, ADMINS):
+        raise ValueError("%s isn't the administrators' after making it" % path)
 
 
 def _fresh_dir(path):
@@ -267,9 +298,10 @@ def unpack(zpath, dest):
     return os.path.join(dest, "HWBlackbox")
 
 
-def stage(off, staging, out=print, from_zip=None):
-    """Download (or take from_zip), check, unpack and check the manifest: the folder to install from."""
-    _fresh_dir(staging)
+def stage(off, staging, out=print, from_zip=None, protect=False):
+    """Download (or take from_zip), check, unpack and check the manifest: the folder to install from. protect (the real
+    update): staging made again for SYSTEM and the administrators only (_admins_folder)."""
+    _admins_folder(staging) if protect else _fresh_dir(staging)
     zpath = os.path.join(staging, "HWBlackbox-%s-win64.zip" % off["version"])
     if from_zip:
         out("taking %s" % from_zip)
@@ -298,15 +330,21 @@ def stage(off, staging, out=print, from_zip=None):
 
 
 def signatures(files):
-    """[(status, signer's subject)] for each file: Windows PowerShell's Get-AuthenticodeSignature, with its own modules
-    (the paths in an environment variable, never in the command)."""
+    """[(status, signer's subject, [the certificate's key usages])] for each file: Windows PowerShell's
+    Get-AuthenticodeSignature, with its own modules (the paths in an environment variable, never in the command)."""
     script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
               "foreach ($p in $env:HWB_FILES.Split('|')) { $s = Get-AuthenticodeSignature -LiteralPath $p; $who = ''; "
-              "if ($s.SignerCertificate) { $who = $s.SignerCertificate.Subject }; [string]$s.Status + '|' + $who }")
+              "$eku = ''; if ($s.SignerCertificate) { $who = $s.SignerCertificate.Subject; "
+              "$eku = (@($s.SignerCertificate.EnhancedKeyUsageList) | ForEach-Object { $_.ObjectId }) -join ',' }; "
+              "[string]$s.Status + '|' + $eku + '|' + $who }")
     env = dict(os.environ, HWB_FILES="|".join(files), PSModulePath=os.path.join(POWERSHELL, "Modules"))
     r = subprocess.run([os.path.join(POWERSHELL, "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script],
                        env=env, capture_output=True, timeout=120, creationflags=0x08000000)    # (CREATE_NO_WINDOW)
-    got = [tuple(ln.split("|", 1)) for ln in r.stdout.decode("utf-8", "replace").splitlines() if "|" in ln]
+    got = []
+    for ln in r.stdout.decode("utf-8", "replace").splitlines():
+        if ln.count("|") >= 2:
+            status, eku, who = ln.split("|", 2)
+            got.append((status, who, [x for x in eku.split(",") if x]))
     if len(got) != len(files):
         raise ValueError("Windows couldn't check the release's signatures: %s"
                          % (r.stderr.decode("utf-8", "replace").strip()[-200:] or "no answer"))
@@ -314,15 +352,18 @@ def signatures(files):
 
 
 def check_signed(build):
-    """The release's installer and catalog signed by PUBLISHER, or ValueError."""
+    """The release's installer and catalog signed by PUBLISHER, with its signing identity (IDENTITY), or ValueError."""
     files = [os.path.join(build, name) for name in SIGNED]
     for name, path in zip(SIGNED, files):
         if not os.path.isfile(path) or _is_link(path):
             raise ValueError("the zip has no %s, so it isn't a signed release: not installing it" % name)
-    for name, (status, who) in zip(SIGNED, signatures(files)):
+    for name, (status, who, ekus) in zip(SIGNED, signatures(files)):
         if status != "Valid" or not (who == PUBLISHER or who.startswith(PUBLISHER + ",")):
             raise ValueError("its %s isn't signed by James Cupps (%s%s): not installing it"
                              % (name, status, ", by " + who if who and status == "Valid" else ""))
+        if IDENTITY not in ekus:
+            raise ValueError("its %s is signed in James Cupps's name, but not with James Cupps's signing identity: "
+                             "not installing it" % name)
 
 
 def install_script(build, staging, version):
@@ -335,14 +376,15 @@ def install_script(build, staging, version):
         f.write("@echo off\ntitle HW Blackbox: updating to %s\n" % version)
         # (Windows PowerShell's own modules, for the installer's catalog check: PowerShell 7's don't load in it)
         f.write('set "PSModulePath=%s"\n' % os.path.join(POWERSHELL, "Modules"))
-        f.write('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s" -Report "%s"\n'
-                % (os.path.join(build, "install.ps1"), report))
+        # (programs by their full path: cmd looks in the current folder, then PATH, for a bare name)
+        f.write('"%s" -NoProfile -ExecutionPolicy Bypass -File "%s" -Report "%s"\n'
+                % (os.path.join(POWERSHELL, "powershell.exe"), os.path.join(build, "install.ps1"), report))
         f.write("set rc=%errorlevel%\n")
         f.write('rmdir /s /q "%s"\n' % os.path.dirname(build))
         f.write('del /q "%s"\n' % os.path.join(staging, "HWBlackbox-%s-win64.zip" % version))
         f.write("echo.\n")
         f.write('if "%%rc%%"=="0" (\n  echo Done: HW Blackbox %s is installed. This window closes in 15 seconds, or press a key.\n'
-                "  timeout /t 15 >nul\n  exit /b 0\n)\n" % version)
+                '  "%s" /t 15 >nul\n  exit /b 0\n)\n' % (version, os.path.join(paths.system_dir(), "timeout.exe")))
         f.write("echo The installer had problems (exit %%rc%%): see above, or its report: %s\npause\n" % report)
     return cmd
 
@@ -402,7 +444,7 @@ def _run(dry_run, pretend, from_zip, sha256, staging, out):
                 return 0
             out("HW Blackbox %s is out (%s)" % (off["version"], off.get("page") or off["tag"]))
         staging = staging or os.path.join(paths.P.data, "update")
-        build = stage(off, staging, out, from_zip=from_zip)
+        build = stage(off, staging, out, from_zip=from_zip, protect=not dry_run)
         cmd = install_script(build, staging, off["version"])
     except Exception as e:
         out("The update stopped: %s: %s" % (type(e).__name__, e))
@@ -413,5 +455,5 @@ def _run(dry_run, pretend, from_zip, sha256, staging, out):
         return 0
     out("starting the installer of %s (it stops HW Blackbox, installs, and starts it again)" % off["version"])
     # (in this window, after this process has ended: the installer replaces the program this runs from)
-    subprocess.Popen(["cmd.exe", "/c", cmd], cwd=staging)
+    subprocess.Popen([os.path.join(paths.system_dir(), "cmd.exe"), "/c", cmd], cwd=staging)
     return "started"

@@ -33,7 +33,12 @@ def same_program(exe, want):
 
 # A command line's secrets: the value after a password-, token- or key-like option ("--password x", "-api-key=x",
 # "/token:x"), and a password in an address ("https://user:pw@host").
-_NAME = r"[\w.-]*(?:pass(?:word|wd|phrase)?|pwd|secret|token|key|auth\w*|credentials?|cookie|session[-_]?id)[\w.-]*"
+# (The name's runs before and after the keyword are bounded, and only the command line's start is searched: unbounded,
+# a long run of keywords with no value after it made the search take seconds, 12 s for 30,000 characters, and five
+# such listeners would hold the watcher up until the service was ended for it: the 2026-11-14 review's H2.)
+SEARCH_CHARS = 2000
+_NAME = (r"[\w.-]{0,40}(?:pass(?:word|wd|phrase)?|pwd|secret|token|key|auth\w{0,20}|credentials?|cookie"
+         r"|session[-_]?id)[\w.-]{0,40}")
 SECRET_OPTION = re.compile(r"(?i)((?:^|\s)(?:[-/]{1,2}%s(?:\s*[=:]\s*|\s+)|%s\s*[=:]\s*))(\"[^\"]*\"|'[^']*'|\S+)"
                            % (_NAME, _NAME))
 SECRET_IN_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@")
@@ -44,7 +49,7 @@ def redact(cmd):
     the PC, and these are other users' and services' command lines too."""
     if not cmd:
         return cmd
-    cmd = SECRET_IN_URL.sub(r"\1***@", cmd)
+    cmd = SECRET_IN_URL.sub(r"\1***@", cmd[:SEARCH_CHARS])
     return SECRET_OPTION.sub(lambda m: m.group(1) + "***", cmd)
 
 

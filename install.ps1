@@ -59,18 +59,33 @@ try {
 } catch { }
 $Service = 'HWBlackbox'
 $TaskName = 'HWBlackboxAgent'
-$Dest = Join-Path $env:ProgramFiles 'HWBlackbox'
-$Data = Join-Path $env:ProgramData 'HWBlackbox'
+# Windows' own folders from Windows, never from environment variables: this runs elevated in the user's session, and a
+# program running as that user can set variables for every program they start after (HKCU\Environment). Until 1.1.3
+# these came from $env:ProgramFiles and the like (the 2026-11-14 review's H1).
+$Win = [Environment]::GetFolderPath('Windows')
+$Sys = [Environment]::SystemDirectory
+$Dest = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'HWBlackbox'
+$Data = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HWBlackbox'
 $Py = Join-Path $Dest 'python\pythonw.exe'
 $PyCon = Join-Path $Dest 'python\python.exe'
-$StartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\HW Blackbox.lnk'
+$StartMenu = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'HW Blackbox.lnk'
 $AppsKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HWBlackbox'     # (Installed apps' entry)
 $ToastKey = 'HKLM:\SOFTWARE\Classes\AppUserModelId\HWBlackbox'                        # (its notifications' name)
 $Stage = "$Dest.new"                        # (the new program, copied and checked before the old one is touched)
 $Old = "$Dest.old"
-if (-not $Report) { $Report = Join-Path $env:TEMP 'hwblackbox-install.txt' }
 $script:failed = @()
 $script:warned = @()
+# The report: -Report's file (the updater's, in the data folder), else logs\install.txt in the data folder once that's
+# checked; until then its lines wait here. Never the user's TEMP folder, as until 1.1.3: this writes as an admin, and
+# a link put there would have pointed it at any file (the 2026-11-14 review's H6).
+$script:lines = New-Object Collections.Generic.List[string]
+$script:reportOn = $false
+function Start-Report([string]$Path) {
+  if ($script:reportOn) { return }
+  $script:Report = $Path
+  $script:lines | Out-File -LiteralPath $Path -Encoding utf8
+  $script:reportOn = $true
+}
 
 function Warn($m) { $script:warned += $m; Say "WARNING: $m" }
 # HW Blackbox's own commands, their output (stdout and stderr) into the report. (Windows PowerShell turns a native
@@ -82,7 +97,7 @@ function Run-Hwb([string[]]$a) {
 }
 function Say($m) {
   $line = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $m
-  $line | Out-File $Report -Append -Encoding utf8
+  if ($script:reportOn) { $line | Out-File -LiteralPath $script:Report -Append -Encoding utf8 } else { $script:lines.Add($line) }
   Write-Host $line
 }
 function Fail($m) { $script:failed += $m; Say "FAILED: $m" }
@@ -125,10 +140,12 @@ function Test-TrustedFolder([string]$Path, [string[]]$Owners) {
   if (($a -band [IO.FileAttributes]::ReparsePoint) -or -not ($a -band [IO.FileAttributes]::Directory)) { return $false }
   return $Owners -contains (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
 }
+# SYSTEM, Administrators, TrustedInstaller
+$SystemOwners = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 function Initialize-DataFolder([string]$Root) {
   # who may own them: SYSTEM, Administrators, TrustedInstaller, or an admin's own account (where a policy gives an
   # admin's new folders to the admin instead of the Administrators group)
-  $owners = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+  $owners = $SystemOwners
   try { $owners += @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { $_.SID.Value }) }
   catch { Say "  (the Administrators group's members can't be listed: $($_.Exception.Message))" }
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -221,6 +238,13 @@ function Get-Mismatches([string]$Root, $Manifest) {
   }
   return ,$bad
 }
+# A certificate's signing identity besides its name: Azure Artifact Signing puts the account's identity in as key
+# usages (1.3.6.1.4.1.311.97...), the same in each of its three-day certificates. A name is something another
+# certificate authority could issue too, so from 1.1.3 the catalog must match this script in both.
+function Get-SigningIdentity($Cert) {
+  (@($Cert.EnhancedKeyUsageList) | ForEach-Object { $_.ObjectId } | Where-Object { $_ -like '1.3.6.1.4.1.311.97.*' } |
+    Sort-Object) -join ','
+}
 # A signed release (from 1.1.1: this script signed by its publisher): every file in $Root must match its catalog,
 # HWBlackbox.cat, signed by the same publisher as this script. $null when it does, or when this script isn't signed (a
 # build made on a PC: the manifest's check is all there is); else why not, in words. The manifest comes from the
@@ -233,7 +257,8 @@ function Test-Catalog([string]$Root) {
   $cat = Join-Path $Root 'HWBlackbox.cat'
   if (-not (Test-Path -LiteralPath $cat)) { return "the release's signed catalog (HWBlackbox.cat) is missing" }
   $s = Get-AuthenticodeSignature -LiteralPath $cat
-  if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -ne $me.SignerCertificate.Subject) {
+  if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -ne $me.SignerCertificate.Subject -or
+      (Get-SigningIdentity $s.SignerCertificate) -ne (Get-SigningIdentity $me.SignerCertificate)) {
     return "the release's catalog isn't signed by $who ($($s.Status))"
   }
   $r = Test-FileCatalog -Path $Root -CatalogFilePath $cat -FilesToSkip 'HWBlackbox.cat'
@@ -319,8 +344,8 @@ if (-not $admin -and $Uninstall) {
   $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Uninstall')
   if ($RemoveData) { $a += '-RemoveData' }
   if ($Pause) { $a += '-Pause' }
-  if ($Report -ne (Join-Path $env:TEMP 'hwblackbox-install.txt')) { $a += @('-Report', "`"$Report`"") }
-  try { $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $a; exit $p.ExitCode }
+  if ($Report) { $a += @('-Report', "`"$Report`"") }
+  try { $p = Start-Process (Join-Path $Sys 'WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -Wait -PassThru -ArgumentList $a; exit $p.ExitCode }
   catch {
     Write-Host "HW Blackbox was not removed: Windows didn't get admin rights. Try again, and choose Yes when it asks."
     $script:failed += 'no admin rights'
@@ -328,8 +353,12 @@ if (-not $admin -and $Uninstall) {
     exit 1
   }
 }
-"HW Blackbox install: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), user $env:USERNAME, from $PSScriptRoot" | Out-File $Report -Encoding utf8
+$script:lines.Add("HW Blackbox $(if ($Uninstall) { 'uninstall' } else { 'install' }): $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), user $([Environment]::UserName), from $PSScriptRoot")
 if (-not $admin) { Say 'NOT elevated: run this in an elevated PowerShell'; exit 1 }
+if ($Report) { Start-Report $Report }
+elseif (-not $Uninstall -and (Test-TrustedFolder $Data $SystemOwners) -and (Test-TrustedFolder (Join-Path $Data 'logs') $SystemOwners)) {
+  Start-Report (Join-Path $Data 'logs\install.txt')         # (an update: the data folder is there already)
+}
 if (-not [Environment]::Is64BitOperatingSystem) { Say 'HW Blackbox needs 64-bit Windows'; exit 1 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -337,8 +366,8 @@ if ($Uninstall) {
   # (out of the program's folder first: this script may be running from it, and a process's current folder can't be
   # removed. Set-Location only moves PowerShell's own idea of it; the process's is CurrentDirectory. PowerShell has
   # read the whole script already, so removing the file itself is fine.)
-  Set-Location $env:SystemRoot
-  [Environment]::CurrentDirectory = $env:SystemRoot
+  Set-Location $Win
+  [Environment]::CurrentDirectory = $Win
   Stop-HWBlackbox
   if (Get-Service -Name $Service -ErrorAction SilentlyContinue) { sc.exe delete $Service | Out-Null; Say 'removed the service' }
   if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -416,6 +445,7 @@ if (-not (Swap-Program $Stage $Dest $Old $manifest)) {
 
 Say "== 5. The data folder $Data"
 Initialize-DataFolder $Data
+Start-Report (Join-Path $Data 'logs\install.txt')            # (a first install's report: from here, with what came before)
 $initArgs = @('init', '--data-dir', $Data)
 foreach ($s in $Set) { $initArgs += @('--set', $s) }
 Run-Hwb $initArgs
@@ -459,7 +489,7 @@ $lnk = $ws.CreateShortcut($StartMenu)
 $lnk.TargetPath = $Py
 $lnk.Arguments = '-m hwblackbox open'
 $lnk.WorkingDirectory = Join-Path $Dest 'app'
-$lnk.IconLocation = "$env:SystemRoot\System32\perfmon.exe,0"
+$lnk.IconLocation = "$Sys\perfmon.exe,0"
 $lnk.Description = 'HW Blackbox: the dashboard'
 $lnk.Save()
 Say "made $StartMenu"
@@ -468,13 +498,13 @@ Say "made $StartMenu"
 # (Not "$uninstall": PowerShell's names ignore case, and that's this script's -Uninstall switch. The first 1.0.11
 # build stopped here, before starting the service.)
 try {
-  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $ps = Join-Path $Sys 'WindowsPowerShell\v1.0\powershell.exe'
   $appsUninstall = "`"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Dest 'install.ps1')`" -Uninstall -Pause"
   New-Item -Path $AppsKey -Force | Out-Null
   $entry = [ordered]@{
     DisplayName = 'HW Blackbox'; DisplayVersion = [string]$manifest.version; Publisher = 'James Cupps'
     Comments = 'A hardware monitor and black box for Windows'; InstallLocation = $Dest
-    DisplayIcon = "$env:SystemRoot\System32\perfmon.exe,0"; UninstallString = $appsUninstall
+    DisplayIcon = "$Sys\perfmon.exe,0"; UninstallString = $appsUninstall
     URLInfoAbout = 'https://github.com/jamesccupps/HW-Blackbox'
     URLUpdateInfo = 'https://github.com/jamesccupps/HW-Blackbox/releases'
     HelpLink = 'https://github.com/jamesccupps/HW-Blackbox#readme'; InstallDate = (Get-Date -Format 'yyyyMMdd')
@@ -535,28 +565,33 @@ else {
     elseif (-not $st.sensors.rails_ok -and $pawn) { Fail 'no rail voltages (the board''s sensor chip didn''t answer)' }
   } else { Fail 'the sensors have not started' }
 }
-$me = $env:USERNAME
 $hbFile = Get-ChildItem (Join-Path $Data 'sessions') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'agent.json' } |
-  Where-Object { (Test-Path $_) -and (Get-Item $_).LastWriteTime -gt $t0 } | Select-Object -First 1
+  Where-Object { (Test-Path -LiteralPath $_) -and -not ((Get-OwnAttributes $_) -band [IO.FileAttributes]::ReparsePoint) -and
+                 (Get-Item -LiteralPath $_).LastWriteTime -gt $t0 } | Select-Object -First 1
 $deadline = (Get-Date).AddSeconds(45)
 if (-not $hbFile) { Say 'waiting for the session agent (up to 45 seconds)' }
 while (-not $hbFile -and (Get-Date) -lt $deadline) {
   Start-Sleep -Seconds 3
   $hbFile = Get-ChildItem (Join-Path $Data 'sessions') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'agent.json' } |
-    Where-Object { (Test-Path $_) -and (Get-Item $_).LastWriteTime -gt $t0 } | Select-Object -First 1
+    Where-Object { (Test-Path -LiteralPath $_) -and -not ((Get-OwnAttributes $_) -band [IO.FileAttributes]::ReparsePoint) -and
+                   (Get-Item -LiteralPath $_).LastWriteTime -gt $t0 } | Select-Object -First 1
 }
+$port = 0
 if ($hbFile) {
-  $hb = Get-Content $hbFile -Raw | ConvertFrom-Json
-  Say "agent: $($hb.user), session $($hb.session), dashboard port $($hb.dashboard.port) $($hb.dashboard.error)"
-  if ($hb.dashboard.port) {
+  $hb = Get-Content -LiteralPath $hbFile -Raw | ConvertFrom-Json
+  # (the user's own file: its port only as a number, never text in the URL; "80@example.org" would send this
+  # elevated request elsewhere. The 2026-11-14 review's H6.)
+  if (-not ([int]::TryParse([string]$hb.dashboard.port, [ref]$port) -and $port -gt 0 -and $port -lt 65536)) { $port = 0 }
+  Say "agent: $($hb.user), session $($hb.session), dashboard port $(if ($port) { $port } else { '-' }) $($hb.dashboard.error)"
+  if ($port) {
     try {
-      $ping = Invoke-RestMethod "http://127.0.0.1:$($hb.dashboard.port)/api/ping" -TimeoutSec 5
+      $ping = Invoke-RestMethod "http://127.0.0.1:$port/api/ping" -TimeoutSec 5
       Say "dashboard answers: $($ping.app) $($ping.version)"
     } catch { Warn "the dashboard doesn't answer: $($_.Exception.Message)" }
   } else { Warn "the dashboard isn't serving: $($hb.dashboard.error)" }
 } else { Warn 'no session agent heartbeat in 45 s (the service starts it within minutes, and every sign-in does)' }
 
-$open = 'Open HW Blackbox from the Start menu' + $(if ($hbFile -and $hb.dashboard.port) { " (or http://127.0.0.1:$($hb.dashboard.port)/ in a browser)." } else { '.' })
+$open = 'Open HW Blackbox from the Start menu' + $(if ($port) { " (or http://127.0.0.1:$port/ in a browser)." } else { '.' })
 if ($script:failed) { Say "DONE WITH PROBLEMS: $($script:failed -join '; ')"; Say $open; exit 2 }
 if ($script:warned) { Say "DONE WITH WARNINGS: $($script:warned -join '; ')"; Say $open; exit 0 }
 Say "DONE. $open"

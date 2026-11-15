@@ -195,9 +195,12 @@ def main():
     copytree(os.path.join(ROOT, "licenses"), os.path.join(out, "licenses"))     # (the bundled DLLs' license texts)
     build_setup(os.path.join(out, "Setup.exe"))
     exe = os.path.join(py, "python.exe")
-    # compiled now, so nothing is written next to the program at run time
-    subprocess.run([exe, "-m", "compileall", "-q", "-j", "0", os.path.join(py, "Lib"), os.path.join(out, "app")],
-                   check=True)
+    # Compiled now, so nothing is written next to the program at run time. Unchecked hash-based .pyc files: Python
+    # never compares them with their sources' times, which an unzip resets, so the installed program never rewrites
+    # them, and they stay as MANIFEST.json and the catalog list them (until 1.1.3 the service rewrote them in Program
+    # Files after every install). The flip side: an edit to a .py in a built folder doesn't take; build again.
+    subprocess.run([exe, "-m", "compileall", "-q", "-j", "0", "--invalidation-mode", "unchecked-hash",
+                    os.path.join(py, "Lib"), os.path.join(out, "app")], check=True)
     # does it run on its own? (the module path comes only from python312._pth)
     probe = subprocess.run([exe, "-c", "import sys, hwblackbox, hwblackbox.service, hwblackbox.agent, "
                             "hwblackbox.dashboard.server, hwblackbox.drives, hwblackbox.notify, win32api, win32evtlog, "

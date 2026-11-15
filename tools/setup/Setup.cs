@@ -22,6 +22,24 @@ using System.Text;
 
 static class Setup
 {
+    // The signing identity a certificate carries besides its name: Azure Artifact Signing puts the account's identity in
+    // as key usages (1.3.6.1.4.1.311.97...), the same in each of its three-day certificates. A name alone is something
+    // another certificate authority could issue too, so install.ps1 must match this Setup.exe in both (from 1.1.3).
+    static string Identity(X509Certificate2 cert)
+    {
+        var ids = new System.Collections.Generic.List<string>();
+        foreach (X509Extension ext in cert.Extensions)
+        {
+            var eku = ext as X509EnhancedKeyUsageExtension;
+            if (eku == null) continue;
+            foreach (System.Security.Cryptography.Oid oid in eku.EnhancedKeyUsages)
+                if (oid.Value != null && oid.Value.StartsWith("1.3.6.1.4.1.311.97.", StringComparison.Ordinal))
+                    ids.Add(oid.Value);
+        }
+        ids.Sort(StringComparer.Ordinal);
+        return string.Join(",", ids);
+    }
+
     static int Main()
     {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -51,7 +69,7 @@ static class Setup
             if (mine != null)
             {
                 X509Certificate2 its = SignerOf(path, handle);
-                if (its == null || its.Subject != mine.Subject)
+                if (its == null || its.Subject != mine.Subject || Identity(its) != Identity(mine))
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("install.ps1 isn't signed by " + mine.GetNameInfo(X509NameType.SimpleName, false) +

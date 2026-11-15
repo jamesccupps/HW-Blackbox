@@ -38,7 +38,7 @@ switch off, or why did that app close?*
      with winget. Press **Y** (or Enter) to install it, or **N** to go on without it.
 3. Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`.
 
-Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`). From 1.1.1 the release is built on
+Each release lists the zip's SHA-256 (`Get-FileHash .\HWBlackbox-win64.zip`). From 1.1.2 the release is built on
 GitHub and signed by James Cupps: Setup.exe, the installer script, and a catalog of every file, which the installer
 checks every file against. More options are under [Install, in detail](#install-in-detail).
 
@@ -162,7 +162,7 @@ the same publisher, and keeps it locked from that check until the install ends):
   **Settings → Apps → Installed apps**, and its name to Windows' notifications.
 - It checks that everything reports.
 
-Its log is `%TEMP%\hwblackbox-install.txt`. Running it again updates an installed HW Blackbox and keeps the settings
+Its report is `C:\ProgramData\HWBlackbox\logs\install.txt`. Running it again updates an installed HW Blackbox and keeps the settings
 and the history.
 
 ### Uninstall
@@ -184,8 +184,9 @@ From 1.0.10 on, HW Blackbox updates itself from the page:
 - **Update** asks Windows for an admin, then opens a window that downloads the
   release's zip into `C:\ProgramData\HWBlackbox\update` (where only SYSTEM and admins can write), checks it against
   the SHA-256 GitHub gives for it and the one in the release notes, unpacks it, checks it's the version offered, and
-  runs that version's installer. From 1.1.1, it installs only a release whose installer and catalog are signed by
-  James Cupps (the installer then checks every file against the catalog). The settings and the history are kept; the download is deleted afterwards. Done,
+  runs that version's installer. From 1.1.2, it installs only a release whose installer and catalog are signed by
+  James Cupps (the installer then checks every file against the catalog); from 1.1.3, with James Cupps's own signing
+  identity, not just that name. The settings and the history are kept; the download is deleted afterwards. Done,
   the window closes by itself and the page reloads into the new version; with problems, the window stays open to
   show them. If any check fails, nothing is installed.
 - Nothing is installed without someone at the PC clicking Update and saying yes to Windows: HW Blackbox runs as
@@ -224,7 +225,9 @@ The header shows the page's version. After an update, a page that was already op
 The dashboard reads; the only things it changes are your own notification settings, and anything that needs an
 admin (an update, Home Assistant) is started in a window of its own after Windows' admin prompt. It listens on
 `127.0.0.1` alone and answers only requests addressed that way (and changes only from the page itself), so a web page
-can't reach it through DNS rebinding. Charts can be read with the keyboard: Tab to one, then the arrow keys.
+can't reach it through DNS rebinding. From 1.1.3 it answers only programs in its own Windows session: with two users
+signed in, the first session's agent serves the page, and the other user's programs are refused. Charts can be read
+with the keyboard: Tab to one, then the arrow keys.
 
 ## Settings
 
@@ -365,9 +368,10 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
   and a laptop (Framework, Intel Core i7-1260P, Intel Iris Xe graphics). Other CPUs, sensor chips and GPUs go through
   LibreHardwareMonitor and should work. Which readings show up, and what they're called, varies by board; the rails
   need a sensor chip that reports them, which laptops don't have.
-- **Signed from 1.1.1 only.** Earlier releases aren't code-signed (Windows may show *Windows protected your PC* for
-  their `Install.cmd`: **More info**, then **Run anyway**); check their zip's SHA-256 against the release notes. A new
-  publisher's signature can still meet a SmartScreen warning for a while, until Windows has seen the file enough.
+- **Signed from 1.1.2 only** (1.1.1 was signed too, but withdrawn). Earlier releases aren't code-signed (Windows may
+  show *Windows protected your PC* for their `Install.cmd`: **More info**, then **Run anyway**); check their zip's
+  SHA-256 against the release notes. A new publisher's signature can still meet a SmartScreen warning for a while,
+  until Windows has seen the file enough.
 - **Times before 1.1.0 have no time zone.** Since 1.1.0 every time in the logs and records carries its offset from
   UTC (`2026-11-10T18:23:02-05:00`). Older ones are local time: when daylight saving ended, the repeated hour was
   written twice the same way, and they're read in order to tell the two apart.

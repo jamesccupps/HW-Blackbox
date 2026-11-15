@@ -16,7 +16,7 @@ import psutil
 
 from . import AGENT_TASK, paths, winapi
 from .journal import read_tail
-from .util import is_link, read_json
+from .util import is_link, json_of, open_no_link, read_json
 
 STALE = 150          # seconds without a heartbeat
 GRACE = 180          # seconds a session gets after it first appears (its agent starts at sign-in)
@@ -24,6 +24,16 @@ RETRY = 300          # seconds between restarts of the same session's agent
 TASK_RUN_USE_SESSION_ID = 4
 SID_NAME = re.compile(r"^S-1-\d+(-\d+)+$")
 SYSTEM, ADMINS = "S-1-5-18", "S-1-5-32-544"
+
+
+def read_own_json(path, limit=1 << 20):
+    """(JSON, the time it was written) of a file in a user's folder, read without following a link (util.open_no_link);
+    (None, None) when it can't be."""
+    try:
+        with open_no_link(path) as f:
+            return json_of(f.read(limit + 1), limit), os.fstat(f.fileno()).st_mtime
+    except Exception:
+        return None, None
 
 
 def session_folder(name):
@@ -74,23 +84,77 @@ def inherit_children(path, sid):
     empty, and inherits). Files moved in from an older version's folder keep the permissions of where they were, and
     on 2026-11-10 the first 1.1.0 install left them read-only for their own user: the agent couldn't open its own
     crash log, and exited at every start. Only what the user owns and has one name for (a hard link to someone
-    else's file is never handed to them), never through a link."""
+    else's file is never handed to them), never through a link.
+
+    Each one is opened once, without following a link, and checked and changed through that handle. Until 1.1.3 it
+    was checked by its path and then changed by its path: the user, whose folder it is, could swap a junction in
+    between, and SYSTEM would then have unprotected whatever it pointed at, the data folder itself included (the
+    2026-11-14 review's H3). Through the handle, a junction swapped in is opened as itself and left alone, and a file
+    reached through a folder swapped for a junction is changed only if the user owns it, which already lets them."""
+    import pywintypes
+    import win32con
+    import win32file
     import win32security
+    from .util import OPEN_REPARSE_POINT, REPARSE_POINT
     empty = win32security.ACL()
     flags = win32security.DACL_SECURITY_INFORMATION | win32security.UNPROTECTED_DACL_SECURITY_INFORMATION
+    want = win32security.ConvertStringSidToSid(sid)
     done = 0
     for root, dirs, files in os.walk(path):
         dirs[:] = [d for d in dirs if not is_link(os.path.join(root, d))]
         for name in dirs + files:
-            p = os.path.join(root, name)
             try:
-                if is_link(p) or owner_of(p) != sid or (name in files and os.stat(p).st_nlink != 1):
+                h = win32file.CreateFile(os.path.join(root, name), win32con.READ_CONTROL | win32con.WRITE_DAC,
+                                         win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE |
+                                         win32file.FILE_SHARE_DELETE, None, win32file.OPEN_EXISTING,
+                                         OPEN_REPARSE_POINT | win32file.FILE_FLAG_BACKUP_SEMANTICS, None)
+            except pywintypes.error:
+                continue
+            try:
+                info = win32file.GetFileInformationByHandle(h)       # (attributes, ..., [7] how many names it has)
+                if info[0] & REPARSE_POINT or (not info[0] & 0x10 and info[7] != 1):
                     continue
-                win32security.SetNamedSecurityInfo(p, win32security.SE_FILE_OBJECT, flags, None, None, empty, None)
+                owner = win32security.GetSecurityInfo(h, win32security.SE_FILE_OBJECT,
+                                                      win32security.OWNER_SECURITY_INFORMATION)
+                if owner.GetSecurityDescriptorOwner() != want:
+                    continue
+                win32security.SetSecurityInfo(h, win32security.SE_FILE_OBJECT, flags, None, None, empty, None)
                 done += 1
             except Exception:
                 continue
+            finally:
+                h.Close()
     return done
+
+
+def _make_theirs(path, sid, elevated):
+    """An older version's folder just moved to sessions\\<sid> given the user's folder's security (folder_security),
+    through one handle opened without following a link: True, or False when it's a link now. The user owns that folder
+    until this is done, and an empty folder can be made a junction in place: set by its path (as until 1.1.3), its
+    owner and a grant of modify to the user would have gone to wherever that pointed. Set through the handle, it goes
+    to the folder itself, even if it's made a junction meanwhile; and the service refuses links in sessions\\."""
+    import win32con
+    import win32file
+    import win32security
+    from .util import OPEN_REPARSE_POINT, REPARSE_POINT
+    access = win32con.READ_CONTROL | win32con.WRITE_DAC | (win32con.WRITE_OWNER if elevated else 0)
+    h = win32file.CreateFile(path, access, win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE |
+                             win32file.FILE_SHARE_DELETE, None, win32file.OPEN_EXISTING,
+                             OPEN_REPARSE_POINT | win32file.FILE_FLAG_BACKUP_SEMANTICS, None)
+    try:
+        attrs = win32file.GetFileInformationByHandle(h)[0]
+        if attrs & REPARSE_POINT or not attrs & 0x10:               # (a link, or not a folder)
+            return False
+        sd = folder_security(sid, owner=elevated)
+        what = win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+        if elevated:
+            what |= win32security.OWNER_SECURITY_INFORMATION
+        win32security.SetSecurityInfo(h, win32security.SE_FILE_OBJECT, what,
+                                      sd.GetSecurityDescriptorOwner() if elevated else None, None,
+                                      sd.GetSecurityDescriptorDacl(), None)
+        return True
+    finally:
+        h.Close()
 
 
 _folder_lock = threading.Lock()
@@ -130,20 +194,26 @@ def _make_user_folder(sid, user, jrnl):
         moved = False
     if moved:
         try:
-            sd = folder_security(sid, owner=elevated)
-            flags = win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION
-            win32security.SetNamedSecurityInfo(
-                path, win32security.SE_FILE_OBJECT, flags | (win32security.OWNER_SECURITY_INFORMATION if elevated
-                                                             else 0),
-                sd.GetSecurityDescriptorOwner() if elevated else None, None, sd.GetSecurityDescriptorDacl(), None)
+            ok = _make_theirs(path, sid, elevated)
         except Exception as e:
+            ok = False
             if jrnl:
                 jrnl.write("error", {"where": "session folders", "error": "%s: its permissions: %s" % (path, e)})
-        inherit_children(path, sid)                   # (and the files in it, which kept their old permissions)
+        if ok:
+            inherit_children(path, sid)               # (and the files in it, which kept their old permissions)
+            if jrnl:
+                jrnl.write("agent", {"event": "folder moved", "user": user, "why": "sessions\\%s is now sessions\\%s "
+                                     "(named by the account, for that user only)" % (os.path.basename(old), sid)})
+            return path
+        # (made a link after the checks, or its permissions couldn't be set: moved aside, and a new one made)
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            os.rename(path, path + ".untrusted-" + stamp)
+        except OSError:
+            return None
         if jrnl:
-            jrnl.write("agent", {"event": "folder moved", "user": user, "why": "sessions\\%s is now sessions\\%s "
-                                 "(named by the account, for that user only)" % (os.path.basename(old), sid)})
-        return path
+            jrnl.write("error", {"where": "session folders", "error": "%s couldn't be made %s's own: moved aside to "
+                                 "%s.untrusted-%s" % (path, user, sid, stamp)})
     try:
         sa = win32security.SECURITY_ATTRIBUTES()
         sa.SECURITY_DESCRIPTOR = folder_security(sid, owner=elevated)
@@ -217,7 +287,6 @@ class Agents:
         self.jrnl = jrnl
         self.restart = restart             # (off for a test instance: it never touches the real agents)
         self.folders = folders             # (the real service makes each signed-in user's folder)
-        self.checked = set()               # SIDs whose folder's files this run has given back their permissions
         self.first_seen = {}               # session id -> when this service first saw it signed in
         self.last_restart = {}             # session id -> time
         self.view = []                     # [{session, user, state, agent, age, ...}], refreshed every 30 s
@@ -234,19 +303,16 @@ class Agents:
             self.first_seen.setdefault(sid, now)
             account = sid_of(s.get("domain"), user)
             if self.folders and account:
-                made = make_user_folder(account, user, self.jrnl)
-                if made and account not in self.checked:
-                    # once a run: the files in it take their permissions from it (see inherit_children)
-                    self.checked.add(account)
-                    inherit_children(made, account)
+                # (its files take their permissions from it again only when it's moved there from an older version's
+                # folder, in make_user_folder: until 1.1.3 that ran once a run as well, for the PCs the first 1.1.0
+                # install had left so, which every later version has since put right)
+                make_user_folder(account, user, self.jrnl)
             folder = session_folder(account or user)
-            path = os.path.join(folder, "agent.json") if folder else None
-            hb = (read_json(path, limit=1 << 20) if path else None) or {}
+            # (the user's own file, read as SYSTEM: never through a link, and its time from the same open)
+            hb, written = read_own_json(os.path.join(folder, "agent.json")) if folder else (None, None)
             if not isinstance(hb, dict):
                 hb = {}
-            try:
-                written = os.path.getmtime(path) if hb.get("session") == sid and isinstance(hb.get("ts"), str) else None
-            except (OSError, TypeError):
+            if hb.get("session") != sid or not isinstance(hb.get("ts"), str):
                 written = None
             if written is not None:
                 beats[sid], self.last_beat[sid] = hb, written
@@ -325,7 +391,7 @@ class Agents:
         cutoff = time.time() - seconds
         for s in self.view:
             folder = session_folder(s.get("folder") or s["user"])
-            data = (read_json(os.path.join(folder, "front.json"), limit=1 << 20) if folder else None) or {}
+            data = (read_json(os.path.join(folder, "front.json"), limit=1 << 20, nofollow=True) if folder else None) or {}
             if isinstance(data, dict) and data.get("session") == s["session"]:
                 ring = data.get("ring") if isinstance(data.get("ring"), list) else []
                 out[s["session"]] = [x for x in ring if isinstance(x, list) and len(x) >= 2
@@ -340,5 +406,6 @@ class Agents:
             if not folder:
                 continue
             path = os.path.join(folder, "session_%s.jsonl" % time.strftime("%Y%m%d"))
-            out.extend(dict(r, session=s["session"]) for r in read_tail(path, seconds, 1 << 20) if isinstance(r, dict))
+            out.extend(dict(r, session=s["session"]) for r in read_tail(path, seconds, 1 << 20, nofollow=True)
+                       if isinstance(r, dict))
         return sorted(out, key=lambda r: r.get("ts", ""))

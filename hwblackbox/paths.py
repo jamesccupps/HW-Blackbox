@@ -15,13 +15,60 @@ The data: %ProgramData%\HWBlackbox. Windows (the service, as SYSTEM) and admins 
                 their session agent writes there (users can't make folders here)
   secrets\      the Home Assistant token (admins and SYSTEM only)
 
---data-dir points all of it at another folder (tests, a second instance)."""
+--data-dir points all of it at another folder (tests, a second instance).
+
+Windows' own folders come from Windows (the known-folder and system-folder calls), never from environment variables:
+a program running as a user can set that user's variables for every program started after (HKCU\Environment),
+elevated ones included, and the update, the Home Assistant setup and the installer run elevated from the user's
+session. (Until 1.1.3 a variable, HWBLACKBOX_DATA, could even move the data folder: the 2026-11-14 review's H1.)"""
 import os
 
 PACKAGE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(PACKAGE)
 LIB = os.path.join(APP, "lib")
-DEFAULT_DATA = os.path.join(os.environ.get("ProgramData") or r"C:\ProgramData", "HWBlackbox")
+
+PROGRAM_DATA = "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}"     # (FOLDERID_ProgramData)
+PROGRAM_FILES = "{905E63B6-C1BF-494E-B29C-65B732D3D21A}"    # (FOLDERID_ProgramFiles)
+
+
+def known_folder(folder_id, fallback):
+    """A Windows known folder's path (SHGetKnownFolderPath), or fallback where Windows can't say."""
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+        guid = (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(folder_id).bytes_le)
+        out = ctypes.c_void_p()
+        shell = ctypes.WinDLL("shell32")
+        shell.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE,
+                                               ctypes.POINTER(ctypes.c_void_p)]
+        shell.SHGetKnownFolderPath.restype = ctypes.c_long
+        hr = shell.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(out))
+        try:
+            if hr == 0 and out.value:
+                return ctypes.wstring_at(out.value)
+        finally:
+            if out.value:
+                ctypes.WinDLL("ole32").CoTaskMemFree(out)
+    except Exception:
+        pass
+    return fallback
+
+
+def system_dir():
+    """C:\\Windows\\System32, from Windows (GetSystemDirectoryW)."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(520)
+        n = ctypes.WinDLL("kernel32").GetSystemDirectoryW(buf, 520)
+        if 0 < n < 520:
+            return buf.value
+    except Exception:
+        pass
+    return r"C:\Windows\System32"
+
+
+DEFAULT_DATA = os.path.join(known_folder(PROGRAM_DATA, r"C:\ProgramData"), "HWBlackbox")
 
 
 class Paths:
@@ -54,11 +101,11 @@ class Paths:
             os.makedirs(getattr(self, n), exist_ok=True)
 
 
-P = Paths(os.environ.get("HWBLACKBOX_DATA") or DEFAULT_DATA)
+P = Paths(DEFAULT_DATA)
 
 
 def init(data_dir=None):
-    """Point everything at data_dir (None: the default, or HWBLACKBOX_DATA)."""
+    """Point everything at data_dir (None: the default, %ProgramData%\\HWBlackbox)."""
     global P
-    P = Paths(data_dir or os.environ.get("HWBLACKBOX_DATA") or DEFAULT_DATA)
+    P = Paths(data_dir or DEFAULT_DATA)
     return P

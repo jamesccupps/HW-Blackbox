@@ -28,6 +28,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -1219,10 +1220,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def same_session(self):
+        """Is the program asking in this page's own Windows session? 127.0.0.1 is every signed-in user's, and the
+        session agent that took the port first serves them all: without this, a program of another user's could press
+        this user's buttons (the admin prompts on their screen, their notification settings) and read what this page
+        shows (the 2026-11-14 review's H4). A token in the page wouldn't stop it, since that program could read the
+        page too: Windows says which process holds the other end of the connection, and which session that's in."""
+        try:
+            pid = winapi.tcp_client_pid(self.client_address, self.server.server_address[1])
+            return pid is not None and winapi.session_of(pid) == winapi.session_of()
+        except Exception:
+            return False
+
+    def other_session(self):
+        self.send(403, ("HW Blackbox: this dashboard belongs to another user signed in to this PC (the first "
+                        "session to sign in serves it). Open it in that session; once that user signs out, this "
+                        "session's own takes over within a minute.").encode("utf-8"), "text/plain; charset=utf-8")
+
     def do_GET(self):
         host = (self.headers.get("Host") or "").lower()
         if host not in self.server.allowed_hosts:
             self.send(421, b"Misdirected request", "text/plain")   # (a DNS-rebinding page, or a typo)
+            return
+        if not self.same_session():
+            self.other_session()
             return
         url = urllib.parse.urlsplit(self.path)
         # The data only for this page itself (or a program that isn't a browser): a browser says where a request comes
@@ -1271,6 +1292,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.headers.get("Sec-Fetch-Site") != "same-origin" or self.headers.get("X-HWB") != "1":
             self.send(403, b"Only from the page itself", "text/plain")
+            return
+        if not self.same_session():
+            self.other_session()
             return
         Handler.last_request = time.time()
         fn = POSTS.get(urllib.parse.urlsplit(self.path).path)
@@ -1339,6 +1363,11 @@ def who_serves(port, wait=3.0):
                 j = json.loads(r.read(4096))
             if isinstance(j, dict) and j.get("app") == APP:
                 found.append("HW Blackbox, %s's" % j.get("user"))
+        except urllib.error.HTTPError as e:
+            # (another session's: it answers only its own, and says so: other_session)
+            with e:
+                if e.code == 403 and e.read(64).startswith(b"HW Blackbox: this dashboard belongs to another user"):
+                    found.append("HW Blackbox, another user's")
         except Exception:
             pass
     t = threading.Thread(target=ask, name="who-serves", daemon=True)

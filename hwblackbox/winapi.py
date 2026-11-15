@@ -82,6 +82,7 @@ def process_snapshot():
 # the TCP listeners -------------------------------------------------------------------------------------------------
 
 TCP_TABLE_OWNER_PID_LISTENER = 3
+TCP_TABLE_OWNER_PID_ALL = 5
 
 
 def tcp_listeners():
@@ -92,17 +93,7 @@ def tcp_listeners():
     sockets of outgoing connections as LISTEN, so those tools list the wrong ports. The listener table is right."""
     out = {}
     for family in (socket.AF_INET, socket.AF_INET6):
-        size = wintypes.DWORD(0)
-        iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
-        rc = 0
-        for _ in range(4):
-            buf = ctypes.create_string_buffer(size.value + 4096)
-            size = wintypes.DWORD(len(buf))
-            rc = iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
-            if rc != 122:                        # ERROR_INSUFFICIENT_BUFFER: the table grew meanwhile, again
-                break
-        if rc:
-            raise OSError(rc, "GetExtendedTcpTable")
+        buf = _tcp_table(family, TCP_TABLE_OWNER_PID_LISTENER)
         for i in range(struct.unpack_from("<I", buf, 0)[0]):
             if family == socket.AF_INET:         # MIB_TCPROW_OWNER_PID: state, local addr, port, remote x2, pid
                 _st, addr, port, _ra, _rp, pid = struct.unpack_from("<IIIIII", buf, 4 + i * 24)
@@ -115,6 +106,36 @@ def tcp_listeners():
             if pid:
                 out[(ip, socket.ntohs(port & 0xFFFF))] = pid
     return out
+
+
+def _tcp_table(family, kind):
+    """GetExtendedTcpTable's table (MIB_TCPTABLE_OWNER_PID or its IPv6 form) as bytes."""
+    size = wintypes.DWORD(0)
+    iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family, kind, 0)
+    rc = 0
+    for _ in range(4):
+        buf = ctypes.create_string_buffer(size.value + 4096)
+        size = wintypes.DWORD(len(buf))
+        rc = iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family, kind, 0)
+        if rc != 122:                            # ERROR_INSUFFICIENT_BUFFER: the table grew meanwhile, again
+            break
+    if rc:
+        raise OSError(rc, "GetExtendedTcpTable")
+    return buf
+
+
+def tcp_client_pid(client, server_port):
+    """The process that made a TCP connection to this PC's server_port (IPv4) from client, its (ip, port): from
+    Windows' own table of every TCP socket (TCP_TABLE_OWNER_PID_ALL), matched on the addresses alone, never the state
+    (garbage on some builds: see tcp_listeners). None when there's no such socket."""
+    ip, port = client[0], int(client[1])
+    buf = _tcp_table(socket.AF_INET, TCP_TABLE_OWNER_PID_ALL)
+    for i in range(struct.unpack_from("<I", buf, 0)[0]):
+        _st, addr, lport, _ra, rport, pid = struct.unpack_from("<IIIIII", buf, 4 + i * 24)
+        if (socket.ntohs(lport & 0xFFFF) == port and socket.ntohs(rport & 0xFFFF) == server_port
+                and socket.inet_ntoa(struct.pack("<I", addr)) == ip):
+            return pid
+    return None
 
 
 # sessions and users ------------------------------------------------------------------------------------------------

@@ -360,8 +360,10 @@ def check_hardware(x):
     """The hardware's own error reports (WHEA): a corrected error did no harm but is a sign of a part (or a setting)
     on the edge; a fatal one took Windows down (a blue screen, stop code 0x124)."""
     from .events import WHEA, WHEA_SHORT, hardware_error
-    recs = sorted((r["t"], hardware_error(r), r) for r in x.records if r.get("kind") == "winevent" and
-                  r.get("source") == WHEA and r.get("t") and x.now - r["t"] <= 7 * DAY)
+    # (by time only: two records of the same second and part would otherwise be compared as dicts, a TypeError, and
+    # the check failed exactly when errors came in bursts: the 2026-11-14 review's H5)
+    recs = sorted(((r["t"], hardware_error(r), r) for r in x.records if r.get("kind") == "winevent" and
+                   r.get("source") == WHEA and r.get("t") and x.now - r["t"] <= 7 * DAY), key=lambda x3: x3[0])
     if not recs:
         return finding("hardware", "Hardware errors", "ok", "None in the last 7 days", "the last 7 days",
                        link="#events")
@@ -412,7 +414,7 @@ def check_drives(x):
         advice.extend(t for t in tips if t not in advice)
     BACKUP = "Back up what's on it now (copy what matters to another drive or the cloud)."
     first = {}                                        # disk -> its oldest row of the month (the counters then)
-    for t, disk, vals in sorted(x.drive_rows):
+    for t, disk, vals in sorted(x.drive_rows, key=lambda row: row[0]):      # (by time: rows hold dicts)
         first.setdefault(disk, vals)
     for d in drives:
         disk, bits = d.get("disk"), [d.get("health") or "unknown"]

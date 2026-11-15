@@ -612,6 +612,13 @@ class HardeningTest(TempData):
         }
         for cmd, want in cases.items():
             self.assertEqual(redact(cmd), want, cmd)
+        # a long run of keywords with no value after it took seconds until 1.1.3 (12 s for 30,000 characters: the
+        # 2026-11-14 review's H2); Windows allows 32,767
+        for n in (2000, 4000, 10000):
+            t = time.perf_counter()
+            redact("-" + "key" * n)
+            redact("key" * n + "=")
+            self.assertLess(time.perf_counter() - t, 0.5, n)
 
     def test_history_reads_each_column_once(self):
         from unittest import mock
@@ -695,6 +702,32 @@ class HardeningTest(TempData):
         self.assertTrue(is_link(os.path.join(paths.P.sessions, "S-1-5-21-1-2-3-1009")))
         self.assertEqual([p for _, p in server.session_dirs()], [os.path.join(paths.P.sessions, me)])
         self.assertEqual(server.session_dirs()[0][0], winapi.user_name())        # (named by the account)
+        # the service reads a user's own files without following a link: a check of the path before an open can't
+        # hold, since the user can swap the file in between (the 2026-11-14 review's H3)
+        import win32security
+        from hwblackbox import agents
+        from hwblackbox.util import open_no_link
+        mine = os.path.join(paths.P.sessions, me)
+        beat = os.path.join(mine, "agent.json")
+        with open(beat, "w") as f:
+            f.write('{"session": 1}')
+        hb, written = agents.read_own_json(beat)
+        self.assertEqual(hb, {"session": 1})
+        self.assertAlmostEqual(written, os.path.getmtime(beat), delta=1)
+        _winapi.CreateJunction(target, os.path.join(mine, "front.json"))
+        self.assertEqual(agents.read_own_json(os.path.join(mine, "front.json")), (None, None))
+        with self.assertRaises(OSError):
+            open_no_link(os.path.join(mine, "front.json"))
+        # giving the files back their permissions leaves a junction, and what it points at, alone; and a moved folder
+        # that's become a link isn't given the user's permissions
+        dacl = lambda p: win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(       # noqa: E731
+            win32security.GetFileSecurity(p, win32security.DACL_SECURITY_INFORMATION), 1,
+            win32security.DACL_SECURITY_INFORMATION)
+        before = dacl(target)
+        agents.inherit_children(mine, me)
+        self.assertEqual(dacl(target), before)
+        self.assertFalse(agents._make_theirs(os.path.join(mine, "front.json"), me, False))
+        self.assertEqual(dacl(target), before)
 
     def test_each_users_folder_is_theirs(self):
         # the service's side: a folder another user made first (anyone could, before 1.1.0) is moved aside; an older
@@ -782,6 +815,33 @@ class HardeningTest(TempData):
             self.assertEqual(get("/api/ping"), 200)                              # (a program: the installer's check)
             self.assertEqual(get("/", "cross-site"), 200)                        # (a link to the page from elsewhere)
             self.assertEqual(server.who_serves(port)[:11], "HW Blackbox")
+            # only from this page's own Windows session: 127.0.0.1 is every signed-in user's (the 2026-11-14 review's
+            # H4). Windows' table names this process as the one at the other end of a connection from here.
+            import socket
+            from unittest import mock
+            from hwblackbox import winapi
+            c = socket.create_connection(("127.0.0.1", port))
+            try:
+                self.assertEqual(winapi.tcp_client_pid(c.getsockname(), port), os.getpid())
+            finally:
+                c.close()
+
+            def post(path):
+                req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=b"{}", method="POST",
+                                             headers={"Sec-Fetch-Site": "same-origin", "X-HWB": "1"})
+                try:
+                    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    return e.code
+            self.assertEqual(post("/api/nothing-here"), 404)                    # (this session: on to the routes)
+            with mock.patch.object(server.winapi, "session_of", lambda pid=None: 2 if pid else 1):
+                self.assertEqual(get("/api/ping", "same-origin"), 403)
+                self.assertEqual(get("/"), 403)
+                self.assertEqual(post("/api/nothing-here"), 403)
+                self.assertEqual(server.who_serves(port), "HW Blackbox, another user's")
+            with mock.patch.object(server.winapi, "tcp_client_pid", lambda client, server_port: None):
+                self.assertEqual(get("/api/ping"), 403)
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -1282,7 +1342,9 @@ class UpdateTest(TempData):
             def _open(url, timeout):
                 return io.BytesIO(json.dumps(rel).encode() if url == update.LATEST else served)
             return _open
-        signed = mock.patch.object(update, "signatures", lambda files: [("Valid", update.PUBLISHER + ", C=US")] * 2)
+        ekus = ["1.3.6.1.4.1.311.97.1.0", "1.3.6.1.5.5.7.3.3", update.IDENTITY]
+        signed = mock.patch.object(update, "signatures",
+                                   lambda files: [("Valid", update.PUBLISHER + ", C=US", ekus)] * 2)
         with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"), \
                 signed:
             self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 0)
@@ -1291,6 +1353,9 @@ class UpdateTest(TempData):
             text = f.read()
         self.assertIn(os.path.join(staging, "1.0.10", "HWBlackbox", "install.ps1"), text)
         self.assertIn('set "PSModulePath=%s"' % os.path.join(update.POWERSHELL, "Modules"), text)
+        # (programs by their full path, never a bare name cmd would look for in the folder it runs in first)
+        self.assertIn('"%s" -NoProfile' % os.path.join(update.POWERSHELL, "powershell.exe"), text)
+        self.assertNotRegex(text, r"(?m)^\s*(powershell(\.exe)?|timeout(\.exe)?) ")
         self.assertIn("signed by James Cupps", lines[-2])
         self.assertIn("dry run", lines[-1])
         lines.clear()
@@ -1300,9 +1365,15 @@ class UpdateTest(TempData):
         self.assertIn("its install.ps1 isn't signed by James Cupps (NotSigned)", lines[-2])
         for who in ("CN=Someone Else, O=Someone Else", "CN=James Cupps, O=James Cuppsy Ltd"):
             with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"), \
-                    mock.patch.object(update, "signatures", lambda files: [("Valid", who)] * 2):
+                    mock.patch.object(update, "signatures", lambda files: [("Valid", who, ekus)] * 2):
                 self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
             self.assertIn("isn't signed by James Cupps (Valid, by %s)" % who, lines[-2])
+        # the right name, but not the signing identity (another certificate authority's certificate in that name)
+        with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.9"), \
+                mock.patch.object(update, "signatures",
+                                  lambda files: [("Valid", update.PUBLISHER + ", C=US", ["1.3.6.1.5.5.7.3.3"])] * 2):
+            self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 1)
+        self.assertIn("not with James Cupps's signing identity", lines[-2])
         unsigned = self.zip_of("1.0.10")                                # (a release before signing: no catalog)
         rel = self.release(data=unsigned)
         with mock.patch.object(update, "_open", fake_open(unsigned)), mock.patch.object(update, "VERSION", "1.0.9"), \
@@ -1316,7 +1387,8 @@ class UpdateTest(TempData):
             f.write("'not signed'\n")
         ms, mine = update.signatures([os.path.join(update.POWERSHELL, "powershell.exe"), plain])
         self.assertEqual((ms[0], ms[1].split(",")[0]), ("Valid", "CN=Microsoft Windows"))
-        self.assertEqual(mine, ("NotSigned", ""))
+        self.assertIn("1.3.6.1.5.5.7.3.3", ms[2])                       # (code signing, among its key usages)
+        self.assertEqual(mine, ("NotSigned", "", []))
         lines.clear()
         lines.clear()
         tampered = data[:-1] + bytes([data[-1] ^ 1])                    # (one bit changed on the way)
@@ -1332,6 +1404,52 @@ class UpdateTest(TempData):
         with mock.patch.object(update, "_open", fake_open(data)), mock.patch.object(update, "VERSION", "1.0.10"):
             self.assertEqual(update.run(dry_run=True, staging=staging, out=lines.append), 0)
         self.assertEqual(lines[-1], "This is the newest version.")
+
+    def test_windows_folders_come_from_windows(self):
+        # A program running as the user can set that user's environment variables for every program started after,
+        # the elevated update and installer included: Windows' folders come from Windows, and the data folder can't be
+        # moved by a variable (until 1.1.3 HWBLACKBOX_DATA did: the 2026-11-14 review's H1)
+        import re
+        from unittest import mock
+        from hwblackbox import update
+        data, files, system = (paths.known_folder(paths.PROGRAM_DATA, None),
+                               paths.known_folder(paths.PROGRAM_FILES, None), paths.system_dir())
+        self.assertTrue(data and files and os.path.isdir(data) and os.path.isdir(files) and os.path.isdir(system))
+        with mock.patch.dict(os.environ, {"ProgramData": self.dir, "ProgramFiles": self.dir, "SystemRoot": self.dir,
+                                          "HWBLACKBOX_DATA": self.dir}):
+            self.assertEqual((paths.known_folder(paths.PROGRAM_DATA, None), paths.known_folder(paths.PROGRAM_FILES, None),
+                              paths.system_dir()), (data, files, system))
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for name in ("paths.py", "update.py"):
+            with open(os.path.join(root, "hwblackbox", name), encoding="utf-8") as f:
+                self.assertIsNone(re.search(r"environ\.get\(\"(ProgramData|ProgramFiles|SystemRoot|HWBLACKBOX_DATA)",
+                                            f.read()), name)
+        with open(os.path.join(root, "install.ps1"), encoding="ascii") as f:
+            code = [ln for ln in f.read().splitlines() if not ln.lstrip().startswith("#")]
+        self.assertEqual([ln for ln in code if re.search(r"\$env:(ProgramFiles|ProgramData|SystemRoot|windir|TEMP)", ln, re.I)],
+                         [])
+        # the real update's staging folder: made again, for SYSTEM and the administrators only, in a folder of theirs
+        from hwblackbox.agents import ADMINS, SYSTEM, owner_of
+        staging = os.path.join(self.dir, "update")
+        if owner_of(self.dir) in (SYSTEM, ADMINS):          # (elevated, as on GitHub's runner)
+            import _winapi
+            import win32security
+            elsewhere = os.path.join(self.dir, "elsewhere")
+            os.makedirs(elsewhere)
+            open(os.path.join(elsewhere, "keep.txt"), "w").close()
+            _winapi.CreateJunction(elsewhere, staging)         # (a link there: removed, never followed)
+            update._admins_folder(staging)
+            self.assertTrue(os.path.exists(os.path.join(elsewhere, "keep.txt")))
+            os.makedirs(os.path.join(staging, "left"))
+            update._admins_folder(staging)
+            self.assertEqual((os.listdir(staging), owner_of(staging)), ([], ADMINS))
+            sddl = win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(
+                win32security.GetFileSecurity(staging, win32security.DACL_SECURITY_INFORMATION), 1,
+                win32security.DACL_SECURITY_INFORMATION)
+            self.assertEqual(sorted(re.findall(r";;;([A-Z]{2}|S-[\d-]+)\)", sddl)), ["BA", "SY"])
+        else:                                               # (a folder the user owns: refused)
+            with self.assertRaises(ValueError):
+                update._admins_folder(staging)
 
     def test_the_pages_check(self):
         from unittest import mock
@@ -1549,6 +1667,10 @@ class DiagnoseTest(unittest.TestCase):
         self.assertFalse(any("MemTest86" in a for a in c["advice"]))               # (the memory's was 8 days ago)
         c = self.run_(records=[whea(18, "error", 120)])["hardware"]
         self.assertEqual((c["level"], c["summary"]), ("bad", "1 hardware error in the last 7 days, 1 fatal"))
+        # a burst: two of the same second and part (until 1.1.3 sorting them compared their dicts, and the check
+        # failed as "A check couldn't run": the 2026-11-14 review's H5)
+        c = self.run_(records=[whea(19, "warning", 60), whea(19, "warning", 60)])["hardware"]
+        self.assertEqual(c["summary"], "2 hardware errors in the last 7 days")
 
     def test_drives(self):
         now = time.time()
@@ -1562,7 +1684,8 @@ class DiagnoseTest(unittest.TestCase):
         self.assertNotIn("drives", self.run_())                                     # (nothing known: no finding)
         # a drive that's run hot and worn out, and whose uncorrectable errors grew this month
         bad = [dict(ok[0]), dict(ok[1], temp_c=74, wear_pct=100, read_err_unc=3)]
-        rows = [(now - 20 * 86400, 1, {"read_err_unc": 1, "write_err_unc": 0})]
+        rows = [(now - 20 * 86400, 1, {"read_err_unc": 1, "write_err_unc": 0}),
+                (now - 20 * 86400, 1, {"read_err_unc": 1, "write_err_unc": 0})]           # (the same hour twice)
         c = self.run_(drives={"drives": bad}, drive_rows=rows)["drives"]
         self.assertEqual(c["level"], "bad")
         self.assertIn("3 errors it couldn't correct (+2 this month)", c["seen"][1])
@@ -1840,6 +1963,10 @@ class NewIn110Test(TempData):
         for ln in runs:
             self.assertIn("python.exe -B ", ln, ln)
         self.assertIn("name: The zip holds what was checked", job)
+        # and on users' PCs: the .pyc files are never compared with their sources' times (which an unzip resets), so
+        # the installed program never rewrites them in Program Files
+        with open(os.path.join(root, "tools", "build.py"), encoding="utf-8") as f:
+            self.assertIn('"--invalidation-mode", "unchecked-hash"', f.read())
         self.assertLess(job.index("name: The zip, and its SHA-256"), job.index("name: The zip holds what was checked"))
 
     def test_setup_runs_the_installer_beside_it(self):
@@ -1880,6 +2007,7 @@ class NewIn110Test(TempData):
             code = f.read()
         self.assertNotIn("-EncodedCommand", code)          # (a dropper's look: antivirus flagged the first Setup.exe)
         self.assertIn("[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]", code)
+        self.assertIn("Identity(its) != Identity(mine)", code)          # (the signing identity, besides the name)
         os.remove(os.path.join(d, "install.ps1"))                         # (unzipped without it)
         r = subprocess.run([exe], capture_output=True, text=True, timeout=60, input="x")
         self.assertEqual(r.returncode, 1)

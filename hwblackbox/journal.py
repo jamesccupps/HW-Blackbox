@@ -6,7 +6,7 @@ import os
 import threading
 import time
 
-from .util import now_iso, prune
+from .util import now_iso, open_no_link, prune
 
 
 class Journal:
@@ -71,12 +71,13 @@ class Journal:
                 self.fh = None
 
 
-def read_tail(path, seconds, limit_bytes=2 << 20):
-    """Records from the end of a journal file written in the last `seconds` (for another process's journal)."""
+def read_tail(path, seconds, limit_bytes=2 << 20, nofollow=False):
+    """Records from the end of a journal file written in the last `seconds` (for another process's journal).
+    nofollow: a link isn't followed (util.open_no_link)."""
     cutoff = time.time() - seconds
     out = []
     try:
-        with open(path, "rb") as f:
+        with (open_no_link(path) if nofollow else open(path, "rb")) as f:
             f.seek(0, 2)
             size = f.tell()
             f.seek(max(0, size - limit_bytes))

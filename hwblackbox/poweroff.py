@@ -22,7 +22,7 @@ CREATE_NO_WINDOW = 0x08000000
 
 def _wevtutil(query, count):
     try:
-        r = subprocess.run(["wevtutil", "qe", "System", "/q:" + query, "/c:%d" % count, "/rd:true", "/f:text"],
+        r = subprocess.run([os.path.join(paths.system_dir(), "wevtutil.exe"), "qe", "System", "/q:" + query, "/c:%d" % count, "/rd:true", "/f:text"],
                            capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
         # (the 6008 description ends in a NUL, and its date's direction marks come out as "?")
         return re.sub(r"\?(?=\d)", "", r.stdout.replace("\x00", "")).strip()

@@ -123,16 +123,56 @@ def ensure_line_end(path):
         pass
 
 
-def read_json(path, limit=16 << 20):
-    """The file's JSON, or None (missing, unreadable, damaged, or bigger than `limit` bytes)."""
+def read_json(path, limit=16 << 20, nofollow=False):
+    """The file's JSON, or None (missing, unreadable, damaged, or bigger than `limit` bytes). nofollow: a link isn't
+    followed (open_no_link)."""
     try:
-        with open(path, "rb") as f:
+        with (open_no_link(path) if nofollow else open(path, "rb")) as f:
             data = f.read(limit + 1)
-        if len(data) > limit:
+        return json_of(data, limit)
+    except Exception:
+        return None
+
+
+def json_of(data, limit=16 << 20):
+    """bytes' JSON, or None (damaged, or bigger than `limit`)."""
+    try:
+        if data is None or len(data) > limit:
             return None
         return json.loads(data.decode("utf-8-sig"))         # (a byte-order mark: Notepad, PowerShell 5's utf8)
     except Exception:
         return None
+
+
+def open_no_link(path):
+    """A file opened for reading (binary) without following a link: OSError when the path itself is a junction or a
+    symbolic link, or a folder. For the service reading a user's own folder as SYSTEM: a link there to a share would
+    make it sign in to that share as the PC (the 2026-11-14 review's H3); and a check of the path before an open()
+    can't hold, since the user can swap the file in between. Opened sharing delete too, so the agent can still swap a
+    new file in while it's read."""
+    import msvcrt
+    import pywintypes
+    import win32file
+    try:
+        h = win32file.CreateFile(path, win32file.GENERIC_READ,
+                                 win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE | win32file.FILE_SHARE_DELETE,
+                                 None, win32file.OPEN_EXISTING, OPEN_REPARSE_POINT | win32file.FILE_ATTRIBUTE_NORMAL,
+                                 None)
+    except pywintypes.error as e:
+        raise OSError(e.winerror, e.strerror, path)
+    try:
+        attrs = win32file.GetFileInformationByHandle(h)[0]
+        if attrs & (REPARSE_POINT | 0x10):                    # (FILE_ATTRIBUTE_DIRECTORY)
+            raise OSError("%s is a link or a folder: not read" % path)
+        fd = msvcrt.open_osfhandle(h.Detach(), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except BaseException:
+        h.Close()
+        raise
+    return os.fdopen(fd, "rb")
+
+
+REPARSE_POINT = 0x400                  # FILE_ATTRIBUTE_REPARSE_POINT
+OPEN_REPARSE_POINT = 0x00200000        # FILE_FLAG_OPEN_REPARSE_POINT
 
 
 def write_json(path, data, durable=False, indent=None):
