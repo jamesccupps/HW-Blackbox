@@ -1969,6 +1969,41 @@ class NewIn110Test(TempData):
             self.assertIn('"--invalidation-mode", "unchecked-hash"', f.read())
         self.assertLess(job.index("name: The zip, and its SHA-256"), job.index("name: The zip holds what was checked"))
 
+    def test_the_virustotal_line(self):
+        # tools/virustotal.py (the release's VirusTotal job): only a major engine's flag stops a release, and the line
+        # it puts in a draft's notes goes under "Check the download", replaces an earlier one, and never changes the
+        # SHA-256 the updater reads from the notes
+        import importlib.util
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("virustotal", os.path.join(root, "tools", "virustotal.py"))
+        vt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(vt)
+        res = {"Microsoft": {"category": "undetected"}, "Bkav": {"category": "malicious", "result": "W32.AIDetect"},
+               "Avira": {"category": "harmless"}, "Cylance": {"category": "type-unsupported"}}
+        self.assertEqual(vt.tally(res), (3, [("Bkav", "malicious", "W32.AIDetect")], []))
+        res["Microsoft"] = {"category": "suspicious", "result": "Trojan:Win32/Wacatac"}
+        self.assertEqual(vt.tally(res)[2], [("Microsoft", "suspicious", "Trojan:Win32/Wacatac")])
+
+        h = "ab" * 32
+        with open(os.path.join(root, "release-notes", "v1.1.3.md"), encoding="utf-8") as f:
+            notes = f.read().replace("{SHA256}", h)
+        line = (vt.MARK + "scanned when this was released: [HWBlackbox-win64.zip: 0 of 66 engines flag it]"
+                "(https://www.virustotal.com/gui/file/" + "cd" * 32 + ").")
+        once = vt.into_notes(notes, line)
+        self.assertEqual(once, vt.into_notes(once, line))
+        self.assertEqual(once.count(vt.MARK), 1)
+        self.assertIn("\n\n" + line + "\n\n### Install or update", once)
+        self.assertLess(once.index("### Check the download"), once.index(vt.MARK))
+        self.assertEqual(re.search(r"SHA-256:\s*`([0-9a-fA-F]{64})`", once).group(1), h)
+        self.assertEqual(once.replace("\n" + line + "\n", ""), notes)
+        # no such heading: at the end
+        self.assertEqual(vt.into_notes("Notes.\n", line), "Notes.\n\n" + line + "\n")
+        # and never ahead of the notes' own SHA-256
+        with self.assertRaises(ValueError):
+            vt.into_notes("### Check the download\n\nx\n\n### Later\n\nSHA-256: `%s`\n" % h,
+                          vt.MARK + "SHA-256: `%s`" % ("cd" * 32))
+
     def test_setup_runs_the_installer_beside_it(self):
         # Setup.exe's own code, compiled here without its manifest (which asks for an administrator), so it runs as
         # is: install.ps1 from its folder, with -Pause, in its window, and its exit code passed back. (Unsigned, it

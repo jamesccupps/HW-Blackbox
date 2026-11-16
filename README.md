@@ -427,8 +427,9 @@ What `build.py` does:
 A release is built on GitHub (`.github/workflows/release.yml`, from a `v*` tag): the same build, then Setup.exe,
 `install.ps1` and a catalog of every file signed as James Cupps (`tools\sign_release.ps1`, Azure Artifact Signing
 through GitHub's own sign-in: no password or key is kept anywhere), the program run once as shipped, the zip, a
-statement of where it came from (`gh attestation verify`), and a draft release with the zip as
-`HWBlackbox-win64.zip`, the name the download links and the updater expect.
+statement of where it came from (`gh attestation verify`), a draft release with the zip as
+`HWBlackbox-win64.zip`, the name the download links and the updater expect, and VirusTotal's verdict on the zip and
+its Setup.exe (`tools\virustotal.py`), linked in the release notes.
 
 The tests: `.venv\Scripts\python.exe -m unittest discover -s tests`.
 

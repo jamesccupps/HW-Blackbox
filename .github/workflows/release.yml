@@ -1,7 +1,7 @@
 name: release
 
 # A release, from a v* tag: built on GitHub, Authenticode-signed, tested as shipped, attested, and left as a draft to
-# publish by hand. Five jobs, so that the signing identity never meets PyPI code or the program:
+# publish by hand. Six jobs, so that the signing identity never meets PyPI code or the program:
 #   build         the release folder (tools/build.py), from the hash-pinned packages (requirements.txt) and the NuGet
 #                 DLLs checked by SHA-256 (tools/fetch_lib.py); no secrets, no tokens
 #   authenticode  signs Setup.exe, install.ps1 and a catalog of every file (tools/sign_release.ps1) as James Cupps in
@@ -20,8 +20,12 @@ name: release
 #                   gh attestation verify HWBlackbox-win64.zip --repo jamesccupps/HW-Blackbox
 #   draft         the draft release: the notes (release-notes/vX.Y.Z.md, its {SHA256} filled in) and the zip as
 #                 HWBlackbox-win64.zip. Publishing it is by hand, after a look (CLAUDE.md: Releasing).
-# A tag vX.Y.Z-signtest.N (the version in the source plus the suffix) runs all but the draft, for trying a change to
-# signing. Don't release from it, and delete the tag afterwards. A run by hand builds and packages, unsigned.
+#   virustotal    VirusTotal's verdict on the zip and its Setup.exe (virustotal.yml, with the repository secret
+#                 VT_API_KEY): in the run's summary, and as a line in the draft's notes. A major engine flagging a file
+#                 fails it: don't publish that draft.
+# A tag vX.Y.Z-signtest.N (the version in the source plus the suffix) runs all but the draft (its VirusTotal verdict is
+# in the summary), for trying a change to signing. Don't release from it, and delete the tag afterwards. A run by hand
+# builds and packages, unsigned, and sends nothing to VirusTotal.
 
 on:
   push:
@@ -305,3 +309,16 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "HW Blackbox ${TAG#v}" --notes-file "$RUNNER_TEMP/notes.md" dist/HWBlackbox-win64.zip
           echo "::notice::Draft release $TAG: HWBlackbox-win64.zip, SHA-256 $h. Publish it by hand after a look."
+
+  virustotal:
+    needs: [package, draft]
+    # (a signing test too, which has no draft: the verdict is then in the summary only)
+    if: ${{ !cancelled() && needs.package.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.draft.result) && startsWith(github.ref, 'refs/tags/v') }}
+    permissions:
+      contents: write       # the line in the draft's notes
+    uses: ./.github/workflows/virustotal.yml
+    with:
+      tag: ${{ github.ref_name }}
+      from_run: true
+    secrets:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}

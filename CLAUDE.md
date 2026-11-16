@@ -20,8 +20,12 @@ changing or releasing it.
   `{SHA256}` where the zip's hash goes, commit, and push an annotated tag `vX.Y.Z`. `.github/workflows/release.yml`
   builds, signs (see Code signing), checks and zips it, attests it, and makes a draft release titled
   `HW Blackbox X.Y.Z` with the notes (their title line dropped, `{SHA256}` filled in) and the zip as
-  `HWBlackbox-win64.zip`. Look at the draft, then publish it as the latest release, not a pre-release. Never build the
-  release zip on a PC: it wouldn't be signed.
+  `HWBlackbox-win64.zip`. Then its `virustotal` job (`.github/workflows/virustotal.yml`, `tools/virustotal.py`, the
+  repository secret `VT_API_KEY` from James's free VirusTotal account) scans the zip and the Setup.exe in it: the
+  run's summary lists every engine that flags one, a major engine (`MAJOR`) flagging one fails the run, and the
+  draft's notes get a "VirusTotal, scanned when this was released" line under "Check the download" (never ahead of
+  the notes' `SHA-256:` line, which the updater reads). Look at the draft and that verdict, ask James, then publish it
+  as the latest release, not a pre-release. Never build the release zip on a PC: it wouldn't be signed.
 - The release folder must reach the zip exactly as the manifest and the catalog describe it. The package job runs the
   shipped Python only with `-B` (otherwise it rewrites the folder's own `__pycache__` files, whose sources have new
   times after the artifact round trip), and then unpacks the zip and checks it as the installer will
@@ -35,7 +39,8 @@ changing or releasing it.
   that's out: publish a new version instead.
 - `.github/workflows/checksums.yml` adds `SHA256SUMS.txt` to every published release (it never replaces one): keep
   its `contents: write`.
-- After publishing: the public download's hash, a dry run of the updater from the previous version
+- After publishing: the public download's hash (the SHA-256 VirusTotal scanned; running the VirusTotal workflow by
+  hand with the tag looks it up again, uploading nothing), a dry run of the updater from the previous version
   (`python -m hwblackbox update --dry-run --pretend-version X`), the tests' run on GitHub, the site.
 
 ## Code signing
@@ -64,9 +69,10 @@ unsigned tests never reach these signed paths, so a signed build's `package` job
 copy in Program Files must start the signed `install.ps1` (which stops at its "run the install from the built folder"
 guard, installing nothing) and refuse it with one byte changed (exit 3), and `update.check_signed` must take the one
 and refuse the other. A tag
-`vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag. Before a release, scan the
-signtest's signed Setup.exe and zip on VirusTotal; if the Bitdefender family still flags it, report that exact signed
-file to Bitdefender as a false positive, or fall back to Install.cmd beside the signed `install.ps1` and catalog.
+`vX.Y.Z-signtest.N` runs all but the draft: don't release from it, and delete the tag. Its `virustotal` job scans the
+signtest's signed Setup.exe and zip (the verdict is in the run's summary); if the Bitdefender family still flags it,
+report that exact signed file to Bitdefender as a false positive, or fall back to Install.cmd beside the signed
+`install.ps1` and catalog.
 
 ## Not in the Scoop bucket (deliberate)
 
