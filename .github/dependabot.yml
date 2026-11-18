@@ -1,0 +1,21 @@
+# Actions are pinned by commit SHA (tags can be moved, and the release job signs
+# an attestation). A pinned SHA goes stale silently, so Dependabot keeps them
+# current, once a month, in one pull request: it understands the `# v7.0.1`
+# comment convention and updates the SHA and the comment together.
+#
+# Python packages are left out on purpose. Their versions are pinned in three
+# places that must agree (requirements.txt with each wheel's hash, PINS in
+# tools/build.py, and tests.yml), and tools/build.py stops on any other version.
+# A Dependabot pull request would change only requirements.txt: its tests would
+# pass, and the next release build would stop.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
