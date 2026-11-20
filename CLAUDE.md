@@ -31,6 +31,10 @@ changing or releasing it.
   times after the artifact round trip), and then unpacks the zip and checks it as the installer will
   (`test_packaging_never_rewrites_the_release`). 1.1.1 shipped 81 rewritten `.pyc` files, so its installer refused
   every install and update; it was set back to a pre-release within the hour and 1.1.2 replaced it.
+- From 1.1.4 the package job also installs the release from the unpacked zip on the runner (Setup.exe for a signed
+  build, install.ps1 for a run by hand), checks the service, Program Files and Installed apps, then runs Installed
+  apps' own Uninstall command (read from the registry) and `-Uninstall -RemoveData`, and checks nothing is left. A
+  run by hand of release.yml on a branch tries it unsigned before a tag.
 - The build compiles every `.pyc` as an unchecked hash (`--invalidation-mode unchecked-hash`): Python never compares
   them with their sources' times, which an unzip resets, so the installed program never rewrites them (it did until
   1.1.3). An edit to a `.py` in a built folder doesn't take: build again.

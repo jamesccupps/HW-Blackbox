@@ -151,6 +151,11 @@ def cmd_init(args):
     """The data folders, and config.json with the defaults (and --set) unless there is one."""
     from . import config
     from .util import write_json
+    try:
+        config.check_settings(args.set or [])
+    except ValueError as e:
+        print("Nothing written: %s" % e)
+        return 2
     paths.P.make("logs", "state", "incidents", "sessions", "secrets")
     if os.path.exists(paths.P.config) and not args.force:
         print("kept the existing %s" % paths.P.config)
@@ -165,27 +170,27 @@ def cmd_init(args):
 
 
 def apply_setting(cfg, item):
-    """KEY=VALUE, KEY dotted ("dashboard.port=9070"); VALUE as JSON when it is (true, 9070, [..]), else text."""
-    key, _, raw = item.partition("=")
-    try:
-        val = json.loads(raw)
-    except ValueError:
-        val = raw
-    node = cfg
-    parts = key.strip().split(".")
-    for p in parts[:-1]:
-        node = node.setdefault(p, {})
-    node[parts[-1]] = val
+    """KEY=VALUE, KEY dotted ("dashboard.port=9070"); VALUE as JSON when it is (true, 9070, [..]), else text. (Check
+    them first: config.check_settings.)"""
+    from . import config
+    parts, val = config.parse_item(item)
+    config.put(cfg, parts, val, item)
 
 
 def cmd_set(args):
+    from . import config
     from .util import read_json, write_json
     cfg = read_json(paths.P.config)
     if not isinstance(cfg, dict):
         print("No readable %s (run init first)" % paths.P.config)
         return 1
-    for item in args.items:
-        apply_setting(cfg, item)
+    try:
+        config.check_settings(args.items)
+        for item in args.items:
+            apply_setting(cfg, item)
+    except ValueError as e:
+        print("Not changed: %s" % e)
+        return 2
     write_json(paths.P.config, cfg, indent=2)
     print("updated %s: %s" % (paths.P.config, ", ".join(args.items)))
     return 0

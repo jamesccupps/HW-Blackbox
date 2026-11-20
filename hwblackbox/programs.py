@@ -5,7 +5,8 @@ The CPU and memory come from the process list the watcher takes every 2 s anyway
 over every process's CPU time and memory with it). The GPU's come from Windows' own GPU counters (the ones Task
 Manager's GPU columns use, for any make of GPU), read once a minute on a thread of their own.
 
-  logs\programs_YYYYMMDD.csv   timestamp, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid
+  logs\programs_YYYYMMDD.csv   timestamp, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid,
+                               mem_pid, mem_cmd
 
   timestamp   the end of the minute
   seconds     how long that "minute" was (a little more after a stall)
@@ -15,14 +16,20 @@ Manager's GPU columns use, for any make of GPU), read once a minute on a thread 
   vram_mb     their dedicated graphics memory (blank when Windows' GPU counters can't be read)
   gpu_pct     their share of the busiest GPU engine (3D, video decode, copy...), as Task Manager's GPU column
   processes   how many processes it had; pid: the busiest one (by CPU, else by memory)
+  mem_pid     for a program holding BIG_MB or more: its biggest process at the minute's peak, and mem_cmd, that
+  mem_cmd     process's command line (secrets hidden, as on the Ports tab; with the folder it runs in when it names no
+              full path). Chrome's dozens of processes are one row, and so are all of Python's scripts: on 2026-11-19
+              "python.exe (26.9 GB)" ran Windows out of memory, and nothing said which script it was. (1.1.4)
+
+A text a spreadsheet would take for a formula (=, +, -, @ first) is written with a ' before it, and read without.
 
 A program is written for a minute when it's among the TOP busiest or biggest in any of these (and over that one's
 threshold). Two rows that aren't programs are written every minute: "System interrupts", the time the processors
 spent on drivers' interrupts and DPCs, which Windows charges to no process (Task Manager's row of that name), and
 "(all)", everything together. A process that ends between two looks loses at most its last 2 s of CPU.
 
-1.0.7 wrote logs\cpu_YYYYMMDD.csv (the CPU alone: timestamp, seconds, program, cpu_s, processes, pid); read_rows
-reads both. On 2026-11-05 a core was kept busy all night by something, and only Windows' running totals were left to
+1.0.7 wrote logs\cpu_YYYYMMDD.csv (the CPU alone: timestamp, seconds, program, cpu_s, processes, pid), and 1.0.8 to
+1.1.3 these columns without mem_pid and mem_cmd; read_rows reads all three. On 2026-11-05 a core was kept busy all night by something, and only Windows' running totals were left to
 point at the desktop compositor (dwm.exe), most likely: this log shows that kind of thing minute by minute."""
 import collections
 import csv
@@ -34,12 +41,17 @@ import time
 import psutil
 
 from . import paths
-from .util import ensure_line_end, now_iso, open_log, parse_iso, prune
+from .ports import redact
+from .util import csv_safe, csv_text, ensure_line_end, now_iso, open_log, parse_iso, prune
 
 PREFIX = "programs_"
 OLD_PREFIX = "cpu_"                                  # (1.0.7)
-COLUMNS = ["timestamp", "seconds", "program", "cpu_s", "mem_mb", "vram_mb", "gpu_pct", "processes", "pid"]
+COLUMNS = ["timestamp", "seconds", "program", "cpu_s", "mem_mb", "vram_mb", "gpu_pct", "processes", "pid",
+           "mem_pid", "mem_cmd"]
+MID_COLUMNS = COLUMNS[:9]                            # (1.0.8 to 1.1.3)
 OLD_COLUMNS = ["timestamp", "seconds", "program", "cpu_s", "processes", "pid"]
+BIG_MB = 1024                    # a program this big gets its biggest process's command line in the log
+CMD_CHARS = 200
 # what makes a program worth a row for the minute: among the TOP in one of these, and over its threshold
 TOP = 12
 MIN_SHARE = 0.01                 # of one core over the minute
@@ -58,6 +70,23 @@ def path_for(day, prefix=PREFIX):
     return os.path.join(paths.P.logs, "%s%s.csv" % (prefix, str(day).replace("-", "")))
 
 
+def command_of(pid):
+    """A process's command line for the log: its arguments with what looks like a secret hidden (as on the Ports tab),
+    and the folder it runs in when they name no full path ("app.py" says little), cut to CMD_CHARS; None when Windows
+    won't tell."""
+    try:
+        p = psutil.Process(pid)
+        cmd = redact(" ".join(p.cmdline()[1:])) or ""
+    except Exception:
+        return None
+    if not re.search(r"[A-Za-z]:\\|\\\\", cmd):
+        try:
+            cmd = ("%s (in %s)" % (cmd, p.cwd())).strip()
+        except Exception:
+            pass
+    return cmd[:CMD_CHARS] or None
+
+
 def interrupt_seconds():
     """The processors' time on interrupts and DPCs since boot, all of them together (None if Windows won't say)."""
     try:
@@ -72,8 +101,9 @@ def _num(text, kind=float):
 
 
 def read_rows(path):
-    """[(epoch, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid)] from a day's log, this version's
-    or 1.0.7's (no memory or GPU: None); damaged rows skipped."""
+    """[(epoch, seconds, program, cpu_s, mem_mb, vram_mb, gpu_pct, processes, pid, mem_pid, mem_cmd)] from a day's
+    log, this version's, 1.0.8's to 1.1.3's (no mem_pid or mem_cmd: None) or 1.0.7's (no memory or GPU either);
+    damaged rows skipped."""
     out = []
     last = None
     try:
@@ -86,12 +116,14 @@ def read_rows(path):
                     continue
                 last = t
                 try:
-                    if len(row) == len(COLUMNS):
-                        out.append((t, float(row[1]), row[2], float(row[3]), _num(row[4]), _num(row[5]),
-                                    _num(row[6]), int(row[7] or 0), _num(row[8], int)))
+                    if len(row) in (len(COLUMNS), len(MID_COLUMNS)):
+                        more = (_num(row[9], int), csv_text(row[10]) or None) if len(row) == len(COLUMNS) else \
+                            (None, None)
+                        out.append((t, float(row[1]), csv_text(row[2]), float(row[3]), _num(row[4]), _num(row[5]),
+                                    _num(row[6]), int(row[7] or 0), _num(row[8], int)) + more)
                     elif len(row) == len(OLD_COLUMNS):
                         out.append((t, float(row[1]), row[2], float(row[3]), None, None, None, int(row[4] or 0),
-                                    _num(row[5], int)))
+                                    _num(row[5], int), None, None))
                 except ValueError:
                     continue
     except OSError:
@@ -178,6 +210,8 @@ class ProgramLog:
         self.irq_mark = None         # interrupt + DPC seconds then
         self.acc = {}                # program -> [CPU time in 100 ns, {pid: CPU time}] since then
         self.mem = {}                # program -> the most private bytes it held at a look this minute
+        self.mem_top = {}            # program -> (bytes, pid) of its biggest process at a look this minute
+        self.cmds = {}               # pid -> (its start time, its command line): processes of BIG_MB or more
         self.last = {}               # program -> (processes, the biggest pid by memory) at the latest look
         self.names = {}              # pid -> program, at the latest look
         self.gpu = GpuCounters()
@@ -204,6 +238,13 @@ class ProgramLog:
         for name, b in mem.items():
             if b > self.mem.get(name, 0):
                 self.mem[name] = b
+        for name, (_n, top) in big.items():
+            p = snap[top]
+            if p.private > (self.mem_top.get(name) or (0, None))[0]:
+                self.mem_top[name] = (p.private, top)
+            # (looked up while it runs, and once: it may be gone by the minute's end)
+            if p.private >= BIG_MB * 2**20 and (self.cmds.get(top) or (None,))[0] != p.created:
+                self.cmds[top] = (p.created, command_of(top))
         self.last, self.names = big, names
         if self.prev is None:
             self.prev, self.began, self.irq_mark = (now, wall, cur), now, interrupt_seconds()
@@ -274,15 +315,20 @@ class ProgramLog:
         for name in pick:
             a = self.acc.get(name)
             pid = max(a[1], key=a[1].get) if a else (self.last.get(name) or (0, None))[1]
+            top_b, top_pid = self.mem_top.get(name) or (0, None)
+            big = top_b >= BIG_MB * 2**20 and top_pid in self.cmds
             rows.append((name, cpu.get(name, 0.0), mem.get(name), None if vram is None else vram.get(name, 0.0),
-                         None if gpu is None else gpu.get(name, 0.0), (self.last.get(name) or (0, None))[0], pid))
+                         None if gpu is None else gpu.get(name, 0.0), (self.last.get(name) or (0, None))[0], pid,
+                         top_pid if big else None, self.cmds[top_pid][1] if big else None))
         rows.sort(key=lambda r: (-r[1], -(r[2] or 0)))
-        rows.append((INTERRUPTS, irq_s, None, None, None, 0, None))
+        rows.append((INTERRUPTS, irq_s, None, None, None, 0, None, None, None))
         rows.append((ALL, sum(cpu.values()) + irq_s, sum(mem.values()), None if every is None else every[0],
-                     None if every is None else every[1], len(self.prev[2]), None))
+                     None if every is None else every[1], len(self.prev[2]), None, None, None))
         self.write(now_iso(), secs, rows)
         self.recent.append((time.time(), secs, rows))
-        self.acc, self.mem, self.began, self.irq_mark = {}, {}, self.prev[0], irq
+        self.acc, self.mem, self.mem_top, self.began, self.irq_mark = {}, {}, {}, self.prev[0], irq
+        for pid in [p for p in self.cmds if p not in self.names]:      # (ended)
+            del self.cmds[pid]
         return rows
 
     def write(self, ts, secs, rows):
@@ -296,8 +342,9 @@ class ProgramLog:
             w = csv.writer(f)
             if new:
                 w.writerow(COLUMNS)
-            w.writerows([ts, round(secs, 1), name, round(cpu_s, 2), r(mem, 1), r(vram, 1), r(gpu, 1), n,
-                         "" if pid is None else pid] for name, cpu_s, mem, vram, gpu, n, pid in rows)
+            w.writerows([ts, round(secs, 1), csv_safe(name), round(cpu_s, 2), r(mem, 1), r(vram, 1), r(gpu, 1), n,
+                         "" if pid is None else pid, "" if mem_pid is None else mem_pid, csv_safe(mem_cmd or "")]
+                        for name, cpu_s, mem, vram, gpu, n, pid, mem_pid, mem_cmd in rows)
         if day != self.day:
             if self.day is not None:            # a new day: the clean-up
                 prune(paths.P.logs, PREFIX, ".csv", self.keep_days)
@@ -310,7 +357,7 @@ class ProgramLog:
         used, secs, procs = collections.Counter(), 0.0, {}
         for _t, s, rows in list(self.recent)[-minutes:]:
             secs += s
-            for name, cpu_s, _m, _v, _g, k, pid in rows:
+            for name, cpu_s, _m, _v, _g, k, pid, _mp, _mc in rows:
                 if name != ALL and cpu_s > 0:
                     used[name] += cpu_s
                     procs[name] = (k, pid)

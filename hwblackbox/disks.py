@@ -33,7 +33,8 @@ def fmt_minutes(m):
 
 
 def system_drive():
-    return (os.environ.get("SystemDrive") or "C:").rstrip("\\").upper()
+    """The drive Windows is on ("C:"), from Windows itself (paths.system_dir), not the SystemDrive variable."""
+    return (os.path.splitdrive(paths.system_dir())[0] or "C:").upper()
 
 
 def fixed_drives():

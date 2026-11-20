@@ -121,7 +121,8 @@ class Inputs:
         self.sensors = d.get("sensors") or []
         self.flight_t = d.get("flight_t") or []
         self.flight = d.get("flight") or {}
-        self.programs = d.get("programs") or []          # (epoch, seconds, program, cpu, mem, vram, gpu, n, pid)
+        self.programs = d.get("programs") or []          # (epoch, seconds, program, cpu, mem, vram, gpu, n, pid,
+        #                                                   mem_pid, mem_cmd): programs.read_rows
         self.power_offs = d.get("power_offs") or []
         self.records = d.get("records") or []            # the service's exits and Windows' records, with "t"
         self.displays = sorted(d.get("displays") or [])  # when the screens changed
@@ -164,6 +165,16 @@ class Inputs:
             key = lambda r: r[col]                        # noqa: E731
             fmt = lambda r: "%s (%s)" % (r[2], mb(r[col]) if unit == "MB" else "%.0f %%" % r[col])  # noqa: E731
         return [fmt(r) for r in sorted(rows, key=key, reverse=True)[:n] if key(r) > 0]
+
+    def big_processes_at(self, t, n=2):
+        """For the biggest programs at time t that the log names a process for (1.1.4 on, programs of 1 GB or more):
+        "python.exe's biggest process: pid 34964, app.py (in C:\\...)". All of Python's scripts are one program."""
+        rows = [r for r in (self.minute_at(t) or []) if len(r) > 10 and r[10] and r[4] is not None]
+        return [process_line(r) for r in sorted(rows, key=lambda r: -r[4])[:n]]
+
+
+def process_line(r):
+    return "%s's biggest process: pid %s, %s" % (r[2], r[9] if r[9] is not None else "?", r[10])
 
 
 def cores(c):
@@ -638,6 +649,9 @@ def check_memory(x):
                 seen.append("%s right after the screens changed (a remote session, a monitor, the resolution or "
                             "scaling)" % ("Each jump came" if len(screens) == len(jumps) else
                                           "%d of the jumps came" % len(screens)))
+        last = (x.by_program.get(prog) or [None])[-1]
+        if last is not None and len(last) > 10 and last[10]:
+            seen.append(process_line(last))
         known = KNOWN.get(prog)
         if known:
             seen.insert(0, "%s is %s." % (prog, known["what"]))
@@ -675,6 +689,7 @@ def check_ram(x):
         big = x.leaders_at(t_hi, 4, 4, "MB")
         if big:
             seen.append("The biggest then: " + ", ".join(big))
+            seen.extend(x.big_processes_at(t_hi))
     seen.extend("%s: Windows ran low on memory (Resource-Exhaustion-Detector 2004)" % when(t, x.now) for t in low[-4:])
     return finding("ram", "Memory (RAM)", level, summary, "the last 24 hours (7 days for low-memory warnings)", seen,
                    ["Close what you don't need: the biggest programs are listed above, and on the Processes tab.",
@@ -795,23 +810,27 @@ def check_battery(x):
 
 
 def check_disk(x):
+    from .disks import system_drive
     pc = x.status.get("pc") or {}
     warn = x.cfg.get("disk_warn_gb") or 10
-    sysd = [d for d in pc.get("disks") or [] if str(d.get("mount", "")).upper().startswith("C:")]
+    # (the drive Windows is on: until 1.1.4 this looked for C:, and a PC with Windows on another drive had no check)
+    drive = system_drive()
+    sysd = [d for d in pc.get("disks") or [] if str(d.get("mount", "")).upper().startswith(drive)]
     if not sysd:
         return None
     d = sysd[0]
     free, total = d.get("free_gb") or 0, d.get("total_gb") or 0
-    fast = [p for p in x.status.get("problems") or [] if "filling up fast" in p]
+    fast = [p for p in x.status.get("problems") or [] if "filling up fast" in p and drive in p]
     summary = "%.0f GB free of %.0f GB" % (free, total)
     level = "bad" if free < warn else "warn" if fast or (total and free < 0.1 * total) or free < 2 * warn else "ok"
+    title, link = "Space on %s" % drive, "#charts:168:disk:%s" % drive
     if level == "ok":
-        return finding("disk", "Space on C:", "ok", summary, "now", link="#charts:168:disk:C:")
-    return finding("disk", "Space on C:", level, summary, "now", fast or [summary],
+        return finding("disk", title, "ok", summary, "now", link=link)
+    return finding("disk", title, level, summary, "now", fast or [summary],
                    ["Settings → System → Storage → Temporary files (or Disk Cleanup → Clean up system files).",
                     "Turn on Storage Sense, so Windows keeps it clean.",
                     "Move or delete big folders (Downloads, old installers, game libraries): WizTree or WinDirStat "
-                    "(free) shows what's big."], "#charts:168:disk:C:")
+                    "(free) shows what's big."], link)
 
 
 def check_update(x):

@@ -129,6 +129,33 @@ class PortsTest(unittest.TestCase):
         self.scan(t)
         self.assertEqual(sorted(k for k in self.pw.problems if k.startswith("shared")), ["shared:8787", "shared:9000"])
 
+    def test_docker_and_wsls_relay_are_one_server(self):
+        # Docker Desktop publishes a container's port on every address, and WSL's relay the same port on loopback:
+        # one server (2026-11-14..18, a Minecraft server's 25565 was a "problem" for four days). A program of Windows'
+        # own with the relay is still a clash, and so is a third program with Docker's pair. The page marks clashes
+        # as the service judged them ("clash" in ports.json).
+        import json
+        import tempfile
+        import hwblackbox.ports as ports
+        ports.describe_pid = lambda pid: ({2: "python.exe", 3: "evil.exe", 4: "com.docker.backend.exe",
+                                           5: "wslrelay.exe", 6: "wslrelay.exe"}.get(pid, "?"), None)
+        t = {("::", 25565): 4, ("::1", 25565): 5, ("0.0.0.0", 25565): 4, ("127.0.0.1", 25565): 5,
+             ("0.0.0.0", 3000): 2, ("127.0.0.1", 3000): 6,
+             ("::", 7000): 4, ("::1", 7000): 5, ("0.0.0.0", 7000): 3, ("127.0.0.1", 7000): 6}
+        with tempfile.TemporaryDirectory() as d:
+            self.pw.save_path = os.path.join(d, "ports.json")
+            self.scan(t)
+            self.scan(t)
+            self.assertEqual(sorted(k for k in self.pw.problems if k.startswith("shared")), ["shared:3000", "shared:7000"])
+            self.assertIn("python.exe (pid 2, on 0.0.0.0), wslrelay.exe (pid 6", self.pw.problems["shared:3000"])
+            self.assertIn("evil.exe", self.pw.problems["shared:7000"])
+            self.assertNotIn("com.docker", self.pw.problems["shared:7000"])
+            with open(self.pw.save_path, encoding="utf-8") as f:
+                saved = json.load(f)
+        clash = {(r["port"], r["exe"]): r["clash"] for r in saved["listening"]}
+        self.assertFalse(clash[(25565, "com.docker.backend.exe")] or clash[(25565, "wslrelay.exe")])
+        self.assertTrue(clash[(3000, "python.exe")] and clash[(7000, "evil.exe")])
+
     def test_holders(self):
         self.scan({("127.0.0.1", 8765): 1})
         self.scan({("127.0.0.1", 8765): 1})
@@ -1968,6 +1995,9 @@ class NewIn110Test(TempData):
         with open(os.path.join(root, "tools", "build.py"), encoding="utf-8") as f:
             self.assertIn('"--invalidation-mode", "unchecked-hash"', f.read())
         self.assertLess(job.index("name: The zip, and its SHA-256"), job.index("name: The zip holds what was checked"))
+        # and then a real install from the unpacked zip (Setup.exe when signed) and Installed apps' own uninstall
+        self.assertLess(job.index("name: The zip holds what was checked"), job.index("name: Install from the zip, and uninstall"))
+        self.assertIn("$entry.UninstallString", job)
 
     def test_the_virustotal_line(self):
         # tools/virustotal.py (the release's VirusTotal job): only a major engine's flag stops a release, and the line
@@ -2060,6 +2090,151 @@ class NewIn110Test(TempData):
                  "python.exe": None, "": None, None: None}
         for path, want in cases.items():
             self.assertEqual(program_of(path), want, path)
+
+
+class NewIn114Test(TempData):
+    def test_which_script_held_the_memory(self):
+        # 2026-11-19: "python.exe (26.9 GB)" ran Windows out of memory, and the log, which adds a program's processes
+        # up, couldn't say which script. A program of BIG_MB or more gets its biggest process and that process's
+        # command line, looked up once while it runs; what a spreadsheet would take for a formula is escaped.
+        from unittest import mock
+        from hwblackbox import diagnose, programs
+        from hwblackbox.winapi import Proc
+        t0 = time.time()
+        old = t0 - 3600
+        snap = lambda big_mb: {500: Proc("python.exe", 1, 1, old, 0, big_mb * MB),           # noqa: E731
+                               501: Proc("python.exe", 1, 1, old, 0, 300 * MB),
+                               600: Proc("=calc.exe", 1, 1, old, 0, 1500 * MB),
+                               700: Proc("small.exe", 1, 1, old, 0, 400 * MB)}
+        cmds = {500: r"app.py --port 8777 (in C:\Users\someone\silhouette)", 600: "-m evil", 700: "x"}
+        log = programs.ProgramLog(183)
+        with mock.patch.object(programs, "command_of", side_effect=lambda pid: cmds[pid]) as cmd_of, \
+                mock.patch.object(programs, "interrupt_seconds", return_value=0.0):
+            log.look(snap(26000), now=0, wall=t0)
+            log.look(snap(27500), now=30, wall=t0 + 30)
+            log.look(snap(20000), now=60, wall=t0 + 60)
+            rows = {r[0]: r for r in log.minute()}
+        self.assertEqual(sorted(c.args[0] for c in cmd_of.call_args_list), [500, 600])   # (once each; not small.exe)
+        self.assertEqual(rows["python.exe"][2], 27800.0)                                 # (the program's peak)
+        self.assertEqual(rows["python.exe"][7:], (500, cmds[500]))
+        self.assertEqual(rows["small.exe"][7:], (None, None))
+        with open(programs.path_for(dt.date.today()), encoding="utf-8") as f:
+            raw = f.read()
+        self.assertIn("'=calc.exe", raw)
+        self.assertIn("'-m evil", raw)
+        on_disk = {r[2]: r for r in programs.read_rows(programs.path_for(dt.date.today()))}
+        self.assertEqual(on_disk["python.exe"][9:], (500, cmds[500]))
+        self.assertEqual(on_disk["=calc.exe"][9:], (600, "-m evil"))                    # (read back as it was)
+        self.assertEqual(on_disk["small.exe"][9:], (None, None))
+        # Diagnose names it, at the time memory ran out and for a program that keeps growing
+        x = diagnose.Inputs({"now": time.time(), "programs": list(on_disk.values())})
+        self.assertEqual(x.big_processes_at(on_disk["python.exe"][0])[0],
+                         "python.exe's biggest process: pid 500, " + cmds[500])
+        # and the logs of 1.0.8 to 1.1.3, without the two columns, still read
+        with open(programs.path_for(dt.date.today()), "a", encoding="utf-8") as f:
+            f.write("%s,60.0,old.exe,1.0,250.0,,,1,42\n" % dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+        old_row = [r for r in programs.read_rows(programs.path_for(dt.date.today())) if r[2] == "old.exe"][0]
+        self.assertEqual(old_row[2:], ("old.exe", 1.0, 250.0, None, None, 1, 42, None, None))
+
+    def test_a_command_line_for_the_log(self):
+        # its arguments with secrets hidden, and its folder when they name no full path
+        from unittest import mock
+        from hwblackbox import programs
+        p = mock.Mock()
+        p.cmdline.return_value = ["python.exe", "app.py", "--token", "abc123"]
+        p.cwd.return_value = r"C:\Users\someone\silhouette"
+        with mock.patch.object(programs.psutil, "Process", return_value=p):
+            self.assertEqual(programs.command_of(5), r"app.py --token *** (in C:\Users\someone\silhouette)")
+            p.cmdline.return_value = ["python.exe", r"C:\tools\job.py"]
+            self.assertEqual(programs.command_of(5), r"C:\tools\job.py")
+            p.cmdline.side_effect = programs.psutil.AccessDenied(5)
+            self.assertIsNone(programs.command_of(5))
+        self.assertIsInstance(programs.command_of(os.getpid()), str)            # (and a real one: this test's)
+
+    def test_space_on_the_windows_drive(self):
+        # the drive Windows is on, from Windows: until 1.1.4 Diagnose looked for C:
+        from unittest import mock
+        from hwblackbox import diagnose, disks
+        st = {"pc": {"disks": [{"mount": "C:\\", "free_gb": 400, "total_gb": 500},
+                               {"mount": "D:\\", "free_gb": 5, "total_gb": 100}]},
+              "problems": ["D: is filling up fast: 9 GB gone in 30 min", "C: is filling up fast: (not this one)"]}
+        with mock.patch.object(disks.paths, "system_dir", return_value=r"D:\Windows\System32"), \
+                mock.patch.dict(os.environ, {"SystemDrive": "C:"}):
+            self.assertEqual(disks.system_drive(), "D:")
+            f = diagnose.check_disk(diagnose.Inputs({"status": st, "cfg": {"disk_warn_gb": 10}}))
+        self.assertEqual((f["title"], f["level"], f["link"]), ("Space on D:", "bad", "#charts:168:disk:D:"))
+        self.assertEqual(f["seen"], ["D: is filling up fast: 9 GB gone in 30 min"])
+
+    def test_json_files_written_side_by_side(self):
+        # each writer's own temporary file, never left behind (until 1.1.4: one path.tmp for all)
+        import threading
+        from hwblackbox.util import write_json
+        path = os.path.join(self.dir, "state", "x.json")
+        errors = []
+
+        def writer(n):
+            try:
+                for i in range(40):
+                    write_json(path, {"writer": n, "i": i, "pad": "x" * 2000})
+            except Exception as e:
+                errors.append(e)
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["pad"]), 2000)                            # (whole: one writer's)
+        self.assertEqual([n for n in os.listdir(os.path.dirname(path)) if n.endswith(".tmp")], [])
+
+    def test_csv_text_that_would_be_a_formula(self):
+        from hwblackbox.util import csv_safe, csv_text
+        for text in ("=1+1", "+x", "-m hwblackbox", "@SUM", "\tx", "plain.exe", "'quoted", "", None):
+            self.assertEqual(csv_text(csv_safe(text)), text)
+        self.assertEqual(csv_safe("=HYPERLINK()"), "'=HYPERLINK()")
+        self.assertEqual(csv_safe("chrome.exe"), "chrome.exe")
+
+    def test_home_assistant_over_plain_http(self):
+        # the token goes every minute: plain http:// outside the network is said, and taken only on a yes
+        from unittest import mock
+        from hwblackbox import homeassistant as ha
+        for url, mine in {"http://homeassistant.local:8123": True, "http://192.168.1.5:8123": True,
+                          "http://10.0.0.2": True, "http://100.101.102.103:8123": True, "http://homeassistant": True,
+                          "http://ha.tail1234.ts.net": True, "http://[::1]:8123": True, "http://localhost": True,
+                          "http://ha.example.com:8123": False, "http://203.0.113.9:8123": False}.items():
+            self.assertEqual(ha.on_own_network(url), mine, url)
+        config.write_default()
+        said, answers = [], iter(["http://ha.example.com:8123", "n", "http://192.168.1.5:8123",
+                                  "http://ha.example.com:8123", "y"])
+        with mock.patch.object(ha, "try_it", return_value=(False, "nope")) as tried:
+            code = ha.setup(ask=lambda q: next(answers), secret=lambda q: "tok", out=said.append)
+        self.assertEqual(code, 1)
+        self.assertEqual([c.args[0] for c in tried.call_args_list],
+                         ["http://192.168.1.5:8123", "http://ha.example.com:8123"])
+        self.assertEqual(sum("plain http:// to an address outside your network" in s for s in said), 2)
+
+    def test_settings_on_the_command_line_are_checked(self):
+        # init --set and set: a setting that isn't one, or a value it can't take, is said and nothing is written
+        from hwblackbox.__main__ import main
+        self.assertEqual(config.check_settings(["dashboard.port=9071", "home_assistant.enabled=true"]),
+                         {"dashboard": {"port": 9071}, "home_assistant": {"enabled": True}})
+        for bad in (["dashboard.port=abc"], ["dashboard.port=70000"], ["dashbord.port=1"], ["dashboard.prot=1"],
+                    ["disk_warn_gb.x=1"], ["sensors.interval_s=5", "sensors.interval_s.x=1"], ["nothing"]):
+            with self.assertRaises(ValueError, msg=bad):
+                config.check_settings(bad)
+        self.assertEqual(main(["init", "--data-dir", self.dir, "--set", "dashboard.port=abc"]), 2)
+        self.assertFalse(os.path.exists(paths.P.config))
+        self.assertEqual(main(["init", "--data-dir", self.dir, "--set", "dashboard.port=9071"]), 0)
+        self.assertEqual(config.load()["dashboard"]["port"], 9071)
+        import pathlib
+        text = lambda: pathlib.Path(paths.P.config).read_bytes()             # noqa: E731
+        before = text()
+        self.assertEqual(main(["set", "--data-dir", self.dir, "dashboard.port=9072", "dashboard.prot=1"]), 2)
+        self.assertEqual(text(), before)
+        self.assertEqual(main(["set", "--data-dir", self.dir, "ports.expected.8765.label=Server",
+                               "ports.expected.8765.exe=node.exe"]), 0)
+        self.assertEqual(config.load()["ports"]["expected"]["8765"], {"label": "Server", "exe": "node.exe"})
 
 
 if __name__ == "__main__":

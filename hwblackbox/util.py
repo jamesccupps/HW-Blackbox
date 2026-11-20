@@ -3,6 +3,7 @@ import datetime as dt
 import gzip
 import json
 import os
+import threading
 import time
 
 
@@ -176,17 +177,40 @@ OPEN_REPARSE_POINT = 0x00200000        # FILE_FLAG_OPEN_REPARSE_POINT
 
 
 def write_json(path, data, durable=False, indent=None):
-    """Write to a temporary file and swap it in, so a reader never sees half a file. durable: fsync first."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, default=str, indent=indent)
-        if durable:
-            f.flush()
-            os.fsync(f.fileno())
+    """Write to a temporary file and swap it in, so a reader never sees half a file. durable: fsync first. The
+    temporary file is this process's and thread's own (until 1.1.4 every writer used path.tmp, so two writing the same
+    file at once could swap in each other's half-written one), and it's never left behind."""
+    tmp = "%s.%d-%d.tmp" % (path, os.getpid(), threading.get_ident())
     try:
-        os.replace(tmp, path)
-    except OSError:                     # (the target held open by a reader: next time)
-        pass
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, default=str, indent=indent)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
+        try:
+            os.replace(tmp, path)
+        except OSError:                 # (the target held open by a reader: next time)
+            pass
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+# A text a spreadsheet takes for a formula when the file is opened in it: =, +, - or @ first (and a tab or a return,
+# which Excel skips). Our CSV logs hold program names and command lines, which their owners choose.
+FORMULA_FIRST = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(text):
+    """A text for a CSV log: with a ' before it when it would start a formula."""
+    return "'" + text if isinstance(text, str) and text.startswith(FORMULA_FIRST) else text
+
+
+def csv_text(text):
+    """A CSV log's text as it was before csv_safe."""
+    return text[1:] if isinstance(text, str) and text.startswith("'") and text[1:].startswith(FORMULA_FIRST) else text
 
 
 def age(path):

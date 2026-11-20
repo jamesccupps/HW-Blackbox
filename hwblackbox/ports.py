@@ -25,6 +25,20 @@ def overlap(a, b):
     return a == b or a in ("0.0.0.0", "::") or b in ("0.0.0.0", "::")
 
 
+# Docker Desktop publishes a container's port twice: its own backend listens on every address, and WSL's relay
+# (wslrelay.exe) on the loopback address, for the same port inside WSL's VM. Both reach the same container, so they
+# are one server, not a clash (2026-11-14..18: a Minecraft server's 25565 was a "problem" for four days). A program of
+# Windows' own on that port with the relay is still a clash: the relay takes the loopback connections.
+DOCKER = {"com.docker.backend.exe", "com.docker.proxy.exe", "vpnkit.exe"}
+WSL_RELAY = "wslrelay.exe"
+
+
+def one_server(a, b):
+    """Two listeners that are one server's: Docker Desktop's and WSL's relay, on one port."""
+    names = {(a.get("exe") or "").lower(), (b.get("exe") or "").lower()}
+    return WSL_RELAY in names and bool(names & DOCKER)
+
+
 def same_program(exe, want):
     """exe names, ignoring case; python.exe and pythonw.exe count as one (the same program, with or without a console)."""
     norm = lambda x: (x or "").lower().replace("pythonw.exe", "python.exe")        # noqa: E731
@@ -88,6 +102,7 @@ class PortWatch:
         self.scans = 0
         self.listed = False              # the "ports" record written
         self.problems = {}               # key -> text, as last reported
+        self.clashing = set()            # the ports two programs clash on (the page marks them)
         self.down = {}                   # port -> since when an "always" server's port has been free
         self.error = None
 
@@ -151,12 +166,14 @@ class PortWatch:
             by_port[e["port"]].setdefault(e["pid"], e)
             every[e["port"]].append(e)
         found = {}
+        clashing = set()
         for port, owners in by_port.items():
             if port in ignore:
                 continue
             clash = {a["pid"]: a for a in every[port] for b in every[port]
-                     if a["pid"] != b["pid"] and overlap(a["ip"], b["ip"])}
+                     if a["pid"] != b["pid"] and overlap(a["ip"], b["ip"]) and not one_server(a, b)}
             if len(clash) > 1:
+                clashing.add(port)
                 found["shared:%d" % port] = "Port %d is held by %d programs: %s" % (
                     port, len(clash), ", ".join("%s (pid %d, on %s)" % (e["exe"], e["pid"], e["ip"])
                                                 for e in clash.values()))
@@ -183,6 +200,7 @@ class PortWatch:
         for k in sorted(set(self.problems) - set(found)):
             self.jrnl.write("port", {"event": "problem over", "problem": self.problems[k]})
         self.problems = found
+        self.clashing = clashing
 
     def holders(self, ports, but=None):
         """Who holds these ports now (not `but`): {port: "exe (pid N)"}."""
@@ -196,7 +214,7 @@ class PortWatch:
         write_json(self.save_path, {
             "ts": now_iso(), "scans": self.scans, "error": self.error,
             "listening": [{"addr": addr_text(e["ip"], e["port"]), "ip": e["ip"], "port": e["port"], "pid": e["pid"],
-                           "exe": e["exe"], "app": e["app"], "cmd": e["cmd"],
+                           "exe": e["exe"], "app": e["app"], "cmd": e["cmd"], "clash": e["port"] in self.clashing,
                            "seen_since": dt.datetime.fromtimestamp(e["since"]).isoformat(timespec="seconds")}
                           for e in self.sorted_open()],
             "problems": [self.problems[k] for k in sorted(self.problems)]})

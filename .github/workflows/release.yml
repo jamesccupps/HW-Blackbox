@@ -13,7 +13,8 @@ name: release
 #                 repository variable SIGNING is "on" (set once Azure trusted the environment).
 #   package       the signatures and the catalog checked, the signed Setup.exe and the updater tried on the release
 #                 as made and with install.ps1 changed, the built program run once, the zip and its SHA-256, and the
-#                 zip unpacked and checked against the manifest and the catalog, as the installer will. A tag
+#                 zip unpacked and checked against the manifest and the catalog, as the installer will, then
+#                 installed from there (Setup.exe) and uninstalled (Installed apps' own command). A tag
 #                 that wasn't signed stops here (no zip, no draft): from 1.1.1 every release is signed, and the
 #                 updater installs no other
 #   attest        a signed statement (Sigstore) that the zip came from this workflow and this commit:
@@ -125,7 +126,7 @@ jobs:
 
   package:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: [build, authenticode]
     # Unsigned for a run by hand: the same checks, but the signatures' (a tag unsigned stops at its first step)
     if: ${{ !cancelled() && needs.build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.authenticode.result) }}
@@ -253,6 +254,67 @@ jobs:
             if ("$r" -ne 'Valid') { throw "the zip's files don't match HWBlackbox.cat: $r" }
             "the zip's files match HWBlackbox.cat"
           }
+
+      # A real install and uninstall, the way a user's clicks make them, from the unpacked zip: Setup.exe for a signed
+      # build (it runs only a signed install.ps1), install.ps1 itself for an unsigned one (a run by hand). Then this
+      # version must be in Program Files, the service running and its status written, and Installed apps' Uninstall
+      # (its own command, read from the registry) must remove everything but the data; -RemoveData then the data.
+      # Nobody is at the keyboard: the PawnIO question is skipped (the runner has no driver, so no CPU sensors: a
+      # warning), and nothing waits for a key.
+      - name: Install from the zip, and uninstall
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'zipcheck\HWBlackbox'
+          $empty = Join-Path $env:RUNNER_TEMP 'empty.txt'
+          if (-not (Test-Path -LiteralPath $empty)) { New-Item -ItemType File -Path $empty | Out-Null }
+          $ps = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+          $version = (Get-Content -LiteralPath (Join-Path $root 'MANIFEST.json') -Raw | ConvertFrom-Json).version
+          $dest = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'HWBlackbox'
+          $data = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HWBlackbox'
+          $apps = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HWBlackbox'
+          function Invoke-Logged([string]$Exe, [string]$ArgText, [string]$Name) {
+            $out = Join-Path $env:RUNNER_TEMP "$Name.txt"
+            $a = @{ FilePath = $Exe; WorkingDirectory = $root; NoNewWindow = $true; Wait = $true; PassThru = $true
+                    RedirectStandardInput = $empty; RedirectStandardOutput = $out; RedirectStandardError = "$out.err" }
+            if ($ArgText) { $a.ArgumentList = $ArgText }
+            $p = Start-Process @a
+            Write-Host "--- $Name (exit $($p.ExitCode)):"
+            Get-Content -LiteralPath $out, "$out.err" | Write-Host
+            $p.ExitCode
+          }
+          foreach ($p in $dest, $data) { if (Test-Path -LiteralPath $p) { throw "$p exists already" } }
+
+          # 1. install
+          if ($env:SIGNED -eq 'true') { $code = Invoke-Logged (Join-Path $root 'Setup.exe') '' 'install' }
+          else { $code = Invoke-Logged $ps "-NoProfile -ExecutionPolicy Bypass -File `"$root\install.ps1`" -PawnIO no" 'install' }
+          if ($code -ne 0) { throw "the install ended with exit $code" }
+          $m = Get-Content -LiteralPath (Join-Path $dest 'MANIFEST.json') -Raw | ConvertFrom-Json
+          if ($m.version -ne $version) { throw "Program Files hold $($m.version), not $version" }
+          if ((Get-Service -Name HWBlackbox).Status -ne 'Running') { throw "the service isn't running" }
+          $st = Get-Content -LiteralPath (Join-Path $data 'state\status.json') -Raw | ConvertFrom-Json
+          if ($st.version -ne $version) { throw "the service's status is from $($st.version), not $version" }
+          $entry = Get-ItemProperty -LiteralPath $apps
+          if ($entry.DisplayVersion -ne $version) { throw "Installed apps lists $($entry.DisplayVersion), not $version" }
+          "installed ${version}: the service $($st.state) (problems: $(if ($st.problems) { $st.problems -join '; ' } else { 'none' }))"
+
+          # 2. Installed apps' Uninstall: everything but the data
+          $code = Invoke-Logged (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') "/s /c `"$($entry.UninstallString)`"" 'uninstall'
+          if ($code -ne 0) { throw "the uninstall ended with exit $code" }
+          if (Get-Service -Name HWBlackbox -ErrorAction SilentlyContinue) { throw "the service is still there" }
+          if (Get-ScheduledTask -TaskName HWBlackboxAgent -ErrorAction SilentlyContinue) { throw "the agent's task is still there" }
+          $start = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'HW Blackbox.lnk'
+          foreach ($p in $dest, "$dest.new", "$dest.old", $start, $apps, 'HKLM:\SOFTWARE\Classes\AppUserModelId\HWBlackbox') {
+            if (Test-Path -LiteralPath $p) { throw "$p is still there after the uninstall" }
+          }
+          $left = Get-CimInstance Win32_Process | Where-Object { "$($_.ExecutablePath)" -like "$dest\*" }
+          if ($left) { throw "still running: $(($left | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
+          if (-not (Test-Path -LiteralPath (Join-Path $data 'config.json'))) { throw "the uninstall didn't keep the data" }
+          "uninstalled: nothing left but the data"
+
+          # 3. -RemoveData: the data too
+          $code = Invoke-Logged $ps "-NoProfile -ExecutionPolicy Bypass -File `"$root\install.ps1`" -Uninstall -RemoveData" 'remove-data'
+          if ($code -ne 0 -or (Test-Path -LiteralPath $data)) { throw "-RemoveData left $data (exit $code)" }
+          "and -RemoveData removed the data"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:

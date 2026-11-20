@@ -1217,10 +1217,10 @@ TABS.ports = {every: 15000, async load() { ptData = await api("/api/ports"); if 
   const list = all.filter(l => (sys || !SYSTEM_EXE.test(l.exe) || mine(l)) &&
     (!q || (l.port + " " + l.addr + " " + l.exe + " " + (l.app || "") + " " + (l.cmd || "")).toLowerCase().includes(q)))
     .sort((a, b) => (mine(b) - mine(a)) || (a.port - b.port) || a.addr.localeCompare(b.addr));
-  // the same port held by more than one program
+  // a port two programs clash on, as the service judged it (before 1.1.4 the file had no "clash": more than one program)
   const owners = {}; for (const l of all) (owners[l.port] = owners[l.port] || new Set()).add(l.pid);
   $("#pt-table tbody").innerHTML = list.map(l => {
-    const shared = owners[l.port].size > 1;
+    const shared = "clash" in l ? l.clash : owners[l.port].size > 1;
     return `<tr${SYSTEM_EXE.test(l.exe) && !mine(l) ? ' class="dim"' : ""}><td class="num${shared ? " bad-t" : ""}">${l.port}</td><td class="mono">${esc(l.addr.replace(/:\d+$/, ""))}</td>` +
       `<td>${esc(l.exe)}</td><td>${l.app ? `<b>${esc(l.app)}</b>` : exp[String(l.port)] ? `<span class="warn-t">expected ${esc(exp[String(l.port)].label)}</span>` : ""}</td>` +
       `<td class="num">${l.pid}</td><td class="wrap">${esc(l.cmd || "")}</td><td class="mono dim">${esc((l.seen_since || "").replace("T", " "))}</td></tr>`;

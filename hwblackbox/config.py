@@ -164,6 +164,52 @@ def load(path=None):
     return cfg
 
 
+def parse_item(item):
+    """A KEY=VALUE setting (KEY dotted, "dashboard.port=9070"; VALUE as JSON when it is one: true, 9070, [..], else
+    text) as (the key's parts, the value). ValueError if it isn't one."""
+    key, eq, raw = item.partition("=")
+    parts = [p.strip() for p in key.split(".")]
+    if not eq or not all(parts):
+        raise ValueError("%r isn't KEY=VALUE" % item)
+    try:
+        val = json.loads(raw)
+    except ValueError:
+        val = raw
+    return parts, val
+
+
+def put(cfg, parts, val, item="?"):
+    """Set a dotted key in a settings dict, keeping its neighbours. ValueError where a part on the way isn't an
+    object (a.b.c=1 with a.b a number)."""
+    node = cfg
+    for p in parts[:-1]:
+        node = node.setdefault(p, {})
+        if not isinstance(node, dict):
+            raise ValueError("%s: %s isn't a group of settings" % (item, p))
+    node[parts[-1]] = val
+
+
+def check_settings(items):
+    """Settings given on the command line (`init --set`, `set`), checked the way the service reads config.json: a
+    ValueError names a setting that isn't one or a value it can't take. (Until 1.1.4 they went into config.json
+    unchecked, and the service quietly kept the default, saying so only in its error line.)"""
+    user = {}
+    for item in items:
+        parts, val = parse_item(item)
+        put(user, parts, val, item)
+    known = defaults()
+    errors = []
+    for top, val in user.items():
+        if top not in known:
+            errors.append("%s isn't a setting" % top)
+        elif isinstance(known[top], dict) and isinstance(val, dict) and top != "watch":
+            errors += ["%s.%s isn't a setting" % (top, k) for k in val if k not in known[top]]
+    errors += _merge(known, user)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return user
+
+
 def write_default(path=None, overrides=None):
     """A config.json with the defaults (and overrides), for a first install."""
     cfg = defaults()

@@ -22,9 +22,11 @@ Once it's fixed, the release notes say what was fixed (and who found it, if you'
 
 Some things are so by design:
 
-- the records, the ports' table and the incident reports in `C:\ProgramData\HWBlackbox` are readable by every
-  user of the PC, and they hold other programs' command lines (cut short, with what looks like a password or a
-  token hidden);
+- the records, the ports' table, the programs log (for programs of 1 GB or more) and the incident reports in
+  `C:\ProgramData\HWBlackbox` are readable by every user of the PC, and they hold other programs' command lines (cut
+  short, with what looks like a password or a token hidden);
+- the Home Assistant token is kept as it is in `secrets\home_assistant.env`, a folder only SYSTEM and the
+  administrators can open: the service has to send it as it is;
 - the dashboard is one per PC, not per user: the first session to sign in serves it, and it answers programs in
   that session only;
 - Setup.exe and the updater check signatures without asking the certificate authority whether a certificate was

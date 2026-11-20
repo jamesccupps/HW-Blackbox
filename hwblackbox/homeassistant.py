@@ -50,6 +50,27 @@ def try_it(url, token, timeout=10):
         return False, "couldn't reach it: %s" % (getattr(e, "reason", None) or e)
 
 
+# a home network's addresses: the private ranges, Tailscale's (100.64.0.0/10), link-local and loopback
+OWN_NETWORKS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8",
+                "fc00::/7", "fe80::/10", "::1/128")
+
+
+def on_own_network(url):
+    """Is the address's host on this network (a single-label or .local/.lan/.home.arpa name, a *.ts.net name, or an
+    address in OWN_NETWORKS)? Plain http:// to anywhere else sends the token across the internet unencrypted."""
+    import ipaddress
+    import urllib.parse
+    host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host or host == "localhost" or host.endswith(
+            (".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain", ".ts.net"))
+    return any(ip in ipaddress.ip_network(n) for n in OWN_NETWORKS if ipaddress.ip_network(n).version == ip.version)
+
+
 def setup(off=False, ask=input, secret=None, out=print):
     """Set up (or with off, turn off) the Home Assistant add-on: the address, a token (tried before it's kept), the
     sensor's name. As admin: config.json and secrets\\ are admins' only. Returns the exit code."""
@@ -87,6 +108,11 @@ def setup(off=False, ask=input, secret=None, out=print):
         if not re.match(r"^https?://[^\s/]+(:\d+)?(/[^\s]*)?$", url):
             out("  That isn't an address like http://homeassistant.local:8123")
             continue
+        if url.lower().startswith("http://") and not on_own_network(url):
+            out("  That's plain http:// to an address outside your network: the token would cross the internet "
+                "unencrypted, every minute. Use its https:// address (Home Assistant Cloud's, or your own).")
+            if not ask("  Use it anyway? [y/N] ").strip().lower().startswith("y"):
+                continue
         out("A long-lived access token: in Home Assistant, your profile -> Security -> Long-lived access tokens -> "
             "Create token.")
         token = secret("Paste it here (it doesn't show)%s: " % (" [Enter: keep the saved one]" if old.get("HA_TOKEN")

@@ -84,13 +84,16 @@ checks every file against. More options are under [Install, in detail](#install-
   has counted (Windows' storage counters, as `Get-StorageReliabilityCounter` shows them).
 - **Ports.** Who listens on which TCP port, every 15 s. It flags two programs on one port where their addresses
   overlap (one on all addresses and one on 127.0.0.1, say), a known port held by the wrong program, and a server
-  that should always be listening but isn't.
+  that should always be listening but isn't. Docker Desktop and WSL's relay on one port count as one program: that's
+  how Docker publishes a container's port.
 - **Sessions.** Sign-ins, locks and sign-outs; sleep and resume; screen changes (resolution, position, scaling); the
   taskbar coming back after Explorer restarts; the clock being changed.
 - **Programs.** Every program's CPU, memory, graphics memory and GPU use, minute by minute, all its processes
   together, plus the time the processors spent on drivers' interrupts. Windows keeps no such history: Task Manager
   only shows now. So when the CPU was busy at 3 in the morning, or a program grew by gigabytes overnight, the
-  Processes tab says which program it was. The GPU's figures come from Windows' own GPU counters (the ones Task
+  Processes tab says which program it was. For a program holding 1 GB or more, the log also keeps its biggest
+  process and that process's command line (secrets hidden), so Diagnose can say which Python script it was, not just
+  "python.exe". The GPU's figures come from Windows' own GPU counters (the ones Task
   Manager uses), so they work for any make of GPU.
 - **Disk space.** Every fixed drive's free space, once a minute, to chart over days. The Windows drive is a problem
   when it gets low or fills up fast (an update unpacking, a download, a runaway log). It also notes a Windows update
@@ -238,6 +241,9 @@ admin, or from an elevated prompt:
 & "C:\Program Files\HWBlackbox\python\python.exe" -m hwblackbox set dashboard.port=9071 home_assistant.enabled=true
 ```
 
+`set` checks each setting first, as the service reads them: a name that isn't a setting, or a value it can't take,
+is said and nothing is changed.
+
 The service reads `ports`, `home_assistant`, `dashboard` (its milestones), `disk_warn_gb` and `disk_drop_gb` again
 every minute. The watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`);
 the dashboard's port, or turning it off, takes signing out and in again (the session agent serves it). A setting of
@@ -335,7 +341,7 @@ triggers:
 | `config.json` | the settings |
 | `logs\flight_YYYYMMDD.csv` | every 5 s: the key readings (kept 183 days, about 2.5 MB a day) |
 | `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
-| `logs\programs_YYYYMMDD.csv` | every minute: each busy or big program's CPU time, memory, graphics memory and GPU share, a row per program (kept 183 days, about 1.5 MB a day). 1.0.7 wrote `cpu_YYYYMMDD.csv` (the CPU alone); it's still read |
+| `logs\programs_YYYYMMDD.csv` | every minute: each busy or big program's CPU time, memory, graphics memory and GPU share, a row per program (kept 183 days, about 2 MB a day); for a program of 1 GB or more, its biggest process and that process's command line (from 1.1.4). 1.0.7 wrote `cpu_YYYYMMDD.csv` (the CPU alone); it's still read |
 | `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
 | `logs\drives_YYYYMMDD.csv` | every hour: each drive's health, temperature, wear and error counts (kept 183 days) |
 | `logs\*.csv.gz` | the day logs above once they're two days old, packed to about a tenth of the size (from 1.1.0); read as before |
