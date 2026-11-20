@@ -40,6 +40,12 @@ param(
   [switch]$Pause
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell's own modules, before any is loaded: started from PowerShell 7, the module path it hands down puts
+# 7's modules first, which don't load here, and then Get-FileHash and Get-AuthenticodeSignature aren't found (the
+# release run's first install test, 2026-11-20). Setup.exe, the updater and run-install.cmd set the same for it.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+  $env:PSModulePath = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\Modules'
+}
 # Windows' QuickEdit: a click in a console window starts selecting text, and while it selects, whatever writes to the
 # window waits. 2026-11-06: an update's window sat at "== 9. Check" (its title "Select ...") until it was closed. Off
 # for this window, so a click can't hold the install up.
