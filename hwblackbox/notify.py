@@ -7,18 +7,26 @@ last told (their sessions\<SID>\notified.json). On the first look after the inst
 happened before isn't news. Each kind can be turned off on the page's Settings tab (sessions\<SID>\settings.json,
 the user's own), and they're rationed: one of a kind every 10 minutes, 6 an hour in all (a board that reports a
 corrected error every few seconds doesn't make the PC unusable). A problem is announced once it has lasted a minute,
-so a hiccup doesn't make a sound.
+so a hiccup doesn't make a sound. A problem is known by its words with its measurements taken out (problem_key):
+"the sensors aren't logging (last sample 3 min ago)" is the same problem a minute later at 4 min. Until 1.2.0 it was
+known by its whole text, so the problems whose numbers move (the drive filling up, the sensors or the agent down for
+N minutes) changed before they'd lasted a minute, and were never announced.
+
+From 1.2.0 the agent also tells the user once when a new version of HW Blackbox is out (the daily update check,
+which the agent now runs whether or not the page is open; updates.check: false in config.json turns both off).
 
 A notification is Windows' own (a toast, in the notification center too), shown by Windows PowerShell for the app
 "HW Blackbox" (the installer registers that name, HKLM\SOFTWARE\Classes\AppUserModelId\HWBlackbox). Clicking it
 opens the page where it's explained."""
 import collections
 import os
+import re
 import subprocess
 import threading
 import time
 from xml.sax.saxutils import escape, quoteattr
 
+from . import VERSION
 from .util import read_json, write_json
 
 AUMID = "HWBlackbox"
@@ -28,11 +36,21 @@ KINDS = collections.OrderedDict([
     ("crash", "An app you watch crashed or closed unexpectedly (Explorer, and those in config.json)"),
     ("hardware", "The hardware reported an error (the CPU, memory, PCIe) or a drive did"),
     ("problem", "Something stopped working: HW Blackbox's own parts, a server's port, the Windows drive filling up"),
+    ("update", "A new version of HW Blackbox is out (once for each version)"),
 ])
 EVERY_KIND = 600                 # seconds between two of the same kind
 PER_HOUR = 6
 PROBLEM_AFTER = 60               # seconds a problem must last before it's announced
 CREATE_NO_WINDOW = 0x08000000
+# a measurement in a problem's words: a number with its unit ("3 min", "41.2 GB", "25 s", "2 programs"). A number
+# without one is part of what the problem is about (a port, "disk 1", a chip's name) and stays.
+MEASURE = re.compile(r"\d+(?:\.\d+)?(?=\s*(?:min|s|h|GB|MB|KB|TB|%|days?|hours?|minutes?|seconds?|programs?)"
+                     r"(?![A-Za-z]))")
+
+
+def problem_key(text):
+    """A problem as the notifications know it: its words with the measurements taken out."""
+    return MEASURE.sub("#", str(text))
 SCRIPT = r"""$ErrorActionPreference = 'Stop'
 [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
@@ -126,25 +144,30 @@ class Notifier:
         self.seen = seen if isinstance(seen, dict) else None
         self.sent = collections.deque()        # when each one was shown, the last hour
         self.last_of = {}                      # kind -> when one was last shown
-        self.problems_since = {}               # problem -> when it was first seen (this run)
+        self.problems_since = {}               # problem's key -> when it was first seen (this run)
 
     def link(self, where):
         return "http://127.0.0.1:%d/#%s" % (self.port, where) if self.port else None
 
-    def check(self, status, status_age=None):
+    def check(self, status, status_age=None, offer=None):
         """Announce what's new in the service's status (status_age: how old the status file is: a service that has
-        stopped writing it is a problem of its own)."""
+        stopped writing it is a problem of its own). offer: the update check's offer ({"version", "url", ...}: a newer
+        release), announced once per version."""
         now = self.clock()
         new = facts(status)
+        new["update"] = (offer or {}).get("version") if isinstance(offer, dict) else None
         problems = list((status or {}).get("problems") or [])
         if status_age is not None and status_age > 180:
             problems.append("HW Blackbox's service isn't running: nothing is being recorded")
-        for p in list(self.problems_since):
-            if p not in problems:
-                del self.problems_since[p]
+        words = {}                             # key -> the newest words for it
         for p in problems:
-            self.problems_since.setdefault(p, now)
-        lasting = sorted(p for p, since in self.problems_since.items() if now - since >= PROBLEM_AFTER)
+            words[problem_key(p)] = p
+        for k in list(self.problems_since):
+            if k not in words:
+                del self.problems_since[k]
+        for k in words:
+            self.problems_since.setdefault(k, now)
+        lasting = sorted(k for k, since in self.problems_since.items() if now - since >= PROBLEM_AFTER)
         if self.seen is None:                 # (the first look: what's there already isn't news)
             self.seen = dict(new, problems=lasting)
             self.save()
@@ -167,10 +190,19 @@ class Notifier:
                     title = "A fatal hardware error"
                 shown += self.announce("hardware", on, title, what[:1].upper() + what[1:] if what else new[key],
                                        "diagnose")
-        for p in lasting:
-            if p not in (self.seen.get("problems") or []):
-                shown += self.announce("problem", on, "HW Blackbox: a problem", p, "overview")
-        self.seen = dict(new, problems=lasting)
+        # (what was told before 1.2.0 was kept by the whole text: known by its key now, so a problem with fixed words
+        # that was announced isn't announced again)
+        told = {problem_key(p) for p in self.seen.get("problems") or []}
+        for k in lasting:
+            if k not in told:
+                shown += self.announce("problem", on, "HW Blackbox: a problem", words[k], "overview")
+        if new["update"] and new["update"] != self.seen.get("update"):
+            shown += self.announce("update", on, "HW Blackbox %s is out" % new["update"],
+                                   "You have %s. The page says what's new; Update installs it, keeping the settings and "
+                                   "the history." % VERSION, "overview")
+        # (what was told and is still there stays told: until 1.2.0 a restart of the agent forgot it, since this run
+        # hadn't seen it last a minute yet, and the problem was told again a minute later)
+        self.seen = dict(new, problems=sorted(set(lasting) | {k for k in told if k in words}))
         self.save()
         return shown
 

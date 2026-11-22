@@ -56,7 +56,8 @@ checks every file against. More options are under [Install, in detail](#install-
   LibreHardwareMonitor, and Windows supplies the CPU load and memory.
   - The key readings go to `flight_YYYYMMDD.csv`.
   - The +12 / +5 / +3.3 V rails, Vcore and SoC go to `rails_YYYYMMDD.csv`, four times a second, with the CPU's power
-    and temperature (read once a second).
+    and temperature (read once a second). A PC with no board sensor chip (a laptop) has no rails: there, from 1.2.0,
+    the same log has the CPU's power and temperature once a second.
   - Every row is written to disk before the next one is taken (fsync), so the last rows before a sudden power loss
     survive.
 - **Power-offs.** At the boot after a shutdown that wasn't clean (Windows' Kernel-Power 41 and EventLog 6008), it
@@ -66,7 +67,13 @@ checks every file against. More options are under [Install, in detail](#install-
   - the last two minutes of both logs, the rails trace last;
   - whether the service had seen a shutdown begin;
   - how Windows says it went off (a blue screen and its stop code, by name; the power button held; sleep), and the
-    hardware's own error reports around it.
+    hardware's own error reports around it;
+  - after a blue screen (from 1.2.0), Windows' own record of it, with the stop code's four parameters, and the crash
+    dump files it saved, which WinDbg opens. Windows can write that record minutes after the boot: it's added to the
+    report then.
+
+  A PC whose clock battery has run flat boots after a power cut with its date years back. The report then still has
+  the last rows, and says the clock was set back.
 - **Shutdowns.** Who asked for a shutdown or restart (User32 1074). Windows asking each session to end, with the
   idle time and the app in front. The service's own goodbye as services stop, so a missing goodbye means the power
   went.
@@ -75,7 +82,9 @@ checks every file against. More options are under [Install, in detail](#install-
   last 3 minutes of everything and the app that was in front.
 - **Windows' records.** Crashes, hangs and error reports for any app (named by the program its exe belongs to: a
   `python.exe` can be anyone's), display driver resets, low memory, services ending unexpectedly, boots and
-  shutdowns. Records written while the service wasn't running are read at its next start.
+  shutdowns. From 1.2.0 also the firmware holding the CPU's speed down (a heat, power or current limit), sleep and
+  waking (with how long it slept and what woke it), and Modern Standby. Records written while the service wasn't
+  running are read at its next start.
 - **Hardware errors.** The errors the CPU, the memory and PCI Express report to Windows (WHEA), corrected or fatal.
   A corrected one did no harm, but keeps happening on a part or a setting on the edge (an overclock, XMP / EXPO, a
   riser cable); a fatal one is a blue screen. And the drives' own: bad blocks, retries, a controller reset, a damaged
@@ -100,8 +109,10 @@ checks every file against. More options are under [Install, in detail](#install-
   that's waiting for a restart.
 
 **Notifications:** each signed-in user gets Windows notifications for what's new: a power-off, an app's crash
-report, a hardware or drive error, a problem that lasts a minute. Each kind can be turned off on the page's Settings
-tab. They're rationed (one of a kind every 10 minutes, six an hour), and nothing from before the install is announced.
+report, a hardware or drive error, a problem that lasts a minute, and (from 1.2.0) a new version of HW Blackbox. A
+problem whose numbers change as it goes on ("the sensors aren't logging, last sample 3 min ago", the drive filling up)
+is the same problem the whole time. Each kind can be turned off on the page's Settings tab. They're rationed (one of
+a kind every 10 minutes, six an hour), and nothing from before the install is announced.
 
 **Home Assistant** is an optional add-on: a status every minute, so your automations can alert you (see
 [Home Assistant](#home-assistant)).
@@ -144,7 +155,8 @@ What keeps it reliable:
   how to install it.
 - **Laptops** work too. A laptop has no power supply rails to read, so the Overview shows its battery instead (charge,
   plugged in or not, the rate it charges or drains, its wear), the 5-second log records the charge and whether it
-  was plugged in, and a power-off report says what the battery was at just before.
+  was plugged in, and a power-off report says what the battery was at just before. The fast log has the CPU's power
+  and temperature once a second, and Diagnose says how much charge the laptop lost while asleep.
 - **To build:** Python 3.12 (64-bit), and LibreHardwareMonitorLib's DLLs in `lib\` (see [Building](#building)). The
   installed program carries its own Python, so nothing else is needed on the PC.
 
@@ -181,9 +193,10 @@ To remove it too, delete that folder, or from an elevated PowerShell in the rele
 ### Updates
 
 From 1.0.10 on, HW Blackbox updates itself from the page:
-- Once a day the page's program asks GitHub for the latest release. When there's a newer one, the top of the page says
-  so, with **What's new** (the release's page) and **Update**. The Overview's Service card says when it last asked,
-  with **check now**.
+- Once a day the session agent asks GitHub for the latest release, whether or not the page is open (until 1.2.0,
+  only while it was). When there's a newer one, a Windows notification says so, once for each version, and the top
+  of the page says so, with **What's new** (the release's page) and **Update**. The Overview's Service card says when
+  it last asked, with **check now**.
 - **Update** asks Windows for an admin, then opens a window that downloads the
   release's zip into `C:\ProgramData\HWBlackbox\update` (where only SYSTEM and admins can write), checks it against
   the SHA-256 GitHub gives for it and the one in the release notes, unpacks it, checks it's the version offered, and
@@ -213,13 +226,13 @@ Open **HW Blackbox** from the Start menu, or go to `http://127.0.0.1:9070/`. The
 | Tab | Shows |
 |---|---|
 | **Overview** | the service and the agents, any problems, hardware errors, the key readings now, power-offs, disks (with their last week) and the drives' health |
-| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, hardware errors, crashes, display driver resets, the drives, CPU and GPU heat, the rails, programs stuck busy or growing, RAM, graphics memory, a laptop's battery (its wear, how fast it drains, how low it ran), disk space, a waiting update, uptime |
+| **Diagnose** | checks over what's been recorded, each with what it found and what to do: power-offs, hardware errors, crashes, display driver resets, the drives, CPU and GPU heat, the rails, the firmware slowing the CPU down, programs stuck busy or growing, RAM, graphics memory, a laptop's battery (its wear, how fast it drains, how low it ran, what it lost asleep), disk space, a waiting update, uptime |
 | **Sensors** | every sensor: current, minimum, maximum and average, since the page opened or since the service started |
-| **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum |
+| **Charts** | the 5-second log and the drives' free space over 1 hour to 7 days: the line is the average, the band the minimum and maximum. Click a point (or Enter on it) for what happened then: the Events tab half an hour either side, with the busiest programs of that minute |
 | **Power** | the 4-a-second rails over the last minutes, and every power-off caught |
-| **Events** | the records: apps closing and crashing, shutdowns and who asked, hardware and drive errors, sessions, ports, Windows' records |
+| **Events** | the records: apps closing and crashing, shutdowns and who asked, hardware and drive errors, sleep and waking, sessions, ports, Windows' records |
 | **Ports** | who listens where, and port problems |
-| **Incidents** | the power-off and crash reports |
+| **Incidents** | the power-off and crash reports; **Save as a zip** keeps one with the logs of its day and the status, to hand to someone helping (it holds the programs that ran and their command lines, secrets hidden: look before posting it anywhere public) |
 | **Processes** | what's using the CPU and memory right now, and every program's CPU, memory, graphics memory and GPU use over the last week (pick the programs to chart) |
 | **Settings** | your notifications (and a test one), and the add-ons: Home Assistant, set up or turned off from here |
 
@@ -245,7 +258,7 @@ admin, or from an elevated prompt:
 is said and nothing is changed.
 
 The service reads `ports`, `home_assistant`, `dashboard` (its milestones), `disk_warn_gb` and `disk_drop_gb` again
-every minute. The watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`);
+with every status, every 30 s. The watch list and the sensors' timing take a restart of the service (`Restart-Service HWBlackbox`);
 the dashboard's port, or turning it off, takes signing out and in again (the session agent serves it). A setting of
 the wrong kind (a word where a number goes) keeps its default, and the Overview says which.
 
@@ -273,8 +286,11 @@ the wrong kind (a word where a number goes) keeps its default, and the Overview 
 }
 ```
 
-**`updates.check`**: the page asks GitHub once a day for a newer release (`false`: never; **check now** on the
-Service card still asks when clicked).
+**`updates.check`**: the session agent asks GitHub once a day for a newer release, and a notification says when
+there is one (`false`: never; **check now** on the Service card still asks when clicked).
+
+**`rails_interval_s`**: how often the fast lane writes a row (`0` turns it off; 0.05 s at least). Without a board
+sensor chip it's once a second at most: there are no rails, and faster rows would only repeat the CPU's reading.
 
 **`disk_warn_gb`** and **`disk_drop_gb`** are about the Windows drive. It's a problem when less than `disk_warn_gb`
 is free, or when it's filling up fast: `disk_drop_gb` gone within an hour, and at that rate under `disk_warn_gb`
@@ -340,20 +356,20 @@ triggers:
 |---|---|
 | `config.json` | the settings |
 | `logs\flight_YYYYMMDD.csv` | every 5 s: the key readings (kept 183 days, about 2.5 MB a day) |
-| `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day) |
+| `logs\rails_YYYYMMDD.csv` | 4 a second: rails, Vcore, SoC, CPU power and temperature (kept 7 days, about 24 MB a day); without a board sensor chip, once a second, the CPU's power and temperature |
 | `logs\programs_YYYYMMDD.csv` | every minute: each busy or big program's CPU time, memory, graphics memory and GPU share, a row per program (kept 183 days, about 2 MB a day); for a program of 1 GB or more, its biggest process and that process's command line (from 1.1.4). 1.0.7 wrote `cpu_YYYYMMDD.csv` (the CPU alone); it's still read |
 | `logs\disks_YYYYMMDD.csv` | every minute: each fixed drive's free and total GB, a row per drive (kept 183 days, about 100 KB a day for two drives) |
 | `logs\drives_YYYYMMDD.csv` | every hour: each drive's health, temperature, wear and error counts (kept 183 days) |
 | `logs\*.csv.gz` | the day logs above once they're two days old, packed to about a tenth of the size (from 1.1.0); read as before |
-| `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line |
+| `logs\events_YYYYMMDD.jsonl` | the service's records, one JSON object a line (kept 183 days; from 1.2.0 packed into `.jsonl.gz` once they're 35 days old, older than the page reads) |
 | `state\status.json` | the status, every 30 s |
-| `state\sensors.json` | every sensor, with its minimum, maximum and average since the service started |
-| `state\ports.json` | who listens where |
+| `state\sensors.json` | every sensor, with its minimum, maximum and average since the service started: every 5 s while the page is open, every 30 s otherwise (from 1.2.0) |
+| `state\ports.json` | who listens where: written when it changes (from 1.2.0) |
 | `state\drives.json` | the drives' last look |
 | `incidents\incident_*.txt` | `incident_<boot>.txt` for a power-off, `incident_<time>_<app>.txt` for an app |
-| `sessions\<SID>\` | each user's own, named by their account's SID (the service makes it at sign-in, for that user alone): `session_YYYYMMDD.jsonl`, `agent.json` (its agent's heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes), `update.json` (the last update check), `settings.json` (their notifications), `notified.json` (what they've been told). Before 1.1.0 these were named by the user; the service moves them at the next sign-in |
+| `sessions\<SID>\` | each user's own, named by their account's SID (the service makes it at sign-in, for that user alone): `session_YYYYMMDD.jsonl`, `agent.json` (its agent's heartbeat), `front.json` (the app in front over the last 3 minutes, overwritten as it changes), `update.json` (the last update check), `settings.json` (their notifications), `notified.json` (what they've been told), `agent_crash.log` (anything the agent couldn't put anywhere else). Before 1.1.0 these were named by the user; the service moves them at the next sign-in |
 | `update\` | an update's download while it installs (removed after), and `install-report.txt`, the installer's report |
-| `crash.log` | anything the service couldn't put anywhere else |
+| `crash.log` | anything the service couldn't put anywhere else (cut to its last 256 KB once it passes 1 MB) |
 
 From a prompt:
 
@@ -366,7 +382,8 @@ $hwb = "C:\Program Files\HWBlackbox\python\python.exe"
 
 The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings, the last 72 hours),
 `#charts:168:disk:C:` (C:'s free space, the last week), `#processes:mem` (memory by program; also `cpu`, `vram`,
-`gpu`), `#diagnose`, `#sensors:logger`, `#incidents:<report file>`.
+`gpu`), `#diagnose`, `#sensors:logger`, `#incidents:<report file>`, `#events:at:<epoch seconds>` (the records half
+an hour either side of a moment).
 
 ## Limitations
 
@@ -387,8 +404,8 @@ The dashboard can link to a view: `#charts:72:cpu_temp_c,v12_v` (those readings,
 
 - **Nothing about the PC leaves it** unless you turn Home Assistant on, and then only the status above goes to your
   own Home Assistant.
-- **The update check** asks GitHub's API for the latest release once a day, from the page's program (the session
-  agent). GitHub sees the request, from your address, with HW Blackbox's version in it; nothing else is sent. Turn it
+- **The update check** asks GitHub's API for the latest release once a day, from the session agent. GitHub sees the
+  request, from your address, with HW Blackbox's version in it; nothing else is sent. Turn it
   off with `updates.check: false`. An update is never installed by itself: see [Updates](#updates).
 - **The app in front is kept for the last 3 minutes only**, as a rolling window. It's copied into a record when
   Windows shuts down or restarts, and into an app's incident report; those are kept (records 183 days, app reports

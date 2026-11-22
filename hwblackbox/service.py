@@ -1,6 +1,7 @@
 r"""The service: the sensors, the watcher, the ports and the status, under one roof, from boot.
 
-Threads: "sensors" (every 5 s), "rails" (4 a second) and "cpu" (the CPU's sensors, once a second) log the sensors;
+Threads: "sensors" (every 5 s), "rails" (4 a second; once a second without a board sensor chip) and "cpu" (the CPU's
+sensors, once a second) log the sensors;
 "watcher" ticks every second (the watched apps' exits every second, the process list every 2 s, Windows' records and
 the ports every 15 s, the session agents and the status every 30 s, the drives' free space, each program's use and
 Home Assistant every minute); "gpu-counters" reads Windows' GPU counters once a minute; "supervisor" checks every 5 s that the sensors, the rails and the watcher are moving,
@@ -31,9 +32,12 @@ from .sensors import Sensors
 from .util import is_link, now_iso, pack_logs
 from .watcher import Watcher
 
-# the day logs packed into .csv.gz once they're two days old (the records, events_*.jsonl, stay as they are: small, and
-# read in many places)
+# the day logs packed into .csv.gz once they're two days old; the records (events_*.jsonl) from 1.2.0 too, once they're
+# older than anything reads them for (the page's Events tab goes back 31 days at most)
 PACKED = ("flight_", "rails_", "programs_", "cpu_", "disks_", "drives_")
+RECORDS_PACKED_AFTER = 35               # days
+CRASH_LOG_MAX = 1 << 20                 # crash.log past this is cut to its last CRASH_LOG_KEEP at the start
+CRASH_LOG_KEEP = 256 << 10
 
 WTS_EVENTS = {1: "console connect", 2: "console disconnect", 3: "remote connect", 4: "remote disconnect",
               5: "sign-in", 6: "sign-out", 7: "lock", 8: "unlock", 9: "remote control", 10: "session created",
@@ -115,6 +119,7 @@ class Service:
             if self.want_sensors:
                 s = Sensors(self.cfg, self.jrnl, self.started_iso)
                 s.open()
+                s.watched = self.agents.page_open
                 self.sensors = s
                 s.start(self.stop)
                 self.jrnl.write("sensors", {"event": "open", "lhm": s.sampler.lhm.error or "ok",
@@ -133,6 +138,8 @@ class Service:
             wait = 6 * 3600
             try:
                 n = pack_logs(paths.P.logs, PACKED, done=self.stop)
+                n += pack_logs(paths.P.logs, ("events_",), done=self.stop, suffix=".jsonl",
+                               older_days=RECORDS_PACKED_AFTER)
                 if n:
                     self.jrnl.write("logs", {"event": "packed", "files": n})
             except Exception as e:
@@ -145,6 +152,9 @@ class Service:
             found = poweroff.check()
             if found:
                 self.jrnl.write("power_off_report", {"summary": found})
+                if poweroff.LATER:                   # (a blue screen whose own record Windows hadn't written yet)
+                    threading.Thread(target=poweroff.bugcheck_later, args=(self.stop,), name="poweroff-bugcheck",
+                                     daemon=True).start()
             elif time.time() - psutil.boot_time() < 600:
                 threading.Thread(target=poweroff.rechecks, args=(self.stop, self.jrnl), name="poweroff",
                                  daemon=True).start()
@@ -358,11 +368,30 @@ def single_instance(test):
     return h
 
 
+def trim_crash_log(path, limit=CRASH_LOG_MAX, keep=CRASH_LOG_KEEP):
+    """crash.log gets a line at every start: past `limit` bytes it's cut to its last `keep` (from a line's start).
+    Never through a link (the data folder is the administrators', but the service never writes through one)."""
+    try:
+        if is_link(path) or os.path.getsize(path) <= limit:
+            return
+        with open(path, "rb") as f:
+            f.seek(-keep, 2)
+            tail = f.read()
+        tail = tail[tail.find(b"\n") + 1:]
+        tmp = path + ".trim"
+        with open(tmp, "wb") as f:
+            f.write(b"(older lines cut at %s)\n" % now_iso().encode("ascii") + tail)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def crash_log():
     """A file for what has nowhere else to go (pythonw has no stderr): faults and the service glue's own errors."""
     import faulthandler
     try:
         os.makedirs(paths.P.data, exist_ok=True)
+        trim_crash_log(paths.P.crash_log)
         fh = open(paths.P.crash_log, "a", encoding="utf-8")
         fh.write("\n--- %s: HW Blackbox %s, pid %d ---\n" % (now_iso(), VERSION, os.getpid()))
         fh.flush()

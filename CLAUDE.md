@@ -114,3 +114,10 @@ driver, and updates itself from its page (decided 2026-11-11). winget would fit 
   only from programs in the page's own Windows session (`Handler.same_session`: the connection's other end, from
   Windows' TCP table): a token in the page wouldn't do, since another user's program could read the page too.
 - Times are written with their UTC offset (`util.now_iso`); old files without one are read with `parse_iso(after=)`.
+- A problem's words: the notifications know a problem by its words with the measurements taken out
+  (`notify.problem_key`: a number with a unit, "3 min", "41.2 GB", "2 programs"). Give a moving number a unit, and
+  keep a number that says what the problem is about (a port, "disk 1") without one, or a new problem's notification
+  never fires (until 1.2.0 most never did: the 2026-11-21 audit's finding 1).
+- Never trust the clock to delete: `util.prune` deletes nothing while the date has jumped ahead of the newest day
+  file (`util.clock_jumped`), and the power-off report takes the newest rows when the clock reads earlier than they
+  do (`poweroff.clock_set_back`).

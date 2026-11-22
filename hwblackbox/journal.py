@@ -24,6 +24,8 @@ class Journal:
         self.day = None
         self.fh = None
         self.errors = 0
+        self.error_at = None             # time.monotonic() of the last record that couldn't be written (the status says)
+        self.last_error = None
         os.makedirs(folder, exist_ok=True)
 
     def path_for(self, day):
@@ -50,8 +52,10 @@ class Journal:
                 self.fh.flush()
                 if hard:
                     os.fsync(self.fh.fileno())
-            except Exception:
+            except Exception as e:
                 self.errors += 1
+                self.error_at = time.monotonic()
+                self.last_error = ("%s: %s" % (type(e).__name__, e))[:120]
         return rec
 
     def recent(self, seconds):

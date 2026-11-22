@@ -215,7 +215,10 @@ class JournalTest(TempData):
         from hwblackbox.util import prune
         old = os.path.join(paths.P.logs, "events_20000101.jsonl")
         new = os.path.join(paths.P.logs, "events_%s.jsonl" % dt.date.today().strftime("%Y%m%d"))
-        for p in (old, new):
+        # (and yesterday's: a PC that was running. Without a day file in the last two, the clean-up waits a day:
+        # NewIn120Test.test_a_clock_that_jumps_forward_deletes_nothing)
+        before = os.path.join(paths.P.logs, "flight_%s.csv" % (dt.date.today() - dt.timedelta(days=1)).strftime("%Y%m%d"))
+        for p in (old, new, before):
             open(p, "w").close()
         self.assertEqual(prune(paths.P.logs, "events_", ".jsonl", 30), 1)
         self.assertFalse(os.path.exists(old))
@@ -404,7 +407,7 @@ class PowerOffTest(TempData):
         from hwblackbox import events, poweroff
         boot = dt.datetime(2026, 10, 23, 22, 24, 31)
         times = {poweroff.Q41: "2026-10-23 22:24:35", poweroff.Q6008: "2026-10-23 22:24:40"}
-        with mock.patch.object(events, "newest_event", lambda log, q: (times[q], {})), \
+        with mock.patch.object(events, "newest_event", lambda log, q: (times.get(q), {})), \
                 mock.patch.object(poweroff, "_wevtutil", lambda q, n: "Ereignis[0]:\n  Datum: ...\n"):
             found = poweroff.check(boot=boot, now=boot + dt.timedelta(minutes=1))
             self.assertIn("incident_20261023_222431.txt", found)
@@ -1784,7 +1787,7 @@ class NewIn110Test(TempData):
         self.assertEqual(disks.read_rows(disks.path_for("2026-11-07"))[0][1:], ("C:", 40.5, 465.0))
         c = server.FlightCache().get("flight_20261108.csv")
         self.assertEqual((list(c["cpu_temp_c"]), c["packed"]), ([50.0], True))
-        util.prune(logs, "flight_", ".csv", 1)                         # (packed or not, an old day goes)
+        util.prune(logs, "flight_", ".csv", 1, today=today)            # (packed or not, an old day goes)
         self.assertFalse([f for f in os.listdir(logs) if f.startswith("flight_2026110") and f < "flight_20261109"])
 
     def test_a_cut_off_row_is_ended_before_the_next(self):
@@ -1878,7 +1881,7 @@ class NewIn110Test(TempData):
         n2 = notify.Notifier(folder, 9070, send=lambda *a: sent.append(a), clock=lambda: now[0])
         self.assertEqual(n2.check(st), [])
         self.assertEqual(notify.user_settings(folder), {"power_off": True, "crash": True, "hardware": False,
-                                                         "problem": True})
+                                                         "problem": True, "update": True})
         with self.assertRaises(ValueError):
             notify.save_setting(folder, "anything", True)
         with self.assertRaises(ValueError):
@@ -2235,6 +2238,548 @@ class NewIn114Test(TempData):
         self.assertEqual(main(["set", "--data-dir", self.dir, "ports.expected.8765.label=Server",
                                "ports.expected.8765.exe=node.exe"]), 0)
         self.assertEqual(config.load()["ports"]["expected"]["8765"], {"label": "Server", "exe": "node.exe"})
+
+
+class NewIn120Test(TempData):
+    """The 2026-11-21 audit's findings, its optimizations, and the features from it."""
+
+    def notifier(self, name="n"):
+        from hwblackbox import notify
+        folder = os.path.join(self.dir, "sessions", name)
+        os.makedirs(folder, exist_ok=True)
+        now, sent = [1000.0], []
+        n = notify.Notifier(folder, 9070, send=lambda *a: sent.append(a), clock=lambda: now[0])
+        n.check({"problems": []})                                  # (the first look: nothing is news)
+        return n, now, sent
+
+    def test_problems_whose_numbers_move_are_announced(self):
+        # finding 1: a problem was known by its whole text, so one whose numbers changed every look (most of them,
+        # and the drive filling up) never lasted the minute a notification waits for
+        from hwblackbox import notify
+        texts = {"sensors": "The sensors aren't logging (last sample {i} min ago)",
+                 "agent": "The session agent isn't running for alex (1{i} min)",
+                 "cpu": "No CPU readings for 4{i} s: reading the CPU's sensors is held up",
+                 "fast": "C: is filling up fast: 1{i}.5 GB gone in {i} min; at that rate it's under 10 GB free in about "
+                         "2{i} min",
+                 "free": "C: has only 9.{i} GB free",
+                 "port": "Port 8765 is held by 2 programs"}
+        for name, text in texts.items():
+            n, now, sent = self.notifier(name)
+            for i in range(60):                                    # (a look every 30 s for half an hour)
+                n.check({"problems": [text.format(i=i % 10)]})
+                now[0] += 30
+            self.assertEqual(len(sent), 1, name)
+            self.assertEqual(sent[0][0], "HW Blackbox: a problem")
+        # the numbers that say what it's about stay: two ports are two problems; a count is a measurement
+        self.assertNotEqual(notify.problem_key("Port 25565 is held by 2 programs"),
+                            notify.problem_key("Port 25599 is held by 2 programs"))
+        self.assertEqual(notify.problem_key("Port 25565 is held by 2 programs"),
+                         notify.problem_key("Port 25565 is held by 3 programs"))
+        self.assertEqual(notify.problem_key("disk 1: Windows reset the drive (stornvme 129)"),
+                         "disk 1: Windows reset the drive (stornvme 129)")
+        # what was told before 1.2.0 (kept by the whole text) isn't told again; nor, after the agent restarts, what
+        # it told before (until 1.2.0: told again a minute later, the new run not having seen it last a minute yet)
+        n, now, sent = self.notifier("old")
+        n.seen["problems"] = ["The sensors aren't logging (last sample 3 min ago)"]
+        for i in range(5):
+            n.check({"problems": ["The sensors aren't logging (last sample %d min ago)" % (5 + i)]})
+            now[0] += 30
+        self.assertEqual(sent, [])
+        n2 = notify.Notifier(n.folder, 9070, send=lambda *a: sent.append(a), clock=lambda: now[0])
+        for i in range(5):
+            n2.check({"problems": ["The sensors aren't logging (last sample %d min ago)" % (10 + i)]})
+            now[0] += 30
+        self.assertEqual(sent, [])
+        n2.check({"problems": []})                                 # (it's over; when it comes back, it's told)
+        for i in range(4):
+            n2.check({"problems": ["The sensors aren't logging (last sample %d min ago)" % i]})
+            now[0] += 30
+        self.assertEqual(len(sent), 1)
+
+    def test_a_new_version_is_announced_once(self):
+        # finding 5 / F1: the agent runs the daily check and says once that a version is out
+        from unittest import mock
+        from hwblackbox import agent, notify
+        n, now, sent = self.notifier()
+        self.assertEqual(n.check({}, offer={"version": "9.9.9"}), ["HW Blackbox 9.9.9 is out"])
+        self.assertEqual(sent[0][2], "http://127.0.0.1:9070/#overview")
+        now[0] += 3600
+        self.assertEqual(n.check({}, offer={"version": "9.9.9"}), [])
+        notify.save_setting(n.folder, "update", False)
+        now[0] += 3600
+        self.assertEqual(n.check({}, offer={"version": "9.9.10"}), [])
+        # the agent's look: through the page's own checker (one a process), off with updates.check: false
+        a = agent.Agent.__new__(agent.Agent)
+        a.cfg, a.cfg_at = config.defaults(), time.time()
+        from hwblackbox.dashboard import server
+        c = mock.Mock()
+        c.view.return_value = {"offer": {"version": "9.9.9"}}
+        with mock.patch.object(server, "checker", return_value=c):
+            self.assertEqual(a.update_offer(), {"version": "9.9.9"})
+            self.assertEqual(c.view.call_args.args, (True,))
+            a.cfg["updates"]["check"] = False
+            self.assertIsNone(a.update_offer())
+
+    def lhm(self, hardware):
+        import threading
+        from hwblackbox.sensors import LhmBackend
+        b = LhmBackend.__new__(LhmBackend)
+        b.error, b.gpu, b.names = None, False, {}
+        b.lock, b.cpu_lock = threading.Lock(), threading.Lock()
+        b.computer = type("C", (), {"Hardware": hardware})()
+        return b
+
+    def test_the_fast_lane_on_a_pc_without_a_board_chip(self):
+        # finding 3: with no board sensor chip (a laptop) the rows had only their time; and the lane ran 4 a second,
+        # each row synced to the disk, for nothing. Now: the CPU's columns, once a second.
+        import psutil
+        from hwblackbox import sensors
+        s = sensors.Sampler.__new__(sensors.Sampler)
+        s.lhm = self.lhm([FakeHw("Cpu", [("Temperature", "CPU Package", 61.0), ("Power", "Package", 9.5)])])
+        s.admin, s.cpu_mark, s.ram_total_gb, s.lhm_gpu, s.last_nv, s.psutil = True, None, None, False, {}, psutil
+        s.nvml = type("N", (), {"read": lambda self: {}})()
+        s.cpu_lane, s.cpu_last = False, None
+        s.read_cpu()
+        s.cpu_lane = True
+        row = s.sample_fast()
+        self.assertEqual((row["v12_v"], row["cpu_temp_c"], row["cpu_power_w"]), ("", 61.0, 9.5))
+        lane = sensors.Sensors(config.defaults(), Recorder(), "now")
+        self.assertEqual(lane.fast_interval_for({"now": None, "portable": True}), 1.0)
+        self.assertEqual(lane.fast_interval_for({"now": "Nuvoton NCT6798D"}), 0.25)
+        # (and a setting of 0.001 is 0.05 at least: a thousand synced rows a second otherwise; 0 is still off)
+        for given, got in ((0.001, 0.05), (0, 0.0), (10, 5.0), (0.5, 0.5)):
+            with open(paths.P.config, "w") as f:
+                json.dump({"sensors": {"rails_interval_s": given}}, f)
+            self.assertEqual(config.load()["sensors"]["rails_interval_s"], got, given)
+
+    def test_a_gpu_at_5_degrees_is_a_misread(self):
+        from hwblackbox import sensors
+        nv = sensors.NvmlBackend.__new__(sensors.NvmlBackend)
+        p = type("P", (), {})()
+        for name in ("nvmlDeviceGetPowerUsage", "nvmlDeviceGetUtilizationRates", "nvmlDeviceGetClockInfo",
+                     "nvmlDeviceGetMemoryInfo", "nvmlDeviceGetFanSpeed", "nvmlDeviceGetEnforcedPowerLimit",
+                     "nvmlDeviceGetPerformanceState"):
+            setattr(p, name, staticmethod(lambda *a: (_ for _ in ()).throw(RuntimeError("n/a"))))
+        p.NVML_TEMPERATURE_GPU, p.NVML_CLOCK_GRAPHICS, p.NVML_CLOCK_MEM = 0, 0, 1
+        nv.p, nv.handle, nv.error, nv.name = p, object(), None, "GPU"
+        for temp, kept in ((3, False), (45, True), (140, False)):
+            p.nvmlDeviceGetTemperature = staticmethod(lambda h, k, t=temp: t)
+            nv.handle = object()
+            self.assertEqual("gpu_temp_c" in nv.read(), kept, temp)
+
+    def test_write_failures_are_a_problem(self):
+        # finding 7: a log that couldn't be written showed nowhere (or as the rails being "read less often")
+        from hwblackbox import status
+        from hwblackbox.journal import Journal
+        from hwblackbox.sensors import Sensors
+        lane = Sensors(config.defaults(), Recorder(), "now")
+        lane.write_failed("the rails log", OSError(28, "No space left on device"))
+        self.assertIn("No space left on device", lane.status()["write_errors"]["the rails log"][1])
+
+        def build(write_errors, jrnl_at=None):
+            class Sens:
+                def status(self):
+                    return {"last_sample_age_s": 2, "admin": True, "rails_ok": True, "cpu_temp_ok": True,
+                            "fast_hz": 0.0, "cpu_age_s": 0.5, "write_errors": write_errors, "fast_interval_s": 0.25}
+
+                def rails_on(self):
+                    return True
+            svc = type("Svc", (), {})()
+            svc.cfg, svc.sensors, svc.want_sensors, svc.started, svc.test = config.defaults(), Sens(), True, 0, False
+            svc.watcher = type("W", (), {"events": None, "notes": {}, "logs_mb": 1})()
+            svc.agents = type("A", (), {"view": []})()
+            svc.agent_down = {}
+            svc.ports = type("P", (), {"listed": False, "error": None})()
+            svc.disks = type("D", (), {"free_gb": lambda self: None, "problems": lambda self, cfg: []})()
+            svc.drives = type("Dr", (), {"latest": None, "problems": lambda self: []})()
+            svc.thread_ages, svc.STUCK = lambda: {}, {}
+            svc.jrnl = type("J", (), {"error_at": jrnl_at, "last_error": "OSError: disk full"})()
+            return status.build(svc)
+        _s, problems, attrs = build({"the rails log": [5.0, "OSError: [Errno 28] No space left on device"]})
+        self.assertEqual(problems, ["HW Blackbox couldn't write the rails log in the last minute (OSError: [Errno 28] "
+                                    "No space left on device): is the drive full?"])
+        self.assertNotIn("rails_note", attrs)                     # (not "read less often": it can't write)
+        _s, problems, _a = build({"the rails log": [200.0, "old"]})
+        self.assertEqual(problems, [])
+        _s, problems, _a = build({}, jrnl_at=time.monotonic() - 10)
+        self.assertEqual(problems, ["HW Blackbox couldn't write the records in the last minute (OSError: disk full): "
+                                    "is the drive full?"])
+        j = Journal(paths.P.logs, "events", 30)
+
+        def broken():
+            raise OSError(28, "No space left on device")
+        j._roll = broken
+        j.write("x")
+        self.assertIsNotNone(j.error_at)
+        self.assertIn("No space left", j.last_error)
+
+    def test_a_clock_that_jumps_forward_deletes_nothing(self):
+        # finding 4: each clean-up counted back from today's date: one record at a date months ahead deleted every
+        # day file. Now nothing goes until a day has been written at the new date.
+        from hwblackbox.util import prune
+        last = dt.date(2026, 11, 20)
+        for back in range(40):
+            stamp = (last - dt.timedelta(days=back)).strftime("%Y%m%d")
+            for name in ("flight_%s.csv" % stamp, "events_%s.jsonl" % stamp, "rails_%s.csv.gz" % stamp):
+                open(os.path.join(paths.P.logs, name), "w").close()
+        count = lambda prefix: len([f for f in os.listdir(paths.P.logs) if f.startswith(prefix)])   # noqa: E731
+        months = dt.date(2027, 6, 21)
+        open(os.path.join(paths.P.logs, "events_20270621.jsonl"), "w").close()      # (the record at the wrong date)
+        self.assertEqual(prune(paths.P.logs, "events_", ".jsonl", 30, today=months), 0)
+        self.assertEqual(prune(paths.P.logs, "rails_", ".csv", 7, today=last + dt.timedelta(days=8)), 0)
+        self.assertEqual((count("flight_"), count("rails_"), count("events_")), (40, 40, 41))
+        # a day later at the date that held (yesterday's file there now): the clean-up goes on as before (rails: the
+        # 33 days before 11-14; the records: the 10 before 10-22, the one at the wrong date left for later)
+        self.assertEqual(prune(paths.P.logs, "rails_", ".csv", 7, today=last + dt.timedelta(days=1)), 33)
+        self.assertEqual(prune(paths.P.logs, "events_", ".jsonl", 30, today=last + dt.timedelta(days=1)), 10)
+
+    def test_packing_is_synced_and_the_records_are_packed_after_35_days(self):
+        # finding 6: the packed file wasn't synced before the .csv was removed; O4: the records are packed too, once
+        # they're older than anything reads
+        import gzip
+        from unittest import mock
+        from hwblackbox import util
+        logs, today = paths.P.logs, dt.date(2026, 11, 21)
+        for name in ("flight_20261118.csv", "events_20261010.jsonl", "events_20261020.jsonl"):
+            with open(os.path.join(logs, name), "w") as f:
+                f.write('{"ts": "2026-10-10T12:00:00", "kind": "x"}\n' if name.startswith("events") else "timestamp\n")
+        order = []
+        real_fsync, real_replace = os.fsync, os.replace
+        with mock.patch.object(util.os, "fsync", side_effect=lambda fd: order.append("fsync") or real_fsync(fd)), \
+                mock.patch.object(util.os, "replace", side_effect=lambda a, b: order.append("replace") or
+                                  real_replace(a, b)):
+            self.assertEqual(util.pack_logs(logs, ("flight_",), today=today), 1)
+        self.assertEqual(order, ["fsync", "replace"])
+        self.assertEqual(util.pack_logs(logs, ("events_",), today=today, suffix=".jsonl", older_days=35), 1)
+        self.assertEqual(sorted(f for f in os.listdir(logs) if f.startswith("events_")),
+                         ["events_20261010.jsonl.gz", "events_20261020.jsonl"])
+        with gzip.open(os.path.join(logs, "events_20261010.jsonl.gz"), "rt") as f:
+            self.assertIn('"kind": "x"', f.read())
+        with util.open_log(os.path.join(logs, "events_20261010.jsonl")) as f:          # (read as before)
+            self.assertIn('"kind": "x"', f.read())
+
+    def stub_events(self, found):
+        """newest_event answering from `found`: {query: (local time, data)}."""
+        from unittest import mock
+        from hwblackbox import events, poweroff
+        return [mock.patch.object(events, "newest_event", lambda log, q: found.get(q, (None, {}))),
+                mock.patch.object(poweroff, "_wevtutil", lambda q, n: "(the record)"),
+                mock.patch.object(events, "hardware_records", lambda lo, hi, limit=30: [])]
+
+    def test_a_power_off_with_the_clock_set_back(self):
+        # finding 2: a flat clock battery boots with the date years back; every row was "after" the boot, and the
+        # report had none of them
+        import contextlib
+        from hwblackbox import poweroff
+        from hwblackbox.util import iso_at
+        t0 = float(int(time.time()) - 120)
+        with open(os.path.join(paths.P.logs, "flight_%s.csv" % dt.date.today().strftime("%Y%m%d")), "w") as f:
+            f.write("timestamp,a\n" + "".join("%s,%d\n" % (iso_at(t0 + 5 * i), i) for i in range(24)))
+        boot = dt.datetime(2019, 1, 1, 0, 0, 5)
+        at = (boot + dt.timedelta(seconds=20))
+        found = {poweroff.Q41: (at.strftime("%Y-%m-%d %H:%M:%S"), {"_t": at.timestamp()}),
+                 poweroff.Q6008: (at.strftime("%Y-%m-%d %H:%M:%S"), {"_t": at.timestamp()})}
+        with contextlib.ExitStack() as stack:
+            for p in self.stub_events(found):
+                stack.enter_context(p)
+            summary = poweroff.check(boot=boot, now=boot + dt.timedelta(minutes=1))
+        self.assertIn("incident_20190101_000005.txt", summary)
+        with open(os.path.join(paths.P.incidents, "incident_20190101_000005.txt"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("The clock:    it read the time above at the boot", text)
+        self.assertIn("Went down:    %s" % iso_at(t0 + 115, ms=True).replace("T", " "), text)
+        self.assertNotIn("Gap:", text)
+        self.assertIn("LAST SAMPLES BEFORE THE GAP (last 24 rows)", text)
+        from hwblackbox.dashboard import server
+        p = [x for x in server.power_offs() if x["report"] == "incident_20190101_000005.txt"][0]
+        self.assertEqual(p["gap_s"], None)                         # (not a negative gap)
+        self.assertEqual(parse_epoch(p["went_down"]), round(t0 + 115, 3))
+
+    def test_a_blue_screens_own_record_in_the_report(self):
+        # F2: Windows' BugCheck record (the stop code's parameters, the dump) and the dump files; added later when
+        # Windows writes it after the report
+        import contextlib
+        import threading
+        from unittest import mock
+        from hwblackbox import poweroff
+        from hwblackbox.util import iso_at
+        t0 = time.time() - 300
+        with open(os.path.join(paths.P.logs, "flight_%s.csv" % dt.date.today().strftime("%Y%m%d")), "w") as f:
+            f.write("timestamp,a\n%s,1\n" % iso_at(t0))
+        boot = dt.datetime.fromtimestamp(t0 + 60)
+        at = (boot + dt.timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+        t = (boot + dt.timedelta(seconds=10)).timestamp()
+        bug = (at, {"_t": t, "param1": "0x0000009f (0x0000000000000003, 0xffffc10f1a2b3c40, 0xfffff8045e8a7850, "
+                                       "0xffffc10f22d1e010)", "param2": r"C:\Windows\Minidump\112126-9203-01.dmp",
+                    "param3": "4b3a0c1d-2e5f-4a6b-8c7d-9e0f1a2b3c4d"})
+        found = {poweroff.Q41: (at, {"_t": t, "BugcheckCode": "159"}), poweroff.Q6008: (at, {"_t": t})}
+        dumps = [(r"C:\Windows\Minidump\112126-9203-01.dmp", 1.4, t)]
+        name = "incident_%s.txt" % boot.strftime("%Y%m%d_%H%M%S")
+        with contextlib.ExitStack() as stack:
+            for p in self.stub_events(dict(found, **{poweroff.Q1001: bug})):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch.object(poweroff, "dump_files", lambda since, folder=None: dumps))
+            poweroff.check(boot=boot, now=boot + dt.timedelta(minutes=1))
+        with open(os.path.join(paths.P.incidents, name), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("Why:          Windows crashed: a blue screen, stop code 0x0000009F (DRIVER_POWER_STATE_FAILURE", text)
+        self.assertIn("The bugcheck: 0x0000009f (0x0000000000000003,", text)
+        self.assertIn(r"Dump file:    C:\Windows\Minidump\112126-9203-01.dmp  1.4 MB", text)
+        self.assertIsNone(poweroff.LATER)
+        # the record not written yet when the report was: it's added at the end once it is
+        os.remove(os.path.join(paths.P.incidents, name))
+        with contextlib.ExitStack() as stack:
+            for p in self.stub_events(found):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch.object(poweroff, "dump_files", lambda since, folder=None: []))
+            poweroff.check(boot=boot, now=boot + dt.timedelta(minutes=1))
+        self.assertEqual(poweroff.LATER["name"], name)
+        with contextlib.ExitStack() as stack:
+            for p in self.stub_events(dict(found, **{poweroff.Q1001: bug})):
+                stack.enter_context(p)
+            stack.enter_context(mock.patch.object(poweroff, "dump_files", lambda since, folder=None: dumps))
+            poweroff.bugcheck_later(threading.Event(), waits=(0,))
+        with open(os.path.join(paths.P.incidents, name), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("once Windows had written its record)\nBLUE SCREEN", text)
+        self.assertIn("Report id:    4b3a0c1d", text)
+        # the dump files: Windows' own folder's, by their time
+        win = os.path.join(self.dir, "Windows")
+        os.makedirs(os.path.join(win, "Minidump"))
+        for n in ("old.dmp", "new.dmp", "notes.txt"):
+            open(os.path.join(win, "Minidump", n), "wb").close()
+        os.utime(os.path.join(win, "Minidump", "old.dmp"), (t0 - 86400, t0 - 86400))
+        self.assertEqual([os.path.basename(d[0]) for d in poweroff.dump_files(t0 - 600, folder=win)], ["new.dmp"])
+
+    def test_event_times_keep_their_offset(self):
+        # (finding 9: a record's local time without its offset was read as the first of the hour that repeats)
+        from unittest import mock
+        from hwblackbox import events, poweroff
+        exact = 1793518200.0                         # (2026-11-01 01:30 the second time, in New York)
+        with mock.patch.object(events, "newest_event", lambda log, q: ("2026-11-01 01:30:00", {"_t": exact})):
+            self.assertEqual(poweroff._event_time(poweroff.Q41).timestamp(), exact)
+
+    def test_new_windows_records_in_words(self):
+        from hwblackbox import events
+        from hwblackbox.dashboard import server
+        throttle = {"kind": "winevent", "source": "Microsoft-Windows-Kernel-Processor-Power", "id": 37,
+                    "inserts": ["0", "3", "71"], "message": "The speed of processor 3 in group 0 is being limited by "
+                    "system firmware. The processor has been in this reduced performance state for 71 seconds since "
+                    "the last report."}
+        e = server.describe(throttle, 0)
+        self.assertEqual((e["group"], e["level"]), ("hardware", "warn"))
+        self.assertIn("71 s since the last report", e["text"])
+        self.assertEqual(events.throttled_seconds(throttle), 71)
+        bug = {"kind": "winevent", "source": "BugCheck", "id": 1001, "inserts": ["0x0000009f (0x3, 0x4, 0x5, 0x6)"]}
+        e = server.describe(bug, 0)
+        self.assertEqual((e["group"], e["level"], e["text"]), ("power", "bad", "Windows restarted after a blue "
+                                                               "screen: 0x0000009f (0x3, 0x4, 0x5, 0x6)"))
+        wer = {"kind": "winevent", "source": "Windows Error Reporting", "id": 1001, "inserts": ["1", "2", "APPCRASH"]}
+        self.assertEqual(server.describe(wer, 0)["group"], "windows")                 # (an app's report: not power)
+        woke = {"kind": "winevent", "source": "Microsoft-Windows-Power-Troubleshooter", "id": 1,
+                "inserts": ["\u200e2026-11-20T03:12:00.5000000Z", "2026-11-20T11:20:30.0Z"] + ["0"] * 12 +
+                ["Device -USB Composite Device"]}
+        self.assertEqual(events.sleep_span(woke), (dt.datetime(2026, 11, 20, 3, 12, tzinfo=dt.timezone.utc).timestamp(),
+                                                   dt.datetime(2026, 11, 20, 11, 20, 30,
+                                                               tzinfo=dt.timezone.utc).timestamp()))
+        e = server.describe(woke, 0)
+        self.assertEqual((e["group"], e["text"]), ("power", "Back from sleep after 8 h 8 min (woken by Device -USB "
+                                                            "Composite Device)"))
+        ms = server.describe({"kind": "winevent", "source": "Microsoft-Windows-Kernel-Power", "id": 506}, 0)
+        self.assertEqual((ms["group"], ms["text"]), ("power", "Modern Standby: asleep (the screen off, still connected)"))
+        self.assertIn(("Microsoft-Windows-Kernel-Processor-Power"), events.EVENT_SOURCES["System"])
+
+    def test_diagnose_the_firmware_and_the_battery_asleep(self):
+        # F3 and F4
+        from hwblackbox import diagnose
+        now = time.time()
+        rec = lambda t, **k: dict({"kind": "winevent", "t": t}, **k)                 # noqa: E731
+        thr = rec(now - 3600, source="Microsoft-Windows-Kernel-Processor-Power", id=37, skipped_before=11,
+                  message="... reduced performance state for 30 seconds since the last report.")
+        f = diagnose.check_throttle(diagnose.Inputs({"now": now, "records": [thr]}))
+        self.assertEqual((f["level"], f["summary"]), ("info", "The firmware held the CPU's speed down 12 times"))
+        self.assertIn("Held down for 1 min in all", f["seen"][1])
+        hot = {"now": now, "records": [thr], "flight_t": [now - 600, now - 595], "flight": {"cpu_temp_c": [93, 94]}}
+        self.assertEqual(diagnose.check_throttle(diagnose.Inputs(hot))["level"], "warn")
+        self.assertEqual(diagnose.check_throttle(diagnose.Inputs({"now": now}))["level"], "ok")
+        # the sleeps: Power-Troubleshooter's span, Modern Standby's 506 to 507, the service's own; one sleep once
+        night = float(int(now - 20 * 3600))                      # (whole seconds: the records' times are)
+        utc = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0Z")  # noqa: E731
+        recs = [rec(night + 8 * 3600, source="Microsoft-Windows-Power-Troubleshooter", id=1,
+                    inserts=[utc(night), utc(night + 8 * 3600)]),
+                {"kind": "power", "t": night + 60, "event": "going to sleep"},
+                {"kind": "power", "t": night + 8 * 3600, "event": "woke up"},
+                rec(now - 3 * 3600, source="Microsoft-Windows-Kernel-Power", id=506),
+                rec(now - 2 * 3600, source="Microsoft-Windows-Kernel-Power", id=507)]
+        spans = diagnose.sleep_spans(recs)
+        self.assertEqual([round(b - a) for a, b in spans], [8 * 3600, 3600])
+        x = diagnose.Inputs({"now": now, "sleep_battery": [
+            (night, night + 8 * 3600, (night - 5, 90.0, 0), (night + 8 * 3600 + 5, 60.0, 0)),
+            (now - 3 * 3600, now - 2 * 3600, (0, 50.0, 1), (0, 52.0, 1))]})          # (plugged in: passed over)
+        f = diagnose.check_sleep(x)
+        self.assertEqual((f["level"], f["summary"]), ("warn", "The most it lost: 30 % in 8 h asleep (3.8 % an hour)"))
+        self.assertEqual(len(f["seen"]), 1)
+        x = diagnose.Inputs({"now": now, "sleep_battery": [(night, night + 8 * 3600, (0, 90.0, 0), (0, 86.0, 0))]})
+        self.assertEqual(diagnose.check_sleep(x)["level"], "ok")
+        self.assertIsNone(diagnose.check_sleep(diagnose.Inputs({"now": now})))      # (no laptop sleep: nothing said)
+
+    def test_durations_come_from_the_rows_times(self):
+        # finding 9: Diagnose counted every row as 5 s, wrong with sensors.interval_s set otherwise
+        from hwblackbox import diagnose
+        now = time.time()
+        ts = [now - 3600 + 60 * i for i in range(40)]                             # (a row a minute)
+        x = diagnose.Inputs({"now": now, "flight_t": ts, "flight": {"cpu_temp_c": [88.0] * 31 + [50.0] * 9}})
+        self.assertEqual(x.seconds(x.series("cpu_temp_c"), lambda v: v >= 85), 31 * 60)
+        f = diagnose.check_temperature(x, "cpu_temp_c", "CPU", 85, 95, 3, [])
+        self.assertEqual(f["level"], "warn")                                        # (31 minutes: 155 s before)
+
+    def test_the_state_files_are_written_less_often(self):
+        # O1: sensors.json every sample only while a page looks (else every 30 s); ports.json when it changes
+        from unittest import mock
+        from hwblackbox import ports, sensors
+        from hwblackbox.agents import Agents
+        lane = sensors.Sensors(config.defaults(), Recorder(), "now")
+        self.assertTrue(lane.json_due())                                            # (nobody says: every sample)
+        looking = [False]
+        lane.watched = lambda: looking[0]
+        lane.json_at = time.monotonic()
+        self.assertFalse(lane.json_due())
+        looking[0] = True
+        self.assertTrue(lane.json_due())
+        looking[0] = False
+        lane.json_at = time.monotonic() - sensors.JSON_IDLE - 1
+        self.assertTrue(lane.json_due())
+        a = Agents(Recorder(), restart=False)
+        a.heartbeats, a.last_beat = {1: {"page_s": 4.0}}, {1: time.time() - 20}
+        self.assertTrue(a.page_open())
+        a.heartbeats = {1: {"page_s": 300.0}}
+        self.assertFalse(a.page_open())
+        a.heartbeats = {1: {"page_s": None}}
+        self.assertFalse(a.page_open())
+        w = ports.PortWatch(Recorder(), paths.P.ports)
+        table = {("0.0.0.0", 8765): 4242}
+        with mock.patch.object(ports, "describe_pid", return_value=("node.exe", "server.js")), \
+                mock.patch.object(ports, "write_json") as wrote:
+            for _ in range(6):
+                w.scan(config.defaults(), lambda *a: None, current=dict(table))
+            n = wrote.call_count
+            w.scan(config.defaults(), lambda *a: None, current={})
+            w.scan(config.defaults(), lambda *a: None, current={})
+        self.assertLessEqual(n, 2)                                                  # (the port opening: 1 or 2)
+        self.assertEqual(wrote.call_count, n + 1)                                   # (closing: once)
+        self.assertAlmostEqual(w.checked, time.time(), delta=5)
+
+    def test_the_agent_gives_back_what_it_kept(self):
+        # O5: the programs' and drives' parsed rows and the answers go after 10 idle minutes, as the chart cache did
+        from hwblackbox.dashboard import server
+        server._prog_files["x"], server._disk_files["y"], server._cache["diagnose"] = (1, [1]), (1, [1]), (0, {})
+        server.drop_caches()
+        self.assertEqual((server._prog_files, server._disk_files, server._cache), ({}, {}, {}))
+
+    def test_crash_log_is_trimmed(self):
+        from hwblackbox.service import trim_crash_log
+        p = os.path.join(self.dir, "crash.log")
+        with open(p, "wb") as f:
+            f.write(b"".join(b"--- line %07d ---\n" % i for i in range(120000)))          # (about 2.4 MB)
+        trim_crash_log(p, limit=1 << 20, keep=64 << 10)
+        with open(p, "rb") as f:
+            data = f.read()
+        self.assertLess(len(data), 70 << 10)
+        self.assertTrue(data.startswith(b"(older lines cut at "))
+        self.assertTrue(data.endswith(b"--- line 0119999 ---\n"))
+        self.assertIn(b"\n--- line ", data[:200])                                    # (from a line's start)
+        before = len(data)
+        trim_crash_log(p, limit=1 << 20)
+        self.assertEqual(os.path.getsize(p), before)
+
+    def test_events_around_a_moment_and_the_programs_then(self):
+        # F6: a chart's point opens the Events tab at that time, with the busiest programs of that minute
+        from hwblackbox import programs
+        from hwblackbox.dashboard import server
+        from hwblackbox.util import iso_at
+        t = time.time() - 3 * 3600
+        with open(os.path.join(paths.P.logs, "events_%s.jsonl" % dt.date.fromtimestamp(t).strftime("%Y%m%d")),
+                  "w", encoding="utf-8") as f:
+            for dt_s, what in ((-4000, "too early"), (-600, "before"), (900, "after"), (4000, "too late")):
+                f.write(json.dumps({"ts": iso_at(t + dt_s), "kind": "power", "event": what}) + "\n")
+        got = server.api_events({"start": str(t - 1800), "end": str(t + 1800)})
+        self.assertEqual([e["text"] for e in got["events"]], ["The PC is before", "The PC is after"])
+        self.assertEqual((got["start"], round(got["end"])), (t - 1800, round(t + 1800)))
+        for bad in ({"start": "x", "end": "1"}, {"start": "nan", "end": "nan"}, {"start": "5", "end": "1"}):
+            with self.assertRaises(KeyError, msg=bad):
+                server.api_events(bad)
+        far = server.api_events({"start": "0", "end": str(t)})                     # (6 hours at most)
+        self.assertEqual(far["start"], t - server.AROUND_MAX)
+        with open(programs.path_for(dt.date.fromtimestamp(t)), "w", encoding="utf-8") as f:
+            f.write(",".join(programs.COLUMNS) + "\n")
+            for prog, cpu, mem, pid in (("(all)", 300.0, 9000.0, ""), ("python.exe", 240.0, 6000.0, 500),
+                                        ("chrome.exe", 30.0, 2500.0, 600), ("idle.exe", 0.0, 10.0, 700)):
+                f.write("%s,60,%s,%s,%s,,,1,%s,%s,%s\n" % (iso_at(t + 20), prog, cpu, mem, pid,
+                                                           pid if prog == "python.exe" else "",
+                                                           "app.py" if prog == "python.exe" else ""))
+        server._prog_files.clear()
+        at = server.api_programs_at({"t": str(t)})
+        self.assertEqual([c["name"] for c in at["cpu"]], ["python.exe", "chrome.exe"])
+        self.assertEqual(at["cpu"][0]["cores"], 4.0)
+        self.assertEqual((at["mem"][0]["name"], at["mem"][0]["cmd"], at["mem"][0]["pid"]), ("python.exe", "app.py", 500))
+        self.assertEqual(server.api_programs_at({"t": str(t - 86400)}), {"t": None})
+        with self.assertRaises(KeyError):
+            server.api_programs_at({"t": "soon"})
+
+    def test_a_report_saved_as_a_zip(self):
+        # F5: one file to hand over: the report, the logs of its day(s) and the status
+        import io
+        import urllib.request
+        import zipfile
+        from hwblackbox import winapi
+        from hwblackbox.dashboard import server
+        name = "incident_20261120_101500.txt"
+        with open(os.path.join(paths.P.incidents, name), "w", encoding="utf-8") as f:
+            f.write("HW Blackbox: power-off report\nWent down:    2026-11-19 23:58:10.250-05:00\n")
+        for log in ("flight_20261120.csv", "flight_20261119.csv", "rails_20261119.csv", "events_20261120.jsonl",
+                    "flight_20261118.csv"):
+            with open(os.path.join(paths.P.logs, log), "w") as f:
+                f.write("timestamp\n")
+        with open(paths.P.status, "w") as f:
+            f.write('{"state": "ok"}')
+        body, filename = server.incident_zip({"name": name})
+        self.assertEqual(filename, "HWBlackbox-incident_20261120_101500.zip")
+        z = zipfile.ZipFile(io.BytesIO(body))
+        self.assertEqual(sorted(z.namelist()), ["README.txt", name, "logs/events_20261120.jsonl",
+                                                "logs/flight_20261119.csv", "logs/flight_20261120.csv",
+                                                "logs/rails_20261119.csv", "status.json"])
+        for bad in ("..\\config.json", "incident_x.txt", ""):
+            with self.assertRaises(KeyError):
+                server.incident_zip({"name": bad})
+        # through the page's server: a download, with its name
+        os.makedirs(paths.P.session_dir(winapi.token_sid()), exist_ok=True)
+        port = free_port()
+        httpd = server.start(port)
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/api/incident.zip?name=%s" % (port, name), timeout=10) as r:
+                self.assertEqual(r.headers["Content-Type"], "application/zip")
+                self.assertIn('filename="HWBlackbox-incident_20261120_101500.zip"', r.headers["Content-Disposition"])
+                self.assertEqual(r.read()[:2], b"PK")
+        finally:
+            httpd.shutdown()
+
+    def test_the_page(self):
+        # the page has no test of its own: what 1.2.0 changed in it, read from the file
+        from hwblackbox.dashboard import server
+        with open(server.PAGE, encoding="utf-8") as f:
+            page = f.read()
+        self.assertRegex(page, r"\.seg \{[^}]*flex-wrap: wrap")                     # (the Events filters wrap)
+        self.assertIn("diagLook(); });", page)                                       # (Diagnose asked at load)
+        self.assertNotIn("from the rails log, 4 a second", page)
+        self.assertIn('location.hash = "#events:at:"', page)                          # (a chart's point)
+        self.assertIn("/api/events?start=", page)
+        self.assertIn("/api/programs_at?t=", page)
+        self.assertIn("/api/incident.zip?name=", page)
+
+
+def parse_epoch(text):
+    from hwblackbox.util import parse_iso
+    return round(parse_iso(text), 3)
 
 
 if __name__ == "__main__":

@@ -336,6 +336,17 @@ class Agents:
                 self.last_beat.pop(sid, None)
         self.view, self.heartbeats = view, beats
 
+    def page_open(self, now=None):
+        """Is someone looking at the page? A session agent that serves it says, in its heartbeat, how long ago the page
+        last asked for anything ("page_s"); a page left open in front asks every few seconds, one hidden or closed
+        asks nothing."""
+        now = now or time.time()
+        for sid, hb in list(self.heartbeats.items()):
+            ps, written = hb.get("page_s"), self.last_beat.get(sid)
+            if isinstance(ps, (int, float)) and written is not None and now - written + ps < 90:
+                return True
+        return False
+
     def make_folder_now(self, session):
         """A session that has just signed in: its user's folder now, so its agent (starting this moment) has it."""
         if not self.folders:

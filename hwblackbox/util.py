@@ -3,6 +3,7 @@ import datetime as dt
 import gzip
 import json
 import os
+import re
 import threading
 import time
 
@@ -44,8 +45,9 @@ def iso_at(t, ms=False):
 # the day logs: logs\<prefix>YYYYMMDD.csv, packed into .csv.gz once they're two days old (see pack_logs) ---------------
 
 def log_path(path):
-    """A day's log where it is now: the .csv, else the .csv.gz it was packed into (else the .csv's name)."""
-    if os.path.exists(path) or not path.endswith(".csv"):
+    """A day's log where it is now: the .csv (or the records' .jsonl), else the .gz it was packed into (else the
+    plain file's name)."""
+    if os.path.exists(path) or not path.endswith((".csv", ".jsonl")):
         return path
     return path + ".gz" if os.path.exists(path + ".gz") else path
 
@@ -68,13 +70,16 @@ def read_log_bytes(path):
         return f.read()
 
 
-def pack_logs(folder, prefixes, today=None, done=None):
-    """Pack the day logs older than yesterday into .csv.gz, about a tenth of the size: a .gz.tmp first, swapped in,
-    and only then the .csv removed (so a power loss mid-way leaves the .csv). Today's and yesterday's stay plain: they
-    are still written, or read from the end (the rails' last minutes, a power-off's last rows). Returns how many were
-    packed; `done` (a threading.Event) stops it between files."""
+def pack_logs(folder, prefixes, today=None, done=None, suffix=".csv", older_days=1):
+    """Pack the day logs older than yesterday into .csv.gz, about a tenth of the size: a .gz.tmp first, synced to the
+    disk, swapped in, and only then the .csv removed, so a power loss at any point leaves one whole copy. (Until 1.2.0
+    the packed file wasn't synced: Windows writes a file's data out some seconds later, so a power loss just after
+    could leave a short .csv.gz with the .csv already gone.) Today's and yesterday's stay plain: they are still
+    written, or read from the end (the rails' last minutes, a power-off's last rows). suffix / older_days: the records
+    (.jsonl) are packed too, from 1.2.0, once they're older than the page ever reads (older_days 35). Returns how many
+    were packed; `done` (a threading.Event) stops it between files."""
     today = today or dt.date.today()
-    cutoff = (today - dt.timedelta(days=1)).strftime("%Y%m%d")
+    cutoff = (today - dt.timedelta(days=older_days)).strftime("%Y%m%d")
     n = 0
     try:
         names = sorted(os.listdir(folder))
@@ -85,16 +90,20 @@ def pack_logs(folder, prefixes, today=None, done=None):
             break
         prefix = next((p for p in prefixes if f.startswith(p)), None)
         stamp = f[len(prefix):len(prefix) + 8] if prefix else ""
-        if not (prefix and f.endswith(".csv") and len(f) == len(prefix) + 12 and stamp.isdigit() and stamp < cutoff):
+        if not (prefix and f.endswith(suffix) and len(f) == len(prefix) + 8 + len(suffix) and stamp.isdigit() and
+                stamp < cutoff):
             continue
         src = os.path.join(folder, f)
         tmp = src + ".gz.tmp"
         try:
             if is_link(src):
                 continue
-            with open(src, "rb") as fin, gzip.open(tmp, "wb", compresslevel=6) as fout:
-                for chunk in iter(lambda: fin.read(1 << 20), b""):
-                    fout.write(chunk.replace(b"\x00", b""))
+            with open(src, "rb") as fin, open(tmp, "wb") as raw:
+                with gzip.GzipFile(filename=f + ".gz", mode="wb", compresslevel=6, fileobj=raw) as fout:
+                    for chunk in iter(lambda: fin.read(1 << 20), b""):
+                        fout.write(chunk.replace(b"\x00", b""))
+                raw.flush()
+                os.fsync(raw.fileno())
             os.replace(tmp, src + ".gz")
             os.remove(src)
             n += 1
@@ -221,13 +230,37 @@ def age(path):
         return None
 
 
-def prune(folder, prefix, suffix, keep_days):
+JUMP_DAYS = 2           # today more than this many days after the newest day file: the clock may be wrong
+DAY_FILE = re.compile(r"^[a-z]+_(\d{8})\.")
+
+
+def clock_jumped(names, today):
+    """Has the date jumped forward? True when the newest day file of the folder before today's (any log's: the
+    5-second log is written every few seconds the service runs) is more than JUMP_DAYS older than today. A clock set
+    months ahead (Windows' own time seeding has done it, and so does a date typed wrong in the BIOS) would otherwise
+    have the clean-up delete every day file at the first record written at the wrong date. A PC that was simply off
+    for a while cleans up a day later: by then yesterday's files are there, written at the date that held."""
+    stamp = today.strftime("%Y%m%d")
+    past = [m.group(1) for m in map(DAY_FILE.match, names) if m and m.group(1) < stamp]
+    if not past:
+        return False
+    try:
+        newest = dt.datetime.strptime(max(past), "%Y%m%d").date()
+    except ValueError:
+        return False
+    return (today - newest).days > JUMP_DAYS
+
+
+def prune(folder, prefix, suffix, keep_days, today=None):
     """Delete prefixYYYYMMDD...suffix files (and their packed .gz) whose date (in the name) is more than keep_days
-    ago."""
-    cutoff = (dt.date.today() - dt.timedelta(days=keep_days)).strftime("%Y%m%d")
+    ago; nothing while the date has just jumped forward (clock_jumped)."""
+    today = today or dt.date.today()
+    cutoff = (today - dt.timedelta(days=keep_days)).strftime("%Y%m%d")
     try:
         names = os.listdir(folder)
     except OSError:
+        return 0
+    if clock_jumped(names, today):
         return 0
     gone = 0
     for f in names:

@@ -20,7 +20,11 @@ EVENT_SOURCES = {
     "System": dict({"Display": {4101}, "Microsoft-Windows-Resource-Exhaustion-Detector": {2004},
                     "Application Popup": {26},
                     "User32": {1074},                                  # who asked for a shutdown or restart, and why
-                    "Microsoft-Windows-Kernel-Power": {41},            # rebooted without a clean shutdown
+                    # rebooted without a clean shutdown (41); since 1.2.0 Modern Standby's start and end (506, 507)
+                    "Microsoft-Windows-Kernel-Power": {41, 506, 507},
+                    "Microsoft-Windows-Power-Troubleshooter": {1},     # back from sleep: when it slept, when it woke
+                    "Microsoft-Windows-Kernel-Processor-Power": {37},  # the firmware holding the CPU's speed down
+                    "BugCheck": {1001}, "Microsoft-Windows-WER-SystemErrorReporting": {1001},   # after a blue screen
                     "EventLog": {6008},                                # "the previous shutdown was unexpected"
                     "Microsoft-Windows-Kernel-General": {12, 13},      # Windows started / is shutting down
                     "Service Control Manager": {7031, 7034},           # a service ended unexpectedly (this one too)
@@ -34,6 +38,41 @@ EVENT_SOURCES = {
 ERRORS_ONLY = {WHEA, "disk", "Ntfs", "Microsoft-Windows-Ntfs"} | set(STORAGE_DRIVERS)
 LEVELS = {1: "error", 2: "warning", 4: "information", 8: "audit success", 16: "audit failure"}
 BACKFILL_MAX = 5000      # records per log read at start, for the time the service wasn't running
+# records kept with Windows' own message, in Windows' language: which value is which isn't documented (Kernel-Processor-
+# Power 37 names a processor, its group and the seconds it was held down), so the words Windows shows are kept
+THROTTLE = ("Microsoft-Windows-Kernel-Processor-Power", 37)
+MESSAGE_KEPT = {THROTTLE}
+
+
+def message_of(ev, log):
+    """A classic event record's message as Event Viewer shows it, on one line ('' if Windows can't say)."""
+    try:
+        import win32evtlogutil
+        return " ".join((win32evtlogutil.SafeFormatMessage(ev, log) or "").split())[:400]
+    except Exception:
+        return ""
+
+
+def throttled_seconds(rec):
+    """How long the firmware held the CPU down, by a Kernel-Processor-Power 37 record ("... for 71 seconds since the
+    last report"), or None (another language, or no message)."""
+    m = re.search(r"for (\d+) seconds", rec.get("message") or "")
+    return int(m.group(1)) if m else None
+
+
+def sleep_span(rec):
+    """(went to sleep, woke) as epoch seconds from a Power-Troubleshooter 1 record ("the system has returned from a
+    low power state": its first two values are the times, in UTC), or None."""
+    if rec.get("source") != "Microsoft-Windows-Power-Troubleshooter" or rec.get("id") != 1:
+        return None
+    ins = rec.get("inserts") or []
+    out = []
+    for text in ins[:2]:
+        m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", str(text).replace("\u200e", ""))
+        if not m:
+            return None
+        out.append(dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp())
+    return (out[0], out[1]) if out[1] >= out[0] else None
 
 
 class EventReader:
@@ -100,9 +139,12 @@ class EventReader:
                         if ev.SourceName in ERRORS_ONLY and ev.EventType not in (1, 2):
                             continue
                         local = ev.TimeGenerated.Format("%Y-%m-%dT%H:%M:%S")
-                        inserts = [str(x)[:200] for x in (ev.StringInserts or [])][:14]
+                        # (16: Power-Troubleshooter's 15th is what woke the PC)
+                        inserts = [str(x)[:200] for x in (ev.StringInserts or [])][:16]
                         rec = {"log": log, "source": ev.SourceName, "id": eid, "at": local, "inserts": inserts,
                                "level": LEVELS.get(ev.EventType, str(ev.EventType))}
+                        if (ev.SourceName, eid) in MESSAGE_KEPT:
+                            rec["message"] = message_of(ev, log)
                         try:
                             when = dt.datetime.strptime(local, "%Y-%m-%dT%H:%M:%S")
                             rec["at"] = when.astimezone().isoformat(timespec="seconds")      # (with the offset)
@@ -135,7 +177,7 @@ def newest_event(log, xpath):
         eid, lvl = re.search(r"<EventID[^>]*>(\d+)<", xml), re.search(r"<Level>(\d+)<", xml)
         prov = re.search(r"<Provider Name=['\"]([^'\"]+)['\"]", xml)
         data.update(_id=int(eid.group(1)) if eid else None, _level=int(lvl.group(1)) if lvl else None,
-                    _provider=prov.group(1) if prov else None,
+                    _provider=prov.group(1) if prov else None, _t=when.timestamp(),    # (_t: epoch seconds, exact)
                     _values=re.findall(r"<Data(?: Name=['\"][^'\"]*['\"])?>([^<]*)</Data>", xml))
         return when.strftime("%Y-%m-%d %H:%M:%S"), data
     except Exception:

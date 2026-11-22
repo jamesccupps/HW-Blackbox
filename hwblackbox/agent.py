@@ -21,7 +21,6 @@ import datetime as dt
 import faulthandler
 import os
 import sys
-import threading
 import time
 from ctypes import wintypes
 
@@ -152,6 +151,7 @@ class Agent:
         self.session = winapi.session_of()
         self.dir = own_folder(self.user)
         self.cfg = config.load()
+        self.cfg_at = time.time()
         self.jrnl = Journal(self.dir, "session", self.cfg["events"]["keep_days"], ring=500)
         self.ring = collections.deque(maxlen=90)          # (time, exe in front, idle ms): 3 minutes, one every 2 s
         self.screens = screens()
@@ -184,9 +184,18 @@ class Agent:
                 "idle_s": round(idle_ms() / 1000), "in_front": self.front_exe, "test": self.test or None,
                 "mem_mb": round(psutil.Process().memory_info().private / 2**20, 1),
                 "dashboard": {"port": self.dashboard.server_address[1] if self.dashboard else None,
-                              "error": self.dash_error}}, durable=True)
+                              "error": self.dash_error},
+                # (seconds since this agent's page last asked for anything: the service writes the live readings
+                # every 5 s while someone looks, and less often otherwise)
+                "page_s": self.page_s()}, durable=True)
         except Exception:
             pass
+
+    def page_s(self):
+        if not self.dashboard:
+            return None
+        from .dashboard import server
+        return round(max(0.0, time.time() - server.Handler.last_request), 1)
 
     def check_display(self):
         now = screens()
@@ -205,7 +214,8 @@ class Agent:
         try:
             self.dashboard = server.start(int(d.get("port") or 9070))
             self.dash_error = None
-        except OSError as e:
+            server.Handler.on_wake = self.heartbeat       # (a page opened after a quiet while: say so at once)
+        except OSError:
             who = server.who_serves(int(d.get("port") or 9070))
             self.dash_error = "port %s is taken%s" % (d.get("port"), " (%s)" % who if who else "")
 
@@ -226,6 +236,19 @@ class Agent:
             self.cfg = config.load()
             self.start_dashboard()
 
+    def update_offer(self):
+        """The daily update check (update.Checker: GitHub at most once a day, in the background), and its offer of a
+        newer version, if any. The agent asks every 30 s whether a look is due, page open or not: until 1.2.0 only the
+        page asked, so a PC whose page nobody opened never heard of a new version. updates.check: false turns it
+        off; config.json is read again every 10 minutes."""
+        if time.time() - self.cfg_at > 600:
+            self.cfg = config.load()
+            self.cfg_at = time.time()
+        if not (self.cfg.get("updates") or {}).get("check", True):
+            return None
+        from .dashboard import server
+        return server.checker().view(True).get("offer")
+
     def check_notify(self):
         """What the service found that's new, as Windows notifications for this user (notify.py). Never in a test
         instance (it would announce a copy's history), and never while the session is ending."""
@@ -238,8 +261,12 @@ class Agent:
                 self.notifier = Notifier(self.dir, port)
             from .util import age, read_json
             st = read_json(paths.P.status)
+            try:
+                offer = self.update_offer()
+            except Exception:
+                offer = None
             if isinstance(st, dict):
-                self.notifier.check(st, age(paths.P.status))
+                self.notifier.check(st, age(paths.P.status), offer)
         except Exception as e:
             if repr(e) != self.notify_error:
                 self.notify_error = repr(e)

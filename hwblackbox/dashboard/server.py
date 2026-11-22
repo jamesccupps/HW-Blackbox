@@ -35,8 +35,8 @@ import urllib.request
 import psutil
 
 from .. import NAME, VERSION, config, paths, poweroff, update, winapi
-from ..events import WHEA_WORDS, disk_error, hardware_error
-from ..util import age, log_path, parse_iso, read_json, read_log_bytes, tail_lines
+from ..events import THROTTLE, WHEA_WORDS, disk_error, hardware_error, sleep_span, throttled_seconds
+from ..util import age, log_path, open_log, parse_iso, read_json, read_log_bytes
 
 APP = "hw-blackbox-dashboard"
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
@@ -652,7 +652,8 @@ def diagnose_inputs(now=None):
                             except (ValueError, TypeError, AttributeError):
                                 pass
                             continue
-                        elif '"kind": "exit"' not in line and '"kind": "winevent"' not in line:
+                        elif '"kind": "exit"' not in line and '"kind": "winevent"' not in line and \
+                                '"kind": "power"' not in line:
                             continue
                         try:
                             rec = json.loads(line)
@@ -665,7 +666,7 @@ def diagnose_inputs(now=None):
                             continue
                         if agent and rec.get("kind") == "display" and t >= day:
                             displays.append(t)
-                        elif not agent and rec.get("kind") in ("exit", "winevent"):
+                        elif not agent and rec.get("kind") in ("exit", "winevent", "power"):
                             rec["t"] = t
                             ins = rec.get("inserts") or []
                             if rec.get("source") == "Application Error" and not rec.get("program") and len(ins) > 10:
@@ -688,7 +689,25 @@ def diagnose_inputs(now=None):
             "flight": {c: [None if v != v else v for v in vals] for c, vals in flight.items()},
             "programs": program_rows(day, now), "power_offs": power_offs(), "records": records,
             "displays": displays, "watched_mem": watched, "drives": read_json(paths.P.drives) or {},
-            "drive_rows": drive_rows}
+            "drive_rows": drive_rows, "sleep_battery": sleep_battery(records) if has_battery() else []}
+
+
+def sleep_battery(records, edge=900):
+    """For each sleep of the last week (diagnose.sleep_spans), the battery's charge from the 5-second log just before
+    it and just after: [(slept, woke, (t, %, on AC) or None, (t, %, on AC) or None)]. Read only on a PC with a
+    battery, and only the quarter hour at each end."""
+    from ..diagnose import sleep_spans
+    out = []
+    cols = ["battery_pct", "on_ac"]
+    for slept, woke in sleep_spans(records)[-30:]:
+        ends = []
+        for lo, hi, last in ((slept - edge, slept, True), (woke, woke + edge, False)):
+            ts, vals = FLIGHT_CACHE.rows_between(lo, hi, cols)
+            rows = [(t, p, a) for t, p, a in zip(ts, vals["battery_pct"], vals["on_ac"]) if p == p]
+            row = (rows[-1] if last else rows[0]) if rows else None
+            ends.append((row[0], row[1], None if row[2] != row[2] else int(row[2])) if row else None)
+        out.append((slept, woke, ends[0], ends[1]))
+    return out
 
 
 def diagnose_now():
@@ -793,7 +812,9 @@ def power_offs():
             v = last_rails[2].split(",")
             rails = {k: (float(x) if x else None) for k, x in zip(RAILS, v)}
         b, d = epoch(boot), epoch(died) if died else None
-        out.append({"report": name, "boot": boot, "went_down": died, "gap_s": round(b - d, 1) if b and d else None,
+        # (no gap when the boot reads earlier than the last row: the clock was set back, and the report says so)
+        out.append({"report": name, "boot": boot, "went_down": died,
+                    "gap_s": round(b - d, 1) if b and d and b >= d else None,
                     "windows_estimate": est.group(1) if est else None, "last_rails": rails, "why": why or None,
                     "battery": battery})
     return out
@@ -811,18 +832,33 @@ def journal_files(day):
     return out
 
 
+AROUND_MAX = 6 * 3600          # the longest stretch the Events tab shows around a moment (start and end)
+
+
 def api_events(q):
-    hours = min(24 * 31, max(1, float(q.get("hours") or 48)))
+    """The records of the last `hours`, or (start, end: epoch seconds, from a chart's point) of a stretch around a
+    moment, 6 hours at most."""
     limit = min(5000, max(50, int(q.get("limit") or 1500)))
     now = time.time()
-    cutoff = now - hours * 3600
+    if q.get("start") and q.get("end"):
+        try:
+            upto = min(float(q["end"]), now + 300)
+            cutoff = max(float(q["start"]), upto - AROUND_MAX)
+        except ValueError:
+            raise KeyError("start and end are times")
+        if not (math.isfinite(cutoff) and math.isfinite(upto)) or cutoff > upto:
+            raise KeyError("start and end are times")
+        hours = (upto - cutoff) / 3600
+    else:
+        hours = min(24 * 31, max(1, float(q.get("hours") or 48)))
+        cutoff, upto = now - hours * 3600, now + 300
     out = []
     d = dt.date.fromtimestamp(cutoff)
-    while d <= dt.date.today():
+    while d <= dt.date.fromtimestamp(min(upto, now)):
         for i, (src, path) in enumerate(journal_files(d)):
             agent = i > 0                                # (the first is the service's own)
             try:
-                with open(path, encoding="utf-8", errors="replace") as f:
+                with open_log(path) as f:
                     for line in f:
                         if '"kind": "mem"' in line or '"kind": "watching"' in line or '"shutdown_snapshot"' in line:
                             continue
@@ -834,7 +870,7 @@ def api_events(q):
                             continue
                         # (Windows' records at the time they happened: one read after a restart was written later)
                         t = (epoch(rec.get("at")) if rec.get("kind") == "winevent" else None) or epoch(rec.get("ts"))
-                        if t is None or t < cutoff or t > now + 300:
+                        if t is None or t < cutoff or t > upto:
                             continue
                         try:
                             out.append(describe(rec, t, src, agent=agent))
@@ -844,7 +880,90 @@ def api_events(q):
                 continue
         d += dt.timedelta(days=1)
     out.sort(key=lambda e: e["t"])
-    return {"events": out[-limit:], "hours": hours, "total": len(out)}
+    return {"events": out[-limit:], "hours": hours, "total": len(out), "start": cutoff, "end": min(upto, now)}
+
+
+def api_programs_at(q):
+    """The busiest programs in the minute that covers time t (a chart's point): by CPU, by memory and by GPU, from the
+    programs log. {"t": None} when that minute wasn't logged."""
+    from ..programs import ALL
+    try:
+        t = float(q.get("t") or "")
+    except ValueError:
+        raise KeyError("t is a time")
+    if not math.isfinite(t):
+        raise KeyError("t is a time")
+    rows = program_rows(t - 180, t + 180)
+    minutes = sorted({r[0] for r in rows})
+    m = min(minutes, key=lambda x: abs(x - t)) if minutes else None
+    if m is None or abs(m - t) > 180:
+        return {"t": None}
+    mine = [r for r in rows if r[0] == m and r[2] != ALL]
+    st = read_json(paths.P.status) or {}
+    threads = ((st.get("pc") or {}).get("threads")) or psutil.cpu_count() or 1
+
+    def top(i, n):
+        return sorted((r for r in mine if r[i]), key=lambda r: -r[i])[:n]
+    return {"t": m, "seconds": next((r[1] for r in rows if r[0] == m and r[2] == ALL), None), "threads": threads,
+            "cpu": [{"name": r[2], "pct": round(100.0 * r[3] / (r[1] * threads), 1), "cores": round(r[3] / r[1], 2),
+                     "pid": r[8]} for r in top(3, 5) if r[1] > 0],
+            "mem": [{"name": r[2], "mb": round(r[4]), "pid": r[9] if len(r) > 9 and r[9] else r[8],
+                     "cmd": r[10] if len(r) > 10 else None} for r in top(4, 5)],
+            "gpu": [{"name": r[2], "pct": round(r[6], 1)} for r in top(6, 3)]}
+
+
+# One file to hand over: a report, the day logs around it and the status, as a zip the page saves ------------------------
+
+ZIP_LOGS = (("flight_", ".csv"), ("rails_", ".csv"), ("programs_", ".csv"), ("disks_", ".csv"), ("drives_", ".csv"),
+            ("events_", ".jsonl"))
+ZIP_README = """HW Blackbox %s: a report and the logs around it, saved from the page on %s.
+
+%s            the report
+logs\\            the day logs of the day(s) it covers (a .gz is packed: 7-Zip or gzip opens it)
+  flight_*        every reading every 5 s          rails_*     the fast lane (4 a second with a board sensor chip)
+  programs_*      each program's use, a minute     disks_*     the drives' free space, a minute
+  drives_*        the drives' health counters       events_*    the service's records (JSON, a line each)
+status.json       HW Blackbox's status when this was saved
+
+What's in it: the PC's readings, the programs that ran (with their command lines, passwords and tokens hidden) and
+the records of those days. Look before posting it anywhere public.
+"""
+
+
+def incident_zip(q):
+    """(the zip's bytes, its file name) for one report: the report, the day logs of its day (and, for a power-off,
+    the day it went down), and the status."""
+    import io
+    import zipfile
+    from ..util import is_link, now_iso
+    name = q.get("name") or ""
+    if not INCIDENT_NAME.match(name):
+        raise KeyError("no such report")
+    with open(os.path.join(paths.P.incidents, name), "rb") as f:
+        report = f.read(4 << 20)
+    t = dt.datetime.strptime(name[9:24], "%Y%m%d_%H%M%S")
+    days = {t.date()}
+    m = re.search(rb"Went down:\s+(\d{4}-\d\d-\d\d)", report)
+    if m:
+        try:
+            days.add(dt.datetime.strptime(m.group(1).decode("ascii"), "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        z.writestr(name, report)
+        for d in sorted(days)[:3]:
+            for prefix, suffix in ZIP_LOGS:
+                p = log_path(os.path.join(paths.P.logs, "%s%s%s" % (prefix, d.strftime("%Y%m%d"), suffix)))
+                if os.path.isfile(p) and not is_link(p):
+                    z.write(p, "logs/" + os.path.basename(p))
+        try:
+            with open(paths.P.status, "rb") as f:
+                z.writestr("status.json", f.read(4 << 20))
+        except OSError:
+            pass
+        z.writestr("README.txt", ZIP_README % (VERSION, now_iso().replace("T", " "), name.ljust(17)))
+    return buf.getvalue(), "HWBlackbox-%s.zip" % name[:-4]
 
 
 WIN_EVENTS = {("User32", 1074): "Shutdown or restart asked for", ("Microsoft-Windows-Kernel-Power", 41): "Power lost",
@@ -865,7 +984,11 @@ def human_ran(text):
     m = RAN.match(str(text or ""))
     if not m:
         return text
-    s = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    return human_secs(int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)))
+
+
+def human_secs(s):
+    s = int(round(s))
     if s < 60:
         return "%d s" % s
     if s < 3600:
@@ -918,6 +1041,20 @@ def describe(rec, t, src="service", agent=None):
             text = "%s asked for by %s: %s" % ((ins[4] if len(ins) > 4 else "shutdown").capitalize(), proc,
                                                ins[2] if len(ins) > 2 else "?")
             level = "warn"
+        elif (s, eid) == THROTTLE:
+            secs = throttled_seconds(rec)
+            text = "The firmware held the CPU's speed down (a heat, power or current limit%s)" % (
+                ": %d s since the last report" % secs if secs is not None else "")
+            level = "warn"
+        elif s in ("BugCheck", "Microsoft-Windows-WER-SystemErrorReporting") and eid == 1001:
+            text = "Windows restarted after a blue screen: %s" % (ins[0] if ins else "?")
+            level = "bad"
+        elif s == "Microsoft-Windows-Power-Troubleshooter" and eid == 1:
+            got = sleep_span(rec)
+            text = "Back from sleep" + (" after %s" % human_secs(got[1] - got[0]) if got else "") + \
+                (" (woken by %s)" % ins[14] if len(ins) > 14 and ins[14] else "")
+        elif s == "Microsoft-Windows-Kernel-Power" and eid in (506, 507):
+            text = "Modern Standby: %s" % ("asleep (the screen off, still connected)" if eid == 506 else "awake again")
         elif base:
             text = base
             level = "bad" if eid in (41, 6008, 4101) else ("warn" if eid in (2004, 1002) else "info")
@@ -1014,9 +1151,11 @@ def describe(rec, t, src="service", agent=None):
     group = {"exit": "apps", "start": "apps", "taskbar": "apps", "display": "apps", "session": "sessions",
              "winevent": "windows", "shutdown": "power", "power": "power", "port": "ports", "clock": "power",
              "power_off_report": "power"}.get(k, "monitor")
-    if k == "winevent" and rec.get("id") in (41, 6008, 12, 13, 1074):
+    # (1001 is also Windows Error Reporting's id for an app's report: by its source here)
+    if k == "winevent" and (rec.get("id") in (41, 6008, 12, 13, 1074, 506, 507) or rec.get("source") in (
+            "Microsoft-Windows-Power-Troubleshooter", "BugCheck", "Microsoft-Windows-WER-SystemErrorReporting")):
         group = "power"
-    if k == "winevent" and (hardware_error(rec) or disk_error(rec)):
+    if k == "winevent" and (hardware_error(rec) or disk_error(rec) or (rec.get("source"), rec.get("id")) == THROTTLE):
         group = "hardware"
     return {"t": t, "kind": k, "group": group, "level": level, "text": text, "src": src, "rec": rec}
 
@@ -1024,6 +1163,10 @@ def describe(rec, t, src="service", agent=None):
 def api_ports(q):
     data = read_json(paths.P.ports) or {}
     data["age"] = age(paths.P.ports)
+    # (from 1.2.0 the file is written only when the table changes: the status says when the service last looked)
+    checked = epoch((read_json(paths.P.status) or {}).get("ports_checked"))
+    if checked is not None and (data["age"] is None or time.time() - checked < data["age"]):
+        data["age"] = max(0.0, time.time() - checked)
     data["expected"] = (settings().get("ports") or {}).get("expected") or {}
     return data
 
@@ -1167,8 +1310,8 @@ def post_notify_test(body):
     from .. import notify
     port = int((settings().get("dashboard") or {}).get("port") or 9070)
     err = notify.send("HW Blackbox: notifications work", "You'll get one like this when the PC goes off without "
-                      "shutting down, an app crashes, the hardware reports an error, or something stops working.",
-                      "http://127.0.0.1:%d/#settings" % port, wait=True)
+                      "shutting down, an app crashes, the hardware reports an error, something stops working, or a "
+                      "new version is out.", "http://127.0.0.1:%d/#settings" % port, wait=True)
     return {"ok": err is None, "error": err}
 
 
@@ -1194,23 +1337,29 @@ ROUTES = {"/api/overview": api_overview, "/api/sensors": api_sensors, "/api/hist
           "/api/flight_columns": api_flight_columns, "/api/rails": api_rails, "/api/events": api_events,
           "/api/ports": api_ports, "/api/incidents": api_incidents, "/api/incident": api_incident,
           "/api/processes": lambda q: PROCESSES.sample(), "/api/programs": api_programs,
+          "/api/programs_at": api_programs_at,
           "/api/diagnose": lambda q: cached("diagnose", 0 if q.get("fresh") else 60, diagnose_now),
           "/api/config": api_config, "/api/update": api_update, "/api/settings": api_settings,
           "/api/ping": lambda q: {"app": APP, "version": VERSION, "pid": os.getpid(), "user": winapi.user_name()}}
+# files the page saves (a download, not JSON): path -> fn(query) giving (bytes, file name)
+FILES = {"/api/incident.zip": incident_zip}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "HWBlackbox/%s" % VERSION
     last_request = time.time()
+    on_wake = None                               # (the agent's: called when a request comes after a quiet minute)
     timeout = 15                                 # (a connection that sends nothing doesn't hold a thread for ever)
 
     def log_message(self, fmt, *args):            # (quiet: pythonw has nowhere to print)
         pass
 
-    def send(self, code, body, ctype):
+    def send(self, code, body, ctype, filename=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % re.sub(r"[^\w.\-]", "_", filename))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1252,13 +1401,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if url.path.startswith("/api/") and site and site not in ("same-origin", "none"):
             self.send(403, b"Cross-site request", "text/plain")
             return
+        woke = time.time() - Handler.last_request > 60
         Handler.last_request = time.time()
+        if woke and Handler.on_wake:
+            threading.Thread(target=Handler.on_wake, name="page-woke", daemon=True).start()
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
         if url.path in ("/", "/index.html"):
             try:
                 self.send(200, page(), "text/html; charset=utf-8")
             except OSError:
                 self.send(500, b"index.html is missing", "text/plain")
+            return
+        if url.path in FILES:
+            try:
+                body, filename = FILES[url.path](q)
+                self.send(200, body, "application/zip", filename)
+            except (KeyError, OSError, ValueError) as e:
+                self.send(404, ("Not saved: %s" % e).encode("utf-8"), "text/plain; charset=utf-8")
             return
         fn = ROUTES.get(url.path)
         if not fn:
@@ -1343,11 +1502,28 @@ def start(port):
                      daemon=True).start()
 
     def janitor():
+        dropped = 0.0
         while True:
             time.sleep(60)
             FLIGHT_CACHE.drop_if_idle()
+            if time.time() - Handler.last_request > FlightCache.IDLE and dropped < Handler.last_request:
+                drop_caches()
+                dropped = time.time()
     threading.Thread(target=janitor, name="dashboard-cache", daemon=True).start()
     return httpd
+
+
+def drop_caches():
+    """After 10 minutes without a request, everything the page's answers kept goes, as the 5-second log's cache
+    already did: the programs' and the drives' parsed rows and the answers (Diagnose's among them). Until 1.2.0 they
+    stayed until the next sign-in: about 95 MB more than the agent needs, once someone had looked at a week."""
+    import gc
+    with _prog_lock:
+        _prog_files.clear()
+    with _disk_lock:
+        _disk_files.clear()
+    _cache.clear()
+    gc.collect()
 
 
 def who_serves(port, wait=3.0):

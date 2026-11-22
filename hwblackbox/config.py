@@ -76,6 +76,7 @@ EITHER = {("sensors", "lhm_gpu"): (str, bool)}
 RANGES = {("sensors", "keep_days"): (1, 3650), ("sensors", "rails_keep_days"): (1, 3650),
           ("events", "keep_days"): (1, 3650), ("ports", "down_after_min"): (0, 1440), ("dashboard", "port"): (1, 65535),
           ("disk_warn_gb",): (0, 1 << 20), ("disk_drop_gb",): (0, 1 << 20)}
+RAILS_MIN = 0.05
 
 
 def _rules(val, errors):
@@ -158,7 +159,9 @@ def load(path=None):
         cfg, errors = defaults(), ["%s: %s (using the defaults)" % (type(e).__name__, e)]
     s = cfg["sensors"]
     s["interval_s"] = min(60.0, max(1.0, float(s.get("interval_s") or 5)))
-    s["rails_interval_s"] = min(5.0, max(0.0, float(s.get("rails_interval_s") or 0)))
+    # (0 turns the rails lane off; anything else is 0.05 s at least: 0.001 would be a thousand synced rows a second)
+    rails = float(s.get("rails_interval_s") or 0)
+    s["rails_interval_s"] = 0.0 if rails <= 0 else min(5.0, max(RAILS_MIN, rails))
     if errors:
         cfg["error"] = "config.json: " + "; ".join(errors)
     return cfg

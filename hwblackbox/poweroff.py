@@ -35,12 +35,28 @@ Q6008 = "*[System[(EventID=6008)]]"
 
 
 def _event_time(query):
-    """The newest matching System record's local time, through the event log API: wevtutil's text names its fields
-    in Windows' display language ("Date:", "Datum:", ...), so only the report shows that text."""
+    """The newest matching System record's time (local, with its offset), through the event log API: wevtutil's text
+    names its fields in Windows' display language ("Date:", "Datum:", ...), so only the report shows that text. Until
+    1.2.0 it came without the offset: in the hour that repeats as daylight saving ends, a record from the second one
+    was taken for an hour older, and a power loss and boot then got no report."""
     from .events import newest_event
-    at, _ = newest_event("System", query)
+    at, data = newest_event("System", query)
+    if not at:
+        return None
+    if isinstance(data.get("_t"), (int, float)):
+        return dt.datetime.fromtimestamp(data["_t"]).astimezone()
     try:
-        return dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S") if at else None
+        return dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S").astimezone()
+    except ValueError:
+        return None
+
+
+def event_epoch(at, data):
+    """A record's time from newest_event, as epoch seconds (its exact "_t", else its local time read as such)."""
+    if isinstance((data or {}).get("_t"), (int, float)):
+        return data["_t"]
+    try:
+        return dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S").timestamp() if at else None
     except ValueError:
         return None
 
@@ -193,6 +209,83 @@ def _tail_rows(prefix, before, n):
     return rows[-n:]
 
 
+def clock_set_back(now):
+    """The newest row of the 5-second log (and the rails log) when it's later than `now`: rows from the future mean
+    the clock now reads earlier than it did when they were written, so it was set back. A PC whose clock battery
+    (the CMOS battery) has run flat boots after a power cut with its date years back, and Windows puts it right only
+    once the network is up: the service starts before that. Returns (epoch of that row) or None."""
+    newest = None
+    for prefix in ("flight_", "rails_"):
+        rows = _tail_rows(prefix, float("inf"), 1)
+        if rows and (newest is None or rows[-1][0] > newest):
+            newest = rows[-1][0]
+    return newest if newest is not None and newest > now + 60 else None
+
+
+# A blue screen's own record: Windows Error Reporting's BugCheck (System log, event 1001), written at the boot after it
+# once the dump is saved, which can be minutes after the service started. Its values: the stop code with its four
+# parameters, where the dump was saved, the report's id.
+Q1001 = "*[System[Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and (EventID=1001)]]"
+LATER = None             # {"name", "boot", "last"}: a report written before its blue screen's record (bugcheck_later)
+
+
+def bugcheck_record(since):
+    """The newest BugCheck record written at or after `since` (epoch seconds): {"at", "bugcheck", "dump", "report"}, or
+    None. The dump's path is Windows' own words, quoted, never opened: the service never follows a path from another
+    program's record."""
+    from .events import newest_event
+    at, data = newest_event("System", Q1001)
+    t = event_epoch(at, data)
+    if t is None or t < since:
+        return None
+    vals = data.get("_values") or []
+    pick = lambda name, i: str(data.get(name) or (vals[i] if len(vals) > i else "") or "").strip()   # noqa: E731
+    return {"at": at, "bugcheck": pick("param1", 0)[:300], "dump": pick("param2", 1)[:260],
+            "report": pick("param3", 2)[:80]}
+
+
+def dump_files(since, folder=None):
+    """The crash dumps Windows saved at or after `since` (epoch seconds): its Minidump folder's files and MEMORY.DMP,
+    in Windows' own folder (from Windows, not a variable), as [(path, MB, epoch written)], newest first."""
+    windir = folder or os.path.dirname(paths.system_dir())
+    found = []
+    candidates = [os.path.join(windir, "MEMORY.DMP")]
+    try:
+        candidates += [os.path.join(windir, "Minidump", f) for f in os.listdir(os.path.join(windir, "Minidump"))
+                       if f.lower().endswith(".dmp")]
+    except OSError:
+        pass
+    for p in candidates:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if st.st_mtime >= since and not getattr(st, "st_file_attributes", 0) & 0x400:
+            found.append((p, round(st.st_size / 2**20, 1), st.st_mtime))
+    return sorted(found, key=lambda d: -d[2])[:5]
+
+
+def bugcheck_text(rec, dumps):
+    """The report's section on a blue screen: Windows' record and the dump files, or '' when there's neither."""
+    if not rec and not dumps:
+        return ""
+    out = ["BLUE SCREEN (Windows Error Reporting's BugCheck record, event 1001, and the dump it saved):"]
+    if rec:
+        out.append("Recorded:     %s" % rec["at"])
+        if rec["bugcheck"]:
+            out.append("The bugcheck: %s  (the stop code, then its four parameters)" % rec["bugcheck"])
+        if rec["dump"]:
+            out.append("Dump saved:   %s  (as Windows recorded it)" % rec["dump"])
+        if rec["report"]:
+            out.append("Report id:    %s" % rec["report"])
+    for p, size, t in dumps:
+        out.append("Dump file:    %s  %.1f MB, written %s" % (p, size, iso_at(t).replace("T", " ")))
+    if dumps:
+        out.append("              (WinDbg, from the Microsoft Store, opens it: !analyze -v names the driver it "
+                   "blames. Share it only with someone you trust: it holds part of what was in memory.)")
+    return "\n".join(out) + "\n"
+
+
 def _last_record_before(before):
     """The service's last record before `before` (epoch seconds) from the newest events_*.jsonl files, or None."""
     try:
@@ -284,18 +377,27 @@ def check(boot=None, now=None):
     txt_41, txt_6008 = _wevtutil(Q41, 1), _wevtutil(Q6008, 1)      # (the records as text, for the report)
     from .events import hardware_records, newest_event
     at41, data41 = newest_event("System", Q41)
-    why = why_41(data41) if at41 and dt.datetime.strptime(at41, "%Y-%m-%d %H:%M:%S").timestamp() >= b - margin \
-        else ""
+    t41 = event_epoch(at41, data41)
+    why = why_41(data41) if t41 is not None and t41 >= b - margin else ""
     os.makedirs(paths.P.incidents, exist_ok=True)
     name = "incident_%s.txt" % boot.strftime("%Y%m%d_%H%M%S")
-    flight = _tail_rows("flight_", b, 120)
-    rails = _tail_rows("rails_", b, 240)
+    # The last rows before the boot, by their times. With the clock set back (clock_set_back) every row is "after" the
+    # boot by time: then the newest rows are taken whatever their time (until 1.2.0 the report had none).
+    back = clock_set_back((now or dt.datetime.now()).timestamp())
+    before = float("inf") if back else b
+    flight = _tail_rows("flight_", before, 120)
+    rails = _tail_rows("rails_", before, 240)
     ends = [rows[-1][0] for rows in (flight, rails) if rows]
     last = max(ends) if ends else None
-    rec = _last_record_before(b)
+    rec = _last_record_before(before)
     # the hardware's own error records (WHEA) from an hour before it went down to 15 minutes after the boot: a fatal
     # one is written at the boot after the crash it caused
-    hw = hardware_records((last or b) - 3600, b + 900)
+    hw = hardware_records(last - 3600, last + 3600) + hardware_records(b - 120, b + 900) if back and last else \
+        hardware_records((last or b) - 3600, b + 900)
+    # a blue screen's own record and dump (the record may come minutes later: then bugcheck_later adds it). With the
+    # clock set back, a dump's time can't say whether it's this one's: none listed.
+    bsod = bugcheck_record(b - margin)
+    dumps = dump_files(min(b, last or b) - 600) if not back else []
     desc = ""
     m = re.search(r"Description:\s*(.+)", txt_6008, re.DOTALL)
     if m:
@@ -304,11 +406,17 @@ def check(boot=None, now=None):
         f.write("HW Blackbox: power-off report (written %s)\n" % now_iso())
         f.write("=" * 70 + "\n\n")
         f.write("Booted at:    %s, after a shutdown that wasn't clean\n" % iso_at(b).replace("T", " "))
+        if back:
+            f.write("The clock:    it read the time above at the boot, earlier than the last rows (%s): it was set\n"
+                    "              back, most likely by a flat clock battery (the CMOS battery on the board). The rows\n"
+                    "              below are the last ones written, with the times the clock had then; the gap\n"
+                    "              can't be told.\n" % iso_at(back).replace("T", " "))
         if last:
             f.write("Went down:    %s  (the last sample before the gap; Windows' own\n"
                     "              estimate in the 6008 below can be many minutes off)\n"
                     % iso_at(last, ms=True).replace("T", " "))
-            f.write("Gap:          %d s\n" % (b - last))
+            if not back:
+                f.write("Gap:          %d s\n" % (b - last))
         if rec:
             said = "a clean shutdown had begun" if rec.get("kind") == "shutdown" else "no shutdown had begun"
             f.write("Last record:  %s %s (%s)\n" % (rec.get("ts", "?").replace("T", " "), rec.get("kind"), said))
@@ -327,6 +435,8 @@ def check(boot=None, now=None):
                 f.write("%s  WHEA %d, %s: %s\n" % (r["at"], r["id"], "fatal" if r["fatal"] else "corrected",
                                                   r["text"]))
             f.write("\n")
+        if bsod or dumps:
+            f.write("\n" + bugcheck_text(bsod, dumps))
         f.write("\nEVENT 6008 (unexpected shutdown):\n%s\n\n" % txt_6008)
         f.write("EVENT 41 (Kernel-Power, check BugcheckCode):\n%s\n\n" % txt_41)
         f.write("LAST SAMPLES BEFORE THE GAP (last %d rows):\n" % len(flight))
@@ -341,7 +451,37 @@ def check(boot=None, now=None):
                                            "incident": name})
     except Exception:
         pass
+    global LATER
+    LATER = {"name": name, "boot": b, "last": last} if why.startswith("Windows crashed") and not bsod else None
     return "Dirty shutdown detected: %s  ->  %s" % (desc or boot, name)
+
+
+def bugcheck_later(stop, waits=(120, 300, 600, 900)):
+    """A report written after a blue screen before Windows had written the BugCheck record: look again at 2, 5, 10 and
+    15 minutes of uptime, and add the record (and the dump files) to the end of the report when it comes."""
+    global LATER
+    want, LATER = LATER, None
+    if not want:
+        return
+    path = os.path.join(paths.P.incidents, want["name"])
+    for at in waits:
+        wait = want["boot"] + at - time.time()
+        if wait > 0 and stop.wait(wait):
+            return
+        rec = bugcheck_record(want["boot"] - 120)
+        if rec or at == waits[-1]:
+            text = bugcheck_text(rec, dump_files(min(want["boot"], want["last"] or want["boot"]) - 600))
+            if text:
+                try:
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write("\n(added %s, %s)\n%s" % (
+                            now_iso().replace("T", " "), "once Windows had written its record" if rec else
+                            "15 minutes after the boot: Windows wrote no BugCheck record", text))
+                        f.flush()
+                        os.fsync(f.fileno())
+                except OSError:
+                    pass
+            return
 
 
 def rechecks(stop, jrnl=None):
@@ -357,6 +497,8 @@ def rechecks(stop, jrnl=None):
             if found:
                 if jrnl:
                     jrnl.write("power_off_report", {"summary": found})
+                if LATER:
+                    bugcheck_later(stop)
                 return
         except Exception:
             pass

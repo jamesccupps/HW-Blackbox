@@ -130,13 +130,15 @@ td.wrap { white-space: normal; word-break: break-all; color: var(--muted); max-w
 input[type=search], select { background: var(--panel); color: var(--text); border: 1px solid var(--line2);
   border-radius: 8px; padding: 6px 10px; font: inherit; }
 input[type=search] { min-width: 220px; }
-.seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
+/* (wraps in a narrow window: until 1.2.0 the Events tab's filters past "Hardware" were cut off below about 590 px) */
+.seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
 .seg button { background: var(--panel); border: 0; padding: 6px 11px; cursor: pointer; color: var(--muted); }
 .seg button + button { border-left: 1px solid var(--line2); }
 .seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .btn { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
 .btn:hover, .seg button:hover { color: var(--text); }
 .btn:disabled { opacity: .45; cursor: default; color: inherit; }
+a.btn { color: var(--text); text-decoration: none; display: inline-block; }
 label.chk { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; }
 
 /* charts */
@@ -192,6 +194,7 @@ tr.raw pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px
 .viewer .vbar { position: sticky; top: -14px; margin: -14px -14px 10px; padding: 8px 14px; display: flex; gap: 10px;
   align-items: center; background: var(--bg2); border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 .viewer .vbar .btn { margin-left: auto; padding: 3px 10px; font-size: 12.5px; }
+.viewer .vbar .btn + .btn { margin-left: 0; }
 
 .bars td.barcell { width: 40%; }
 tr.pick { cursor: pointer; }
@@ -324,6 +327,7 @@ tr.pick { cursor: pointer; }
   </section>
 
   <section id="tab-events" role="tabpanel">
+    <div id="e-at" class="banner info" style="display:none" role="status"></div>
     <div class="toolbar">
       <div class="seg" id="e-range"><button data-h="24">24 hours</button><button data-h="48" class="on">48 hours</button><button data-h="168">7 days</button><button data-h="720">30 days</button></div>
       <div class="seg" id="e-group"><button data-g="" class="on">All</button><button data-g="apps">Apps</button><button data-g="power">Power &amp; shutdowns</button><button data-g="hardware">Hardware</button><button data-g="sessions">Sessions</button><button data-g="windows">Windows</button><button data-g="ports">Ports</button><button data-g="monitor">HW Blackbox</button></div>
@@ -509,8 +513,11 @@ function show(tab) {
   $$("main section").forEach(s => s.classList.toggle("on", s.id === "tab-" + tab));
   const nb = $(`nav button[data-tab="${tab}"]`); if (nb) nb.scrollIntoView({block: "nearest", inline: "nearest"});    // (a phone's nav scrolls sideways)
   $("#tip").style.display = "none";
+  // "#events:at:<epoch>": the records around a moment picked on a chart (whatHappened)
+  const around = tab === "events" && arg === "at" && +arg2 > 0;
+  if (tab === "events" && (around ? +arg2 : null) !== eAt) { eAt = around ? +arg2 : null; eAtProgs = null; eData = null; }
   if (tab === "incidents" && arg) openIncident(/^incident_\d{8}_\d{6}\.txt$/.test(arg) ? "power" : "app", arg);
-  else if (location.hash !== "#" + tab && !(tab === "charts" && arg)) history.replaceState(null, "", "#" + tab);
+  else if (location.hash !== "#" + tab && !(tab === "charts" && arg) && !around) history.replaceState(null, "", "#" + tab);
   if (tab === "charts" && +arg > 0) {                // "#charts:72": the last 72 hours
     cHours = +arg;
     $$("#c-range button").forEach(b => b.classList.toggle("on", +b.dataset.h === cHours));
@@ -967,11 +974,15 @@ function bucketize(ts, vs, t0, t1, n) {
   }
   return {t: sum.map((_, b) => t0 + (b + 0.5) * step), avg: sum.map((s, b) => cnt[b] ? s / cnt[b] : null), min: lo, max: hi};
 }
+// a chart's moment on the Events tab: the records half an hour either side, and the busiest programs of that minute
+const FINE = matchMedia("(pointer: fine)").matches;      // (a mouse: the tooltip says a click opens it)
+function whatHappened(t) { location.hash = "#events:at:" + Math.round(t); }
 // one chart: series [{name, color, unit, t[], avg[], min[], max[]}] on a shared time axis; marks [{t, color, text}]
 // (minSpan: the smallest range the height stands for, so the sensor chip's one-step flicker doesn't fill the chart)
 let pointer = null;     // where the mouse was last, so a chart redrawn under it keeps its tooltip
 // (tipExtra(i): more rows for the tooltip at point i; floor: the lowest value the scale goes to, at most)
-function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true, minSpan = 0, tipExtra = null, floor = null}) {
+// (pick(t): a click on the chart, or Enter on its point: what happened then, on the Events tab)
+function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band = true, title = "", legend = true, minSpan = 0, tipExtra = null, floor = null, pick = whatHappened}) {
   const W = Math.max(280, host.clientWidth - 24), H = height, L = 54, R = 12, T = 10, B = 24;
   let lo = Infinity, hi = -Infinity;
   for (const s of series) for (let i = 0; i < s.avg.length; i++) {
@@ -1023,19 +1034,25 @@ function drawChart(host, {series, t0, t1, unit, height = 230, marks = [], band =
     tip.innerHTML = `<div class="t">${span > 26 * 3600 ? fmtDateTime(ref[best]) : fmtTime(ref[best])}</div>` + series.map(s => {
       const v = s.avg[best]; const mm = band && s.min && s.min[best] != null && s.max[best] !== s.min[best] ? ` <span class="dim">(${fmtVal(s.min[best], s.unit)}–${fmtVal(s.max[best], s.unit)})</span>` : "";
       return `<div class="row"><span style="color:${s.color}">${esc(s.name)}</span><span>${v == null ? "no data" : fmtVal(v, s.unit)}${mm}</span></div>`;
-    }).join("") + (tipExtra ? tipExtra(best) : "") + marks.filter(m => Math.abs(m.t - ref[best]) < (t1 - t0) / 80).map(m => `<div class="row"><span style="color:${m.color}">${esc(m.text)}</span></div>`).join("");
+    }).join("") + (tipExtra ? tipExtra(best) : "") + marks.filter(m => Math.abs(m.t - ref[best]) < (t1 - t0) / 80).map(m => `<div class="row"><span style="color:${m.color}">${esc(m.text)}</span></div>`).join("") +
+      (pick && FINE ? `<div class="row dim" style="margin-top:4px">Click: what happened then</div>` : "");
     tip.style.display = "block";
+    shown = ref[best];
     const tw = tip.offsetWidth; let left = e.clientX + 14; if (left + tw > innerWidth - 8) left = e.clientX - tw - 14;
     tip.style.left = left + "px"; tip.style.top = (e.clientY + 12) + "px";
   };
   // (pointer events: a mouse, a pen or a finger)
+  let shown = null;
   sv.addEventListener("pointermove", e => { pointer = {clientX: e.clientX, clientY: e.clientY}; move(e); });
   sv.addEventListener("pointerdown", move);
+  // a click (not a finger's tap: that shows the values) opens the Events tab at that moment
+  sv.addEventListener("click", e => { if (pick && e.pointerType !== "touch" && shown != null) pick(shown); });
   sv.addEventListener("pointerleave", () => { pointer = null; tip.style.display = "none"; xh.style.display = "none"; });
   // the keyboard: Tab to a chart, then the arrow keys step through its points (Page Up / Down ten at a time, Home and
   // End the ends); the values show as the mouse's would, and a screen reader reads them out
   let at = null;
   sv.addEventListener("keydown", e => {
+    if (e.key === "Enter" && pick && at != null) { e.preventDefault(); pick(series[0].t[at]); return; }
     const ref = series[0].t, step = {ArrowLeft: -1, ArrowRight: 1, PageUp: -10, PageDown: 10}[e.key];
     if (!ref.length || (step == null && e.key !== "Home" && e.key !== "End")) return;
     e.preventDefault();
@@ -1128,7 +1145,7 @@ TABS.power = {every: 5000, async load() {
     const st = !vals.length ? "" : `now <b>${fmtVal(vals[vals.length - 1], unit)}</b> · ` + (lo === hi ? "steady" : `${fmtVal(lo, unit)} to ${fmtVal(hi, unit)}`);
     drawChart($("#pr" + i), {series: [S(col, name, color, unit)], t0, t1, unit, height: 150, legend: false, minSpan, title: `<b>${esc(name)}</b><span>${st}</span>`});
   });
-  $("#p-info").textContent = `${d.t.length.toLocaleString()} samples` + (d.fast_hz ? ` · ${d.fast_hz} a second` : "") + " · from the rails log, 4 a second";
+  $("#p-info").textContent = `${d.t.length.toLocaleString()} samples` + (d.fast_hz ? ` · ${d.fast_hz} a second` : "") + " · from the rails log";
   // the sensor chip's step on each rail: the smallest difference between two readings it gave (in mV)
   const step = col => { const v = [...new Set(d[col].filter(x => x != null).map(x => Math.round(x * 1000)))].sort((a, b) => a - b); let m = Infinity; for (let i = 1; i < v.length; i++) m = Math.min(m, v[i] - v[i - 1]); return isFinite(m) ? m : null; };
   const steps = [["+12 V", step("v12_v")], ["+5 V", step("v5_v")], ["+3.3 V", step("v33_v")]].filter(x => x[1]);
@@ -1173,24 +1190,47 @@ document.addEventListener("click", e => {
 
 // Events -------------------------------------------------------------------------------------------------------
 let eHours = 48, eGroup = "", eData = null, eOpen = new Set();
-segment($("#e-range"), b => { eHours = +b.dataset.h; TABS.events.load(); });
+// eAt: a moment from a chart ("#events:at:<epoch>"): the records half an hour either side of it, and that minute's
+// busiest programs (eAtProgs)
+let eAt = null, eAtProgs = null;
+const AROUND = 1800;
+segment($("#e-range"), b => { eHours = +b.dataset.h; if (eAt) { eAt = null; history.replaceState(null, "", "#events"); } TABS.events.load(); });
 segment($("#e-group"), b => { eGroup = b.dataset.g; TABS.events.render(); });
 $("#e-search").addEventListener("input", () => TABS.events.render());
 TABS.events = {every: 15000, async load() {
-  eData = await api(`/api/events?hours=${eHours}&limit=3000`);
+  if (eAt) {
+    eData = await api(`/api/events?start=${eAt - AROUND}&end=${eAt + AROUND}&limit=3000`);
+    if (!eAtProgs || eAtProgs.for !== eAt) eAtProgs = Object.assign(await api(`/api/programs_at?t=${eAt}`), {for: eAt});
+  } else eData = await api(`/api/events?hours=${eHours}&limit=3000`);
   if (!selecting($("#e-table"))) this.render();
 }, render() {
   if (!eData) return;
+  $$("#e-range button").forEach(b => b.classList.toggle("on", !eAt && +b.dataset.h === eHours));
+  const at = $("#e-at");
+  at.style.display = eAt ? "" : "none";
+  if (eAt) {
+    const p = eAtProgs && eAtProgs.for === eAt ? eAtProgs : null;
+    const part = (label, list, fmt) => list && list.length ? `<div style="margin-top:4px"><b>${label}:</b> ${list.map(fmt).join(", ")}</div>` : "";
+    at.innerHTML = `<b>Around ${fmtTime(eAt, false)} on ${DAY[new Date(eAt * 1000).getDay()]} ${fmtDate(eAt)}</b>, half an hour either side <span class="dim">(the moment you picked is marked ◆)</span> · <a href="#events" id="e-at-back">back to the last ${eHours >= 48 ? eHours / 24 + " days" : eHours + " hours"}</a>` +
+      (!p ? "" : p.t == null ? `<div class="dim" style="margin-top:4px">The programs log has no minute there (the PC off, or before HW Blackbox 1.0.7).</div>` :
+        `<div class="dim" style="margin-top:6px">The busiest programs in the minute up to ${fmtTime(p.t, false)}:</div>` +
+        part("CPU", p.cpu, c => `${esc(c.name)} ${fmtPct(c.pct)} <span class="dim">(${fmtCores(c.cores)}${c.pid ? ", pid " + c.pid : ""})</span>`) +
+        part("Memory", p.mem, m => `${esc(m.name)} ${fmtMB(m.mb)}` + (m.cmd ? ` <span class="dim">(pid ${m.pid}: ${esc(m.cmd)})</span>` : "")) +
+        part("GPU", p.gpu, g => `${esc(g.name)} ${fmtPct(g.pct)}`));
+  }
   const q = $("#e-search").value.trim().toLowerCase();
   const list = eData.events.filter(e => (!eGroup || e.group === eGroup) && (!q || e.text.toLowerCase().includes(q))).slice().reverse();
-  const rows = []; let day = "";
+  const rows = []; let day = "", marked = !eAt;
+  const mark = () => `<tr class="ev-day" style="color:var(--violet)"><td class="mono">${fmtTime(eAt)}</td><td>◆</td><td>The moment you picked on the chart</td></tr>`;
   list.slice(0, 1500).forEach(e => {
+    if (!marked && e.t < eAt) { rows.push(mark()); marked = true; }
     const dkey = new Date(e.t * 1000).toDateString();
     if (dkey !== day) { day = dkey; rows.push(`<tr class="ev-day"><td colspan="3">${DAY[new Date(e.t * 1000).getDay()]} ${fmtDate(e.t)}</td></tr>`); }
     const id = e.t + "|" + e.kind + "|" + e.text.slice(0, 60);
     rows.push(`<tr class="ev" data-id="${esc(id)}" tabindex="0" role="button" aria-expanded="${eOpen.has(id)}"><td class="mono">${fmtTime(e.t)}</td><td><span class="dot ${e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : ""}"></span></td><td class="text">${esc(e.text)}</td></tr>`);
     if (eOpen.has(id)) rows.push(`<tr class="raw"><td></td><td colspan="2"><pre>${esc(JSON.stringify(e.rec, null, 1))}</pre></td></tr>`);
   });
+  if (!marked) rows.push(mark());
   redraw($("#e-table tbody"), rows.join("") || `<tr><td colspan="3" class="dim">Nothing in this range.</td></tr>`, "data-id");
   $("#e-info").textContent = `${list.length.toLocaleString()} of ${eData.total.toLocaleString()} records` + (list.length > 1500 ? " (the newest 1,500 shown)" : "");
 }};
@@ -1258,7 +1298,9 @@ async function openIncident(src, name) {
   if (matchMedia("(max-width: 900px)").matches && current === "incidents") v.scrollIntoView({block: "start", behavior: "smooth"});
   try {
     const r = await api(`/api/incident?src=${encodeURIComponent(src)}&name=${encodeURIComponent(name)}`);
-    v.innerHTML = `<div class="vbar"><span class="mono">${esc(name)}</span><button class="btn" id="i-copy">Copy</button></div><pre>${esc(r.text)}</pre>`;
+    // (Save as a zip: the report, the logs of its day or days and the status, to hand to someone helping)
+    v.innerHTML = `<div class="vbar"><span class="mono">${esc(name)}</span><button class="btn" id="i-copy">Copy</button>` +
+      `<a class="btn" href="/api/incident.zip?name=${encodeURIComponent(name)}" download title="The report, the logs of the day it covers and HW Blackbox's status, in one zip to hand to someone helping. It holds the programs that ran, with their command lines (passwords and tokens hidden): look before posting it anywhere public.">Save as a zip</a></div><pre>${esc(r.text)}</pre>`;
     v.scrollTop = 0;
     $("#i-copy").addEventListener("click", async e => {
       try { await navigator.clipboard.writeText(r.text); e.target.textContent = "Copied"; }
@@ -1393,11 +1435,15 @@ function badge() {
   const n = ((ovDiag && ovDiag.checks) || []).filter(c => c.level === "bad" || c.level === "warn").length;
   $('nav button[data-tab="diagnose"]').innerHTML = "Diagnose" + (n ? `<span class="count" style="background:var(--warn);color:#111">${n}</span>` : "");
 }
-setInterval(async () => {
+async function diagLook() {
   if (document.hidden || Date.now() - dgAt < 60000) return;
   dgAt = Date.now();
-  try { ovDiag = await api("/api/diagnose"); badge(); } catch (_) {}
-}, 5000);
+  try { ovDiag = await api("/api/diagnose"); badge(); } catch (_) { return; }
+  if (current === "overview") TABS.overview.load().catch(() => {});      // (its Hardware card and banner, now)
+}
+// (asked at once when the page opens: until 1.2.0 the first look waited for this timer, and the Overview's Hardware
+// card said "Checking…" and the badge was missing for about 10 seconds)
+setInterval(diagLook, 5000);
 
 // Settings -----------------------------------------------------------------------------------------------------
 // This user's notifications (theirs alone: sessions\<their SID>\settings.json), and the add-ons. Home Assistant is
@@ -1465,7 +1511,7 @@ $("#tab-settings").addEventListener("click", async e => {
 });
 
 // go
-header().then(() => { show(location.hash.slice(1) || "overview"); updates(false); });
+header().then(() => { show(location.hash.slice(1) || "overview"); updates(false); diagLook(); });
 </script>
 </body>
 </html>

@@ -12,7 +12,7 @@ import psutil
 from . import VERSION
 from .poweroff import last_dirty_shutdown
 from .sensors import SLOW_CPU_AGE
-from .util import now_iso, parse_iso
+from .util import iso_at, now_iso, parse_iso
 
 _disks = {"at": 0.0, "list": []}
 
@@ -136,14 +136,28 @@ def build(svc):
             problems.extend(sensor_problems(sens, a))
         else:
             a["rails"] = a["cpu_temperature"] = "not elevated"
-        fast = cfg["sensors"]["rails_interval_s"]
+        fast = sens.get("fast_interval_s") or cfg["sensors"]["rails_interval_s"]
         hz = sens.get("fast_hz")
         # A note for the page, not a problem: the rails are still read, only less often, and what they read is what
-        # matters. (The lane stopping is a problem: the supervisor's "stuck".) Until 1.0.7 this was a problem, and a
-        # core kept busy all night by another program sent five phone alerts that read like a fault in the power.
-        if svc.sensors.rails_on() and hz is not None and hz < 0.8 / fast:
+        # matters. (The lane stopping is a problem: the supervisor's "stuck"; the lane failing to write, below.) Until
+        # 1.0.7 this was a problem, and a core kept busy all night by another program sent five phone alerts that read
+        # like a fault in the power.
+        failed = {k: v for k, v in (sens.get("write_errors") or {}).items() if v and v[0] is not None and v[0] < 90}
+        if svc.sensors.rails_on() and hz is not None and fast and hz < 0.8 / fast and "the rails log" not in failed:
             a["rails_note"] = "read %.1f times a second instead of %g: still read, only less often" % (
                 hz, round(1 / fast, 2))
+    else:
+        failed = {}
+    # A log that couldn't be written in the last minute and a half (a full drive, a file held by another program):
+    # until 1.2.0 that showed nowhere, or as the rails being "read less often". The words stay the same while it lasts.
+    jrnl = getattr(svc, "jrnl", None)
+    j_at, j_err = getattr(jrnl, "error_at", None), getattr(jrnl, "last_error", None)
+    if j_at is not None and time.monotonic() - j_at < 90:
+        failed["the records"] = [round(time.monotonic() - j_at, 1), j_err]
+    if failed:
+        first = failed[sorted(failed)[0]][1]
+        problems.append("HW Blackbox couldn't write %s in the last minute (%s): is the drive full?" % (
+            " and ".join(sorted(failed)), first))
     lds = last_dirty_shutdown() or {}
     a["last_power_loss_died_at"] = lds.get("time_of_death")
     a["watcher"] = "running" + (" (test)" if svc.test else "")
@@ -215,6 +229,8 @@ def write(svc, state, problems, attrs):
         "agents": svc.agents.view, "ha": svc.ha_result(), "cpu_pct": svc.cpu_pct, "mem_mb": mem,
         "threads": {k: None if v is None else round(v, 1) for k, v in svc.thread_ages().items()},
         "event_logs": {log: pos is not None for log, pos in svc.watcher.events.last.items()},
+        # (the port check's last look: ports.json is written only when the table changes, from 1.2.0)
+        "ports_checked": iso_at(svc.ports.checked) if getattr(svc.ports, "checked", None) else None,
         "config_error": svc.cfg.get("error"), "data_dir": paths.P.data,
         "last_dirty_shutdown": last_dirty_shutdown()}, durable=True)
 

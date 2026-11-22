@@ -21,7 +21,6 @@ fans) and a Corsair digital power supply; NVML for an NVIDIA GPU; Windows for th
 the board's sensors need ring-0 access, which LibreHardwareMonitor gets through the PawnIO driver: as SYSTEM or an
 admin only. Without it there's still the GPU, the CPU load and memory."""
 import csv
-import datetime as dt
 import os
 import re
 import sys
@@ -47,6 +46,7 @@ FAST_COLUMNS = [
 ]
 
 CPU_INTERVAL = 1.0      # seconds between the CPU lane's reads
+JSON_IDLE = 30.0        # seconds between two writes of state\sensors.json while nobody looks at the page
 FAST_CPU_AGE = 1.5      # the oldest CPU reading a rails row takes (older: its CPU columns stay blank)
 SLOW_CPU_AGE = 15.0     # ... and a 5-second row (a CPU lane held up longer leaves them blank: see status)
 
@@ -217,6 +217,10 @@ class NvmlBackend:
                 out[key] = fn()
             except Exception:
                 failed += 1
+        # (a GPU at 5 °C or less is a misread, seen 5 times in 1.8 million samples, most likely during a driver update:
+        # left out, as LibreHardwareMonitor's impossible temperatures are by _temp)
+        if "gpu_temp_c" in out and not 5 < out["gpu_temp_c"] <= 130:
+            del out["gpu_temp_c"]
         if failed and not out:
             try:
                 p.nvmlShutdown()
@@ -412,13 +416,14 @@ class Sampler:
     def sample_fast(self):
         """The narrow row: rails, Vcore/SoC, CPU package power and temperature (the CPU lane's newest), and a digital
         power supply's own channels. No NVML and no Windows counters: they're most of the cost of a full sample, and
-        none of them can show a rail sagging."""
+        none of them can show a rail sagging. The CPU's columns are filled whether or not the board answered: until
+        1.2.0 a PC with no board sensor chip (a laptop) wrote rows with only their time in them."""
         s = {c: "" for c in FAST_COLUMNS}
         s["timestamp"] = now_iso(ms=True)
         lhm = self.lhm.read_fast()
+        lhm.update(self.cpu_now(FAST_CPU_AGE))
         if not lhm:
             return s
-        lhm.update(self.cpu_now(FAST_CPU_AGE))
         s["v12_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("+12",)), 3)
         s["v5_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("+5",), ("5vsb", "standby")), 3)
         s["v33_v"] = _r(_pick(lhm, "SuperIO", "Voltage", ("3vcc", "+3.3"), ("3vsb", "avcc", "vbat", "standby")), 3)
@@ -607,6 +612,13 @@ class Sensors:
         self.stats = SensorStats(started)
         self.status_cache = None
         self.board = {}
+        self.fast_interval = self.cfg["rails_interval_s"]
+        self.write_errors = {}           # which log -> (time.monotonic(), the error) of its last failed write
+        # Someone looking at the page? (the service sets it: a session agent's heartbeat says its page asked lately).
+        # state\sensors.json is written every sample then, and every JSON_IDLE seconds otherwise: from 1.2.0, since
+        # nothing else needs it fresher, and every 5 s it was a fifth of what the service wrote to the disk.
+        self.watched = None
+        self.json_at = 0.0
 
     def open(self):
         """Open the sensors (slow: a few seconds for LibreHardwareMonitor) and take a first sample."""
@@ -649,14 +661,39 @@ class Sensors:
         if self.sampler.lhm.computer is not None:
             self.sampler.cpu_lane = True             # (open()'s sample read the CPU: the first rows have that)
             threading.Thread(target=self._cpu, args=(stop,), name="cpu", daemon=True).start()
+        self.fast_interval = self.fast_interval_for(self.board)
         threading.Thread(target=self._slow, args=(stop,), name="sensors", daemon=True).start()
         if self.rails_on():
             threading.Thread(target=self._fast, args=(stop,), name="rails", daemon=True).start()
 
+    def fast_interval_for(self, board):
+        """How often the fast lane writes a row: rails_interval_s (4 a second) with a board sensor chip; without one
+        (a laptop, or a board LibreHardwareMonitor can't read) once a second, the CPU lane's own rate: there are no
+        rails, and faster rows would only repeat the CPU's reading (each row synced to the disk, on battery too)."""
+        every = self.cfg["rails_interval_s"]
+        if every > 0 and not board.get("now"):
+            every = max(every, CPU_INTERVAL)
+        return every
+
     def rails_on(self):
-        """The 4-a-second lane needs the board's sensors (elevated): without them its rows would all be empty."""
+        """The fast lane needs the CPU's and the board's sensors (elevated): without them its rows would all be
+        empty."""
         s = self.sampler
         return self.cfg["rails_interval_s"] > 0 and bool(s and s.admin and s.lhm.computer)
+
+    def write_failed(self, which, exc):
+        with self.lock:
+            self.write_errors[which] = (time.monotonic(), ("%s: %s" % (type(exc).__name__, exc))[:120])
+
+    def json_due(self):
+        if self.watched is not None:
+            try:
+                if not self.watched() and time.monotonic() - self.json_at < JSON_IDLE:
+                    return False
+            except Exception:
+                pass
+        self.json_at = time.monotonic()
+        return True
 
     def _slow(self, stop):
         interval = self.cfg["interval_s"]
@@ -673,9 +710,15 @@ class Sensors:
                 row, lhm = s.sample()
                 row["note"] = note
                 note = ""
-                logger.write(row)
                 try:
-                    write_json(paths.P.sensors, self.stats.build(s, lhm, row))      # (never at the CSV's expense)
+                    logger.write(row)
+                except Exception as e:
+                    self.write_failed("the 5-second log", e)
+                    raise
+                try:
+                    built = self.stats.build(s, lhm, row)        # (the minimum, maximum and average take every sample)
+                    if self.json_due():
+                        write_json(paths.P.sensors, built)      # (never at the CSV's expense)
                 except Exception:
                     pass
                 with self.lock:
@@ -725,14 +768,18 @@ class Sensors:
         rounds every wait up to its 15.6 ms tick, so waiting "the rest of the interval" ran 4 % slow. A late row makes
         the next wait shorter; after a real stall (the sensor lock held, a slow disk) the schedule starts again."""
         winapi.raise_thread_priority(highest=True)
-        interval = self.cfg["rails_interval_s"]
+        interval = self.fast_interval
         logger = CsvLogger("rails_", FAST_COLUMNS)
         due = time.monotonic()
         while not stop.is_set():
             self.beats["rails"] = time.monotonic()
             try:
                 row = self.sampler.sample_fast()
-                logger.write(row)
+                try:
+                    logger.write(row)
+                except Exception as e:
+                    self.write_failed("the rails log", e)
+                    raise
                 self.fast_last = row["timestamp"]
                 self.fast_count += 1
             except Exception:
@@ -749,6 +796,7 @@ class Sensors:
         with self.lock:
             row = dict(self.latest)
             count, errors, written = self.count, self.errors, self.written
+            failed = dict(self.write_errors)
         now, rows = time.monotonic(), self.fast_count                # (a clock change can't skew the rate)
         prev, self.fast_mark = self.fast_mark, (now, rows)
         if not self.rails_on():
@@ -765,7 +813,10 @@ class Sensors:
                 "admin": s.admin if s else None, "sensors": self.lhm_count, "last_sample": row.get("timestamp"),
                 "last_sample_age_s": None if written is None else round(now - written, 1),
                 "rows": count, "errors": errors, "fast_last": self.fast_last, "fast_rows": rows,
-                "fast_hz": self.fast_hz, "rails_ok": row.get("v12_v", "") != "",
+                "fast_hz": self.fast_hz, "fast_interval_s": self.fast_interval if self.rails_on() else None,
+                # (each log's last failed write: how long ago, and the error)
+                "write_errors": {k: [round(now - t, 1), text] for k, (t, text) in failed.items()},
+                "rails_ok": row.get("v12_v", "") != "",
                 "cpu_temp_ok": row.get("cpu_temp_c", "") != "",
                 # the driver the CPU's and the board's sensors are read through, and the board's sensor chip
                 "driver": winapi.service_state("PawnIO"), "board_chip": self.board.get("now"),

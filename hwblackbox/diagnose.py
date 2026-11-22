@@ -129,6 +129,8 @@ class Inputs:
         self.watched_mem = {k: sorted(v) for k, v in (d.get("watched_mem") or {}).items()}  # exe -> [(t, MB)]
         self.drives = d.get("drives") or {}               # state\drives.json: {"drives": [...], "error"}
         self.drive_rows = d.get("drive_rows") or []      # [(t, disk, {column: value})], the last 30 days
+        self.sleep_battery = d.get("sleep_battery") or []  # [(slept, woke, (t, %, on AC) before, (t, %, on AC) after)]
+        self._step = None
         self.by_program = collections.defaultdict(list)
         self.minutes = {}                                 # minute's epoch -> its rows
         for r in self.programs:
@@ -140,6 +142,24 @@ class Inputs:
         """[(t, value)] of a 5-second log column, blanks left out."""
         vals = self.flight.get(col) or []
         return [(t, v) for t, v in zip(self.flight_t, vals) if v is not None and v == v]
+
+    def seconds(self, s, test):
+        """How long a series (series()) met `test`: each row counts for the time to the next row (60 s at most: a gap
+        is the PC off or asleep), the last one for the log's usual spacing. Until 1.2.0 every row counted as 5 s, wrong
+        with sensors.interval_s set otherwise."""
+        total = 0.0
+        step = self.row_step()
+        for i, (t, v) in enumerate(s):
+            if test(v):
+                total += min(60.0, s[i + 1][0] - t) if i + 1 < len(s) else step
+        return total
+
+    def row_step(self):
+        """The 5-second log's usual spacing (the median gap between its rows), in seconds."""
+        if self._step is None:
+            gaps = sorted(b - a for a, b in zip(self.flight_t, self.flight_t[1:]) if 0 < b - a <= 60)
+            self._step = gaps[len(gaps) // 2] if gaps else 5.0
+        return self._step
 
     def sensor(self, sid):
         for s in self.sensors:
@@ -515,7 +535,7 @@ def check_temperature(x, col, part, warn, bad, prog_col, advice):
     if not s:
         return None
     t_hot, hot = max(s, key=lambda p: p[1])
-    over = sum(1 for _t, v in s if v >= warn) * 5.0                       # (a row every 5 s)
+    over = x.seconds(s, lambda v: v >= warn)
     level = "bad" if hot >= bad else "warn" if over >= 300 else "ok"
     summary = "Hottest %.0f °C at %s" % (hot, when(t_hot, x.now))
     if level == "ok":
@@ -582,7 +602,7 @@ def check_busy(x):
             continue
         # the longest stretch (minutes no more than 3 apart)
         runs, cur = [], []
-        for r in sorted(busy):
+        for r in sorted(busy, key=lambda r: r[0]):     # (by time only: whole rows can hold None, which won't compare)
             if cur and r[0] - cur[-1][0] > 180:
                 runs.append(cur)
                 cur = []
@@ -677,8 +697,8 @@ def check_ram(x):
         return None
     total = x.sensor("Psutil/ram_total_gb")
     t_hi, hi = max(s, key=lambda p: p[1]) if s else (None, None)
-    over = sum(1 for _t, v in s if v >= 90) * 5.0
-    level = "bad" if low or sum(1 for _t, v in s if v >= 95) * 5.0 >= 300 else "warn" if over >= 900 else "ok"
+    over = x.seconds(s, lambda v: v >= 90)
+    level = "bad" if low or x.seconds(s, lambda v: v >= 95) >= 300 else "warn" if over >= 900 else "ok"
     summary = "Highest %.0f %%%s" % (hi, " of %.1f GB" % total if total else "") if hi is not None else \
         "Windows ran low on memory"
     if level == "ok":
@@ -705,7 +725,7 @@ def check_vram(x):
     if not s or not total:
         return None
     t_hi, hi = max(s, key=lambda p: p[1])
-    over = sum(1 for _t, v in s if v >= 0.9 * total) * 5.0
+    over = x.seconds(s, lambda v: v >= 0.9 * total)
     summary = "Highest %s of %s (%.0f %%)" % (mb(hi), mb(total), 100 * hi / total)
     if over < 600:
         return finding("vram", "Graphics memory", "ok", summary, "the last 24 hours", link="#charts:24:gpu_vram_mb")
@@ -717,6 +737,112 @@ def check_vram(x):
                    ["Lower the game's texture quality or resolution.",
                     "Close programs holding graphics memory in the background (a browser playing video, Discord, OBS): "
                     "GPU memory on the Processes tab lists them."], "#processes:vram")
+
+
+def check_throttle(x):
+    """The firmware holding the CPU's speed down: Windows' Kernel-Processor-Power 37 ("the speed of processor N is
+    being limited by system firmware"), recorded since 1.2.0. A limit of the board's or the CPU's own: heat, power or
+    current. Normal on a laptop on battery; plugged in, or on a desktop, it's why a PC is slower than it should be."""
+    from .events import THROTTLE, throttled_seconds
+    recs = sorted((r for r in x.records if r.get("kind") == "winevent" and (r.get("source"), r.get("id")) == THROTTLE
+                   and r.get("t") and x.now - r["t"] <= 7 * DAY), key=lambda r: r["t"])
+    if not recs:
+        return finding("throttle", "Slowed down by the firmware", "ok", "No slow-downs recorded", "the last 7 days")
+    n = sum(1 + int(r.get("skipped_before") or 0) for r in recs)
+    held = [s for s in (throttled_seconds(r) for r in recs) if s is not None]
+    days = len({dt.date.fromtimestamp(r["t"]) for r in recs})
+    seen = ["Windows recorded it %d time%s on %d day%s, the last at %s" % (n, "" if n == 1 else "s", days,
+                                                                        "" if days == 1 else "s",
+                                                                        when(recs[-1]["t"], x.now))]
+    if held:
+        seen.append("Held down for %s in all, as the records say (each of the CPU's threads reports its own)" %
+                    span(sum(held)))
+    if recs[-1].get("message"):
+        seen.append("Windows' words: %s" % recs[-1]["message"][:240])
+    hot = x.series("cpu_temp_c")
+    hottest = max(v for _t, v in hot) if hot else None
+    if hottest is not None:
+        seen.append("The CPU's hottest in the last 24 hours: %.0f °C" % hottest)
+    ac = dict(x.series("on_ac"))
+    on_battery = bool(ac) and all(ac.get(min(ac, key=lambda t: abs(t - r["t"]))) == 0 for r in recs
+                                  if x.now - r["t"] <= DAY)
+    level = "warn" if hottest is not None and hottest >= 90 else "info"
+    advice = ["It's the board or the CPU keeping to a limit (heat, power or current): no fault by itself, but a reason "
+              "the PC is slower than it should be.",
+              "If the CPU runs hot (above), clean the dust out of the cooler and the vents; a laptop needs its vents "
+              "clear (a hard surface, not a bed or a lap).",
+              "Check the power plan's maximum processor state is 100 % (Control Panel → Power Options → Change plan "
+              "settings → Change advanced power settings → Processor power management), and update the BIOS."]
+    if on_battery:
+        advice.insert(0, "It came on battery: a laptop holds the CPU back on battery to last longer. Plugged in, it "
+                         "should stop.")
+    return finding("throttle", "Slowed down by the firmware", level, "The firmware held the CPU's speed down %d time%s"
+                   % (n, "" if n == 1 else "s"), "the last 7 days", seen, advice, "#events")
+
+
+def sleep_spans(records):
+    """The sleeps in the records, as [(went to sleep, woke)] epoch seconds, oldest first: Power-Troubleshooter 1 (back
+    from sleep, with both times), Modern Standby's Kernel-Power 506 to 507, and the service's own "going to sleep" to
+    "woke up". One sleep can be in more than one: overlapping spans are one."""
+    from .events import sleep_span
+    spans, start_ms, start_s = [], None, None
+    for r in sorted(records, key=lambda r: r.get("t") or 0):
+        t = r.get("t")
+        got = sleep_span(r) if r.get("kind") == "winevent" else None
+        if got:
+            spans.append(got)
+        elif r.get("kind") == "winevent" and r.get("source") == "Microsoft-Windows-Kernel-Power" and t:
+            if r.get("id") == 506:
+                start_ms = t
+            elif r.get("id") == 507 and start_ms is not None:
+                spans.append((start_ms, t))
+                start_ms = None
+        elif r.get("kind") == "power" and t:
+            ev = str(r.get("event") or "")
+            if ev == "going to sleep":
+                start_s = t
+            elif ev.startswith("woke up") and start_s is not None:
+                spans.append((start_s, t))
+                start_s = None
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+SLEEP_MIN = 1800                  # seconds: shorter sleeps say little about the drain
+
+
+def check_sleep(x):
+    """A laptop's battery while asleep (each sleep on battery of half an hour or more, the last 7 days): what it lost.
+    A laptop asleep should lose a few percent overnight; one that loses much more is woken again and again, or never
+    really sleeps (Modern Standby stays connected)."""
+    spans = []
+    for slept, woke, before, after in x.sleep_battery:
+        if woke - slept < SLEEP_MIN or not before or not after or before[2] != 0 or after[2] != 0:
+            continue                       # (plugged in at either end, or no reading of the charge)
+        spans.append((slept, woke, max(0.0, before[1] - after[1])))
+    if not spans:
+        return None
+    rate = lambda s: s[2] / ((s[1] - s[0]) / 3600.0)        # noqa: E731
+    worst = max(spans, key=rate)
+    level = "warn" if rate(worst) >= 3 and worst[2] >= 10 else "ok"
+    summary = "The most it lost: %.0f %% in %s asleep (%.1f %% an hour)" % (worst[2], span(worst[1] - worst[0]),
+                                                                           rate(worst))
+    seen = ["%s: lost %.0f %% in %s asleep (%.1f %% an hour)" % (when(s[0], x.now), s[2], span(s[1] - s[0]), rate(s))
+            for s in spans[-6:]]
+    advice = [] if level == "ok" else [
+        "Asleep, a laptop should lose a few percent overnight. More means something keeps waking it, or it doesn't "
+        "really sleep.",
+        "Run powercfg /sleepstudy in a terminal: it writes sleepstudy-report.html, with what used the battery in each "
+        "sleep.",
+        "What can wake it: powercfg /waketimers, and powercfg /devicequery wake_armed. In Device Manager, the mouse's "
+        "or the network adapter's Power Management tab turns off \"Allow this device to wake the computer\".",
+        "To lose nothing overnight: hibernate instead of sleeping (Power Options → Choose what closing the lid does)."]
+    return finding("sleep", "Battery while asleep", level, summary, "the last 7 days", seen, advice, "#events")
 
 
 def battery_sensor(x, name):
@@ -862,8 +988,8 @@ def run(d):
     steps = [check_problems, check_power_offs, check_hardware, check_crashes, check_display_resets, check_drives,
              lambda x: check_temperature(x, "cpu_temp_c", "CPU", 85, 95, 3, CPU_HEAT),
              lambda x: check_temperature(x, "gpu_temp_c", "GPU", 83, 90, 6, GPU_HEAT),
-             check_rails, check_busy, check_memory, check_ram, check_vram, check_battery, check_disk, check_update,
-             check_uptime]
+             check_rails, check_throttle, check_busy, check_memory, check_ram, check_vram, check_battery, check_sleep,
+             check_disk, check_update, check_uptime]
     for step in steps:
         try:
             got = step(x)

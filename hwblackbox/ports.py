@@ -90,14 +90,17 @@ class PortWatch:
       127.0.0.1: Windows allows it, and the more specific one quietly gets the connections); a port in
       ports.expected held by another program; an "always" server not listening for down_after_min.
     - Records: "ports" once (everything listening), then "port" for each change and each problem starting or ending.
-    - state\\ports.json has the table and the problems after every scan, for the dashboard."""
+    - state\\ports.json has the table and the problems, for the dashboard: written when they change (save)."""
 
     OPEN_AFTER = 2
     CLOSE_AFTER = 2
+    SAVE_EVERY = 300
 
     def __init__(self, jrnl, save_path=None):
         self.jrnl = jrnl
         self.save_path = save_path
+        self.checked = None              # when the last scan ended (time.time())
+        self.saved, self.saved_at = None, 0.0
         self.table = {}                  # (ip, port) -> entry
         self.scans = 0
         self.listed = False              # the "ports" record written
@@ -211,10 +214,17 @@ class PortWatch:
         return sum(1 for e in self.table.values() if e["open"])
 
     def save(self):
-        write_json(self.save_path, {
-            "ts": now_iso(), "scans": self.scans, "error": self.error,
-            "listening": [{"addr": addr_text(e["ip"], e["port"]), "ip": e["ip"], "port": e["port"], "pid": e["pid"],
-                           "exe": e["exe"], "app": e["app"], "cmd": e["cmd"], "clash": e["port"] in self.clashing,
-                           "seen_since": dt.datetime.fromtimestamp(e["since"]).isoformat(timespec="seconds")}
-                          for e in self.sorted_open()],
-            "problems": [self.problems[k] for k in sorted(self.problems)]})
+        """state\\ports.json when the table or its problems changed, else every SAVE_EVERY seconds (until 1.2.0 after
+        every scan, 15 s apart: a twelfth of what the service wrote to the disk, for a table that rarely changes). The
+        status says when the last scan was (ports_checked)."""
+        self.checked = time.time()
+        body = {"error": self.error,
+                "listening": [{"addr": addr_text(e["ip"], e["port"]), "ip": e["ip"], "port": e["port"], "pid": e["pid"],
+                               "exe": e["exe"], "app": e["app"], "cmd": e["cmd"], "clash": e["port"] in self.clashing,
+                               "seen_since": dt.datetime.fromtimestamp(e["since"]).isoformat(timespec="seconds")}
+                              for e in self.sorted_open()],
+                "problems": [self.problems[k] for k in sorted(self.problems)]}
+        if body == self.saved and self.checked - self.saved_at < self.SAVE_EVERY:
+            return
+        write_json(self.save_path, dict(body, ts=now_iso(), scans=self.scans))
+        self.saved, self.saved_at = body, self.checked
